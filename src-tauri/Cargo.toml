@@ -1,0 +1,64 @@
+[package]
+name = "xdocuments"
+version = "0.1.0"
+description = "60TB-scale PDF Document Manager for Windows"
+authors = ["you"]
+license = "MIT"
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-log = "2"
+tauri-plugin-sql = { version = "2", features = ["sqlite"] }
+tauri-plugin-fs = { version = "2" }
+tauri-plugin-dialog = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-opener = "2"
+
+# Database
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Hashing
+sha2 = "0.10"
+
+# File system
+walkdir = "2"
+notify = { version = "6", features = ["macos_kqueue"] }
+notify-debouncer-full = "0.3"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+
+# PDF text extraction (Phase 2+)
+# pdfium-render = "0.8"
+
+# Full-text search (Phase 2+)
+# tantivy = "0.22"
+
+# SMB (Phase 2+)
+# sambrs = "0.1"

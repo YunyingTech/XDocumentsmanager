@@ -1,0 +1,6 @@
+# Visual Studio Build Tools provides the MSVC linker.
+# No special config needed — default toolchain is MSVC.
+
+[build]
+# Reduce compile times during development
+# jobs = 4
