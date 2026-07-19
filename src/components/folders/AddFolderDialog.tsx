@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { X, HardDrive, Network } from 'lucide-react';
+import { X, HardDrive, Network, FolderOpen } from 'lucide-react';
+import { open } from '@tauri-apps/plugin-dialog';
 import { addFolder } from '../../lib/tauri';
 import type { FolderConfig } from '../../types';
 
@@ -97,16 +98,36 @@ export function AddFolderDialog({ onClose, onAdded }: AddFolderDialogProps) {
             <label className="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-1.5">
               {folderType === 'local' ? 'Folder Path' : 'SMB / UNC Path'}
             </label>
-            <input
-              type="text"
-              className="input"
-              placeholder={folderType === 'local'
-                ? 'C:\\Users\\Documents\\PDFs'
-                : '\\\\server\\share\\pdfs'
-              }
-              value={path}
-              onChange={(e) => setPath(e.target.value)}
-            />
+            <div className="flex gap-2">
+              <input
+                type="text"
+                className="input flex-1"
+                placeholder={folderType === 'local'
+                  ? 'C:\\Users\\Documents\\PDFs'
+                  : '\\\\server\\share\\pdfs'
+                }
+                value={path}
+                onChange={(e) => setPath(e.target.value)}
+              />
+              {folderType === 'local' && (
+                <button
+                  type="button"
+                  className="btn-secondary flex items-center gap-1.5"
+                  onClick={async () => {
+                    const selected = await open({
+                      directory: true,
+                      title: 'Select Folder',
+                    });
+                    if (selected && typeof selected === 'string') {
+                      setPath(selected);
+                    }
+                  }}
+                >
+                  <FolderOpen size={16} />
+                  Browse
+                </button>
+              )}
+            </div>
             <p className="text-xs text-surface-400 mt-1">
               {folderType === 'local'
                 ? 'Enter an absolute path to a local folder.'

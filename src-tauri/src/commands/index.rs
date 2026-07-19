@@ -1,4 +1,4 @@
-use tauri::State;
+use tauri::{State, AppHandle};
 use std::path::PathBuf;
 use crate::db::Database;
 use crate::models::IndexJob;
@@ -6,6 +6,7 @@ use crate::indexer::pipeline::{self, PipelineConfig};
 
 #[tauri::command]
 pub async fn start_indexing(
+    app_handle: AppHandle,
     folder_id: Option<i64>,
     db: State<'_, Database>,
 ) -> Result<i64, String> {
@@ -39,11 +40,10 @@ pub async fn start_indexing(
         conn.last_insert_rowid()
     };
 
-    // Spawn the actual indexing work on a background thread
+    // Spawn the actual indexing work in the background — return job_id immediately
     let root_path = PathBuf::from(&folder_path);
     let db_path = db.path().clone();
 
-    // Run indexing synchronously in a blocking thread
     let config = PipelineConfig {
         root_path,
         folder_id,
@@ -51,44 +51,65 @@ pub async fn start_indexing(
         max_file_size_bytes: 500 * 1024 * 1024, // 500MB
     };
 
-    let result = tokio::task::spawn_blocking(move || {
-        // Open a fresh connection for the indexing thread (WAL mode allows concurrent access)
-        let conn = rusqlite::Connection::open(&db_path)
-            .map_err(|e| format!("Failed to open DB for indexing: {}", e))?;
-        // Enable WAL on this connection too
-        conn.execute_batch("PRAGMA journal_mode = WAL;").map_err(|e| e.to_string())?;
-        pipeline::run_full_index(config, &conn)
-    }).await.map_err(|e| format!("Indexing task failed: {}", e))?;
+    // Clone db_path for use after the spawn_blocking closure
+    let db_path2 = db_path.clone();
 
-    // Update job status based on result
-    {
-        let conn = db.get_connection();
+    // Use tokio::spawn so we can return immediately.
+    // The indexing work uses its own DB connection and emits progress via app_handle.
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            let conn = rusqlite::Connection::open(&db_path)
+                .map_err(|e| format!("Failed to open DB for indexing: {}", e))?;
+            conn.execute_batch("PRAGMA journal_mode = WAL;").map_err(|e| e.to_string())?;
+            pipeline::run_full_index(config, &conn, &app_handle, job_id)
+        }).await;
+
+        // Update job status in DB based on result
+        let conn = match rusqlite::Connection::open(&db_path2) {
+            Ok(c) => {
+                let _ = c.execute_batch("PRAGMA journal_mode = WAL;");
+                c
+            }
+            Err(e) => {
+                log::error!("Failed to open DB for final status update: {}", e);
+                return;
+            }
+        };
+
         match result {
-            Ok(_) => {
-                conn.execute(
+            Ok(Ok(_)) => {
+                let _ = conn.execute(
                     "UPDATE index_jobs SET status = 'completed', completed_at = datetime('now') WHERE id = ?1",
                     [job_id],
-                ).map_err(|e| e.to_string())?;
-
-                conn.execute(
+                );
+                let _ = conn.execute(
                     "UPDATE watched_folders SET last_scan_status = 'completed', last_scan_at = datetime('now'), updated_at = datetime('now') WHERE id = ?1",
                     [folder_id],
-                ).map_err(|e| e.to_string())?;
+                );
+                // (final completed event already emitted by pipeline with real counts)
             }
-            Err(ref e) => {
-                conn.execute(
+            Ok(Err(ref e)) => {
+                let _ = conn.execute(
                     "UPDATE index_jobs SET status = 'error', error_message = ?1, completed_at = datetime('now') WHERE id = ?2",
                     rusqlite::params![e, job_id],
-                ).map_err(|e| e.to_string())?;
-
-                conn.execute(
+                );
+                let _ = conn.execute(
                     "UPDATE watched_folders SET last_scan_status = 'error', updated_at = datetime('now') WHERE id = ?1",
                     [folder_id],
-                ).map_err(|e| e.to_string())?;
-                return Err(e.clone());
+                );
+            }
+            Err(e) => {
+                let _ = conn.execute(
+                    "UPDATE index_jobs SET status = 'error', error_message = ?1, completed_at = datetime('now') WHERE id = ?2",
+                    rusqlite::params![e.to_string(), job_id],
+                );
+                let _ = conn.execute(
+                    "UPDATE watched_folders SET last_scan_status = 'error', updated_at = datetime('now') WHERE id = ?1",
+                    [folder_id],
+                );
             }
         }
-    }
+    });
 
     Ok(job_id)
 }

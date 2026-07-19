@@ -122,3 +122,25 @@ export interface AppSettings {
   ocr_enabled: boolean;
   ocr_languages: string;
 }
+
+// ── OCR (MinerU API) ──
+
+export interface MinerUHealthInfo {
+  protocol_version: string;
+  processing_window_size: number;
+  max_concurrent_requests: number;
+  connected: boolean;
+  api_url: string;
+}
+
+export interface SubmitTaskResponse {
+  task_id: string;
+}
+
+export interface OcrTaskStatus {
+  task_id: string;
+  status: string;
+  queued_ahead?: number;
+  progress?: number;
+  error_message?: string;
+}

@@ -37,5 +37,18 @@ export const useFolderStore = create<FolderStore>((set) => ({
     }
   },
 
-  setIndexProgress: (progress) => set({ indexProgress: progress }),
+  setIndexProgress: (progress) => {
+    set({ indexProgress: progress });
+    // Auto-reload folders when indexing completes or errors
+    if (progress && (progress.status === 'completed' || progress.status === 'error')) {
+      // Delay slightly so the user sees the "Done" state first
+      setTimeout(() => {
+        useFolderStore.getState().loadFolders();
+        // Clear progress after reload so the left side shows fresh persistent counts
+        setTimeout(() => {
+          set({ indexProgress: null });
+        }, 500);
+      }, 2000);
+    }
+  },
 }));

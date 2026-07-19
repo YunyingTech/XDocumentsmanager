@@ -14,14 +14,17 @@ pub fn run_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error
     conn.execute_batch(CREATE_INDEX_JOBS)?;
     conn.execute_batch(CREATE_SETTINGS)?;
     conn.execute_batch(CREATE_SEARCH_HISTORY)?;
-    conn.execute_batch(CREATE_TAGS)?;
-    conn.execute_batch(CREATE_FILE_TAGS)?;
+    conn.execute_batch(CREATE_INDEXED_FILES)?;
 
     // Create FTS5 virtual table for full-text search
     conn.execute_batch(CREATE_FILES_FTS)?;
 
     // Insert default settings
     conn.execute_batch(INSERT_DEFAULT_SETTINGS)?;
+
+    // Clean up unused tables from previous versions
+    conn.execute_batch("DROP TABLE IF EXISTS file_tags;")?;
+    conn.execute_batch("DROP TABLE IF EXISTS tags;")?;
 
     Ok(())
 }
@@ -110,20 +113,17 @@ CREATE TABLE IF NOT EXISTS search_history (
 );
 "#;
 
-const CREATE_TAGS: &str = r#"
-CREATE TABLE IF NOT EXISTS tags (
+const CREATE_INDEXED_FILES: &str = r#"
+CREATE TABLE IF NOT EXISTS indexed_files (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    name       TEXT NOT NULL UNIQUE,
-    color      TEXT DEFAULT '#6366f1',
+    path       TEXT NOT NULL UNIQUE,
+    file_size  INTEGER NOT NULL,
+    mtime      TEXT NOT NULL,
+    md5        TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'pending',
+    ocr_time   TEXT,
+    index_time TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-"#;
-
-const CREATE_FILE_TAGS: &str = r#"
-CREATE TABLE IF NOT EXISTS file_tags (
-    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-    tag_id  INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
-    PRIMARY KEY (file_id, tag_id)
 );
 "#;
 
@@ -148,7 +148,9 @@ INSERT OR IGNORE INTO settings (key, value) VALUES
     ('theme', 'system'),
     ('default_view', 'table'),
     ('ocr_enabled', 'false'),
-    ('ocr_languages', 'eng');
+    ('ocr_languages', 'eng'),
+    ('ocr_api_url', 'http://127.0.0.1:8000'),
+    ('ocr_output_dir', '');
 "#;
 
 // Indexes (run after table creation)
@@ -161,6 +163,9 @@ pub fn create_indexes(conn: &Connection) -> Result<(), Box<dyn std::error::Error
         CREATE INDEX IF NOT EXISTS idx_files_size            ON files(file_size_bytes);
         CREATE INDEX IF NOT EXISTS idx_files_content_hash    ON files(content_hash);
         CREATE INDEX IF NOT EXISTS idx_files_folder_status   ON files(folder_id, index_status);
+        CREATE INDEX IF NOT EXISTS idx_indexed_files_status      ON indexed_files(status);
+        CREATE INDEX IF NOT EXISTS idx_indexed_files_index_time  ON indexed_files(index_time);
+        CREATE INDEX IF NOT EXISTS idx_indexed_files_md5         ON indexed_files(md5);
     "#)?;
     Ok(())
 }

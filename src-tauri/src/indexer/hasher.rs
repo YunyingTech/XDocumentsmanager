@@ -1,4 +1,5 @@
 use sha2::{Sha256, Digest};
+use md5::Md5;
 use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
@@ -8,6 +9,25 @@ use std::path::Path;
 pub fn hash_file(path: &Path) -> io::Result<String> {
     let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+
+    loop {
+        let bytes_read = file.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+
+    let hash = hasher.finalize();
+    Ok(format!("{:x}", hash))
+}
+
+/// Compute MD5 hash of a file's contents.
+/// Reads in 8KB chunks to bound memory usage.
+pub fn hash_file_md5(path: &Path) -> io::Result<String> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Md5::new();
     let mut buffer = [0u8; 8192];
 
     loop {

@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 
-type ViewType = 'files' | 'search' | 'folders' | 'settings';
+type ViewType = 'files' | 'search' | 'folders' | 'settings' | 'ocr';
 
 interface UIStore {
   activeView: ViewType;

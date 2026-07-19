@@ -110,6 +110,18 @@ pub struct SortConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexedFile {
+    pub id: i64,
+    pub path: String,
+    pub file_size: i64,
+    pub mtime: String,
+    pub md5: String,
+    pub status: String,
+    pub ocr_time: Option<String>,
+    pub index_time: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaginatedResult<T> {
     pub items: Vec<T>,
     pub total: i64,

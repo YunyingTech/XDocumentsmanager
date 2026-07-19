@@ -87,6 +87,40 @@ export async function readFileBytesRange(
   return invoke('read_file_bytes_range', { path, start, end });
 }
 
+// ── OCR ──
+
+export async function checkOcrHealth(): Promise<import('../types').MinerUHealthInfo> {
+  return invoke('check_ocr_health');
+}
+
+export async function submitOcrTask(fileId: number, returnMd?: boolean): Promise<import('../types').SubmitTaskResponse> {
+  return invoke('submit_ocr_task', { fileId, returnMd });
+}
+
+export async function queryOcrTask(taskId: string): Promise<import('../types').OcrTaskStatus> {
+  return invoke('query_ocr_task', { taskId });
+}
+
+export async function getOcrResult(taskId: string, fileId: number): Promise<string> {
+  return invoke('get_ocr_result', { taskId, fileId });
+}
+
+export async function syncOcrParse(
+  fileId: number,
+  returnMd?: boolean,
+  responseFormatZip?: boolean
+): Promise<string> {
+  return invoke('sync_ocr_parse', { fileId, returnMd, responseFormatZip });
+}
+
+export async function getOcrOutputDir(): Promise<string> {
+  return invoke('get_ocr_output_dir');
+}
+
+export async function listOcrCandidates(folderId?: number): Promise<import('../types').FileInfo[]> {
+  return invoke('list_ocr_candidates', { folderId });
+}
+
 // ── Settings ──
 
 export async function getSetting(key: string): Promise<string | null> {
@@ -95,4 +129,12 @@ export async function getSetting(key: string): Promise<string | null> {
 
 export async function setSetting(key: string, value: string): Promise<void> {
   return invoke('set_setting', { key, value });
+}
+
+export async function getDbPath(): Promise<string> {
+  return invoke('get_db_path');
+}
+
+export async function vacuumDatabase(): Promise<string> {
+  return invoke('vacuum_database');
 }

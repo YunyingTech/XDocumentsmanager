@@ -30,6 +30,21 @@ impl Database {
     }
 }
 
+// Helper to map rows to IndexedFile
+pub fn row_to_indexed_file(row: &rusqlite::Row) -> rusqlite::Result<super::models::IndexedFile> {
+    use super::models::IndexedFile;
+    Ok(IndexedFile {
+        id: row.get(0)?,
+        path: row.get(1)?,
+        file_size: row.get(2)?,
+        mtime: row.get(3)?,
+        md5: row.get(4)?,
+        status: row.get(5)?,
+        ocr_time: row.get(6)?,
+        index_time: row.get(7)?,
+    })
+}
+
 // Helper to map rows to FileInfo
 pub fn row_to_file_info(row: &rusqlite::Row) -> rusqlite::Result<super::models::FileInfo> {
     use super::models::FileInfo;

@@ -70,9 +70,19 @@ pub fn run() {
             // Viewer
             commands::viewer::read_file_bytes,
             commands::viewer::read_file_bytes_range,
+            // OCR
+            commands::ocr::check_ocr_health,
+            commands::ocr::submit_ocr_task,
+            commands::ocr::query_ocr_task,
+            commands::ocr::get_ocr_result,
+            commands::ocr::sync_ocr_parse,
+            commands::ocr::get_ocr_output_dir,
+            commands::ocr::list_ocr_candidates,
             // Settings
             commands::settings::get_setting,
             commands::settings::set_setting,
+            commands::settings::get_db_path,
+            commands::settings::vacuum_database,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -33,6 +33,7 @@ serde_json = "1"
 
 # Hashing
 sha2 = "0.10"
+md-5 = "0.10"
 
 # File system
 walkdir = "2"
@@ -41,6 +42,9 @@ notify-debouncer-full = "0.3"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+
+# HTTP client for OCR API (MinerU)
+reqwest = { version = "0.12", features = ["json", "multipart"] }
 
 # Logging
 log = "0.4"

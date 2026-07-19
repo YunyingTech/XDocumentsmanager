@@ -1,6 +1,6 @@
 import {
   FolderOpen, Search, Settings, Plus, ChevronLeft,
-  HardDrive, Network, Circle
+  HardDrive, Network, Circle, ScanText
 } from 'lucide-react';
 import { useUIStore } from '../../stores/uiStore';
 import { useFolderStore } from '../../stores/folderStore';
@@ -50,6 +50,13 @@ export function Sidebar() {
         >
           <Search size={18} />
           Search
+        </button>
+        <button
+          onClick={() => setView('ocr')}
+          className={`sidebar-item ${activeView === 'ocr' ? 'active' : ''}`}
+        >
+          <ScanText size={18} />
+          OCR
         </button>
         <button
           onClick={() => setView('folders')}
