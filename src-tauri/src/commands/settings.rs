@@ -1,8 +1,13 @@
 use tauri::State;
 use crate::db::Database;
+use crate::models::{OpenAiConfig, OpenAiConnectionInfo, SearchBackendStatus};
+use crate::search::SearchEngine;
 
 #[tauri::command]
 pub fn get_setting(key: String, db: State<'_, Database>) -> Result<Option<String>, String> {
+    if key == "openai_api_key_protected" {
+        return Ok(None);
+    }
     let conn = db.get_connection();
     let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?1")
         .map_err(|e| e.to_string())?;
@@ -14,6 +19,32 @@ pub fn get_setting(key: String, db: State<'_, Database>) -> Result<Option<String
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.to_string()),
     }
+}
+
+#[tauri::command]
+pub fn get_openai_config(db: State<'_, Database>) -> Result<OpenAiConfig, String> {
+    Ok(crate::search::query::load_config(&db))
+}
+
+#[tauri::command]
+pub fn set_openai_config(
+    endpoint: String,
+    model: String,
+    api_key: Option<String>,
+    smart_search_enabled: bool,
+    db: State<'_, Database>,
+) -> Result<OpenAiConfig, String> {
+    crate::search::query::save_config(&db, endpoint, model, api_key, smart_search_enabled)
+}
+
+#[tauri::command]
+pub async fn test_openai_connection(db: State<'_, Database>) -> Result<OpenAiConnectionInfo, String> {
+    crate::search::query::test_connection(&db).await
+}
+
+#[tauri::command]
+pub fn get_search_backend_status(engine: State<'_, SearchEngine>) -> Result<SearchBackendStatus, String> {
+    Ok(engine.backend_status())
 }
 
 #[tauri::command]

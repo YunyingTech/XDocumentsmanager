@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
-  FileInfo, FolderInfo, FolderConfig, IndexJob, IndexProgress,
+  FileInfo, FolderInfo, FolderConfig, IndexJob,
   SearchResult, SearchFilters, PaginatedResult, SortConfig
 } from '../types';
 
@@ -73,6 +73,10 @@ export async function search(
   return invoke('search', { query, filters, limit });
 }
 
+export async function showInFolder(path: string): Promise<void> {
+  return invoke('show_in_folder', { path });
+}
+
 // ── Viewer ──
 
 export async function readFileBytes(path: string): Promise<number[]> {
@@ -117,8 +121,12 @@ export async function getOcrOutputDir(): Promise<string> {
   return invoke('get_ocr_output_dir');
 }
 
-export async function listOcrCandidates(folderId?: number): Promise<import('../types').FileInfo[]> {
-  return invoke('list_ocr_candidates', { folderId });
+export async function listOcrCandidates(
+  folderId?: number,
+  page: number = 0,
+  pageSize: number = 50
+): Promise<import('../types').PaginatedResult<import('../types').FileInfo>> {
+  return invoke('list_ocr_candidates', { folderId, page, pageSize });
 }
 
 // ── Settings ──
@@ -137,4 +145,25 @@ export async function getDbPath(): Promise<string> {
 
 export async function vacuumDatabase(): Promise<string> {
   return invoke('vacuum_database');
+}
+
+export async function getOpenAiConfig(): Promise<import('../types').OpenAiConfig> {
+  return invoke('get_openai_config');
+}
+
+export async function setOpenAiConfig(
+  endpoint: string,
+  model: string,
+  apiKey: string | undefined,
+  smartSearchEnabled: boolean,
+): Promise<import('../types').OpenAiConfig> {
+  return invoke('set_openai_config', { endpoint, model, apiKey, smartSearchEnabled });
+}
+
+export async function testOpenAiConnection(): Promise<import('../types').OpenAiConnectionInfo> {
+  return invoke('test_openai_connection');
+}
+
+export async function getSearchBackendStatus(): Promise<import('../types').SearchBackendStatus> {
+  return invoke('get_search_backend_status');
 }

@@ -9,7 +9,9 @@ import {
   getSetting,
   setSetting,
 } from '../lib/tauri';
-import type { FileInfo, MinerUHealthInfo, OcrTaskStatus } from '../types';
+import type { FileInfo, MinerUHealthInfo, OcrTaskStatus, PaginatedResult } from '../types';
+import { translate } from '../lib/i18n';
+import { useUIStore } from './uiStore';
 
 // ── Types ──
 
@@ -34,6 +36,12 @@ interface OcrStore {
   candidates: FileInfo[];
   loadingCandidates: boolean;
 
+  // Pagination
+  page: number;
+  pageSize: number;
+  totalCandidates: number;
+  totalPages: number;
+
   // Selection
   selectedFileIds: Set<number>;
 
@@ -49,6 +57,8 @@ interface OcrStore {
   // Actions
   checkHealth: () => Promise<void>;
   loadCandidates: (folderId?: number) => Promise<void>;
+  setPage: (page: number) => void;
+  setPageSize: (pageSize: number) => void;
   toggleFile: (fileId: number) => void;
   selectAll: () => void;
   deselectAll: () => void;
@@ -69,6 +79,10 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
   healthChecking: false,
   candidates: [],
   loadingCandidates: false,
+  page: 0,
+  pageSize: 50,
+  totalCandidates: 0,
+  totalPages: 0,
   selectedFileIds: new Set<number>(),
   tasks: [],
   polling: false,
@@ -100,12 +114,22 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
   loadCandidates: async (folderId?: number) => {
     set({ loadingCandidates: true });
     try {
-      const files = await listOcrCandidates(folderId);
-      set({ candidates: files, loadingCandidates: false });
+      const { page, pageSize } = get();
+      const result: PaginatedResult<FileInfo> = await listOcrCandidates(folderId, page, pageSize);
+      set({
+        candidates: result.items,
+        totalCandidates: result.total,
+        totalPages: result.total_pages,
+        loadingCandidates: false,
+      });
     } catch {
       set({ loadingCandidates: false });
     }
   },
+
+  // ── Pagination ──
+  setPage: (page: number) => set({ page }),
+  setPageSize: (pageSize: number) => set({ pageSize, page: 0 }),
 
   // ── Selection ──
   toggleFile: (fileId: number) => {
@@ -255,7 +279,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
             set((s) => ({
               tasks: s.tasks.map((t) =>
                 t.taskId === task.taskId
-                  ? { ...t, status: 'failed' as const, error: `Result download failed: ${e}` }
+                  ? { ...t, status: 'failed' as const, error: translate(useUIStore.getState().language, 'tasks.resultDownloadFailed', { error: String(e) }) }
                   : t
               ),
             }));
@@ -306,7 +330,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
       set((s) => ({
         tasks: s.tasks.map((t) =>
           t.taskId === taskId
-            ? { ...t, error: `Download failed: ${e}` }
+            ? { ...t, error: translate(useUIStore.getState().language, 'tasks.downloadFailed', { error: String(e) }) }
             : t
         ),
       }));

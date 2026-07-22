@@ -85,6 +85,27 @@ export interface SearchResult {
   score: number;
   snippet: string;
   folder_path: string;
+  absolute_path: string;
+}
+
+export interface OpenAiConfig {
+  endpoint: string;
+  model: string;
+  api_key_configured: boolean;
+  smart_search_enabled: boolean;
+}
+
+export interface OpenAiConnectionInfo {
+  connected: boolean;
+  message: string;
+}
+
+export interface SearchBackendStatus {
+  backend: 'elasticsearch' | 'tantivy-fallback';
+  connected: boolean;
+  endpoint: string | null;
+  version: string | null;
+  error: string | null;
 }
 
 export interface SearchFilters {

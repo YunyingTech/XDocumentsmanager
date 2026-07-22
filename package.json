@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "prepare:elasticsearch": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File src-tauri/scripts/fetch-elasticsearch.ps1",
+    "build:tauri": "npm run prepare:elasticsearch && npm run build",
     "lint": "oxlint",
     "preview": "vite preview",
     "tauri": "tauri",

@@ -2,10 +2,12 @@ import { useFolderStore } from '../../stores/folderStore';
 import { useFileStore } from '../../stores/fileStore';
 import { useSearchStore } from '../../stores/searchStore';
 import { useUIStore } from '../../stores/uiStore';
-import { Search, RefreshCw, LayoutGrid, List, FolderOpen } from 'lucide-react';
+import { Search, RefreshCw, FolderOpen } from 'lucide-react';
 import { startIndexing } from '../../lib/tauri';
+import { useI18n } from '../../lib/i18n';
 
 export function Toolbar() {
+  const { locale, t } = useI18n();
   const selectedFolderId = useFolderStore((s) => s.selectedFolderId);
   const folders = useFolderStore((s) => s.folders);
   const sort = useFileStore((s) => s.sort);
@@ -13,10 +15,7 @@ export function Toolbar() {
   const loadFiles = useFileStore((s) => s.loadFiles);
   const selectFile = useFileStore((s) => s.selectFile);
   const setView = useUIStore((s) => s.setView);
-  const setQuery = useSearchStore((s) => s.setQuery);
   const toggleSearch = useSearchStore((s) => s.toggleOpen);
-  const doSearch = useSearchStore((s) => s.doSearch);
-  const defaultView = useUIStore((s) => s.theme);
 
   const selectedFolder = folders.find((f) => f.id === selectedFolderId);
 
@@ -43,11 +42,11 @@ export function Toolbar() {
       <div className="flex items-center gap-2 text-sm font-medium text-surface-700 dark:text-surface-300 min-w-0">
         <FolderOpen size={16} className="shrink-0 text-surface-400" />
         <span className="truncate">
-          {selectedFolder?.display_name || selectedFolder?.path?.split('\\').pop() || 'Files'}
+          {selectedFolder?.display_name || selectedFolder?.path?.split('\\').pop() || t('files.title')}
         </span>
         {selectedFolder && (
           <span className="text-surface-400 font-normal">
-            ({selectedFolder.total_files.toLocaleString()} PDFs)
+            {t('files.pdfCount', { count: selectedFolder.total_files.toLocaleString(locale) })}
           </span>
         )}
       </div>
@@ -59,27 +58,27 @@ export function Toolbar() {
         value={`${sort.field}:${sort.direction}`}
         onChange={(e) => {
           const [field, direction] = e.target.value.split(':') as [typeof sort.field, typeof sort.direction];
-          setSort({ field, direction });
+          void setSort({ field, direction }, selectedFolderId);
           selectFile(null);
         }}
         className="text-xs bg-surface-100 dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-lg px-2.5 py-1.5 text-surface-600 dark:text-surface-400"
       >
-        <option value="file_modified_at:desc">Date (newest)</option>
-        <option value="file_modified_at:asc">Date (oldest)</option>
-        <option value="file_name:asc">Name (A–Z)</option>
-        <option value="file_name:desc">Name (Z–A)</option>
-        <option value="file_size_bytes:desc">Size (largest)</option>
-        <option value="file_size_bytes:asc">Size (smallest)</option>
+        <option value="file_modified_at:desc">{t('files.sortNewest')}</option>
+        <option value="file_modified_at:asc">{t('files.sortOldest')}</option>
+        <option value="file_name:asc">{t('files.sortNameAsc')}</option>
+        <option value="file_name:desc">{t('files.sortNameDesc')}</option>
+        <option value="file_size_bytes:desc">{t('files.sortSizeDesc')}</option>
+        <option value="file_size_bytes:asc">{t('files.sortSizeAsc')}</option>
       </select>
 
       {/* Actions */}
-      <button onClick={handleRefresh} className="btn-ghost p-1.5 rounded-lg" title="Refresh">
+      <button onClick={handleRefresh} className="btn-ghost p-1.5 rounded-lg" title={t('common.refresh')} aria-label={t('common.refresh')}>
         <RefreshCw size={16} />
       </button>
-      <button onClick={handleReindex} className="btn-secondary text-xs py-1.5" title="Re-index folder">
-        Re-index
+      <button onClick={handleReindex} className="btn-secondary text-xs py-1.5" title={t('files.reindexFolder')}>
+        {t('files.reindex')}
       </button>
-      <button onClick={handleSearch} className="btn-ghost p-1.5 rounded-lg" title="Search">
+      <button onClick={handleSearch} className="btn-ghost p-1.5 rounded-lg" title={t('common.search')} aria-label={t('common.search')}>
         <Search size={16} />
       </button>
     </div>

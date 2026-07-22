@@ -16,8 +16,8 @@ pub fn run_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error
     conn.execute_batch(CREATE_SEARCH_HISTORY)?;
     conn.execute_batch(CREATE_INDEXED_FILES)?;
 
-    // Create FTS5 virtual table for full-text search
-    conn.execute_batch(CREATE_FILES_FTS)?;
+    // Search is persisted by the embedded Tantivy engine.
+    conn.execute_batch("DROP TABLE IF EXISTS files_fts;")?;
 
     // Insert default settings
     conn.execute_batch(INSERT_DEFAULT_SETTINGS)?;
@@ -127,18 +127,6 @@ CREATE TABLE IF NOT EXISTS indexed_files (
 );
 "#;
 
-const CREATE_FILES_FTS: &str = r#"
-CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
-    file_name,
-    text_preview,
-    pdf_title,
-    pdf_author,
-    pdf_keywords,
-    content='files',
-    content_rowid='id'
-);
-"#;
-
 const INSERT_DEFAULT_SETTINGS: &str = r#"
 INSERT OR IGNORE INTO settings (key, value) VALUES
     ('index_location', ''),
@@ -150,7 +138,11 @@ INSERT OR IGNORE INTO settings (key, value) VALUES
     ('ocr_enabled', 'false'),
     ('ocr_languages', 'eng'),
     ('ocr_api_url', 'http://127.0.0.1:8000'),
-    ('ocr_output_dir', '');
+    ('ocr_output_dir', ''),
+    ('openai_endpoint', 'https://api.openai.com/v1'),
+    ('openai_model', 'gpt-4.1-mini'),
+    ('openai_api_key_protected', ''),
+    ('smart_search_enabled', 'true');
 "#;
 
 // Indexes (run after table creation)

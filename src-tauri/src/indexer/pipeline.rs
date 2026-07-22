@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 use rusqlite::Connection;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use crate::indexer::walker;
 use crate::indexer::hasher;
 use crate::models::IndexProgress;
@@ -196,11 +196,11 @@ pub fn run_full_index(
         rusqlite::params![indexed as i64, config.folder_id],
     );
 
-    // Update FTS index
-    let _ = db.execute(
-        "INSERT INTO files_fts(files_fts) VALUES('rebuild')",
-        [],
-    );
+    if let Some(engine) = app_handle.try_state::<crate::search::SearchEngine>() {
+        if let Err(error) = engine.rebuild(db) {
+            log::error!("Failed to refresh the full-text search index: {}", error);
+        }
+    }
 
     // Emit final completed event with actual counts
     let _ = app_handle.emit("indexing:progress", IndexProgress {

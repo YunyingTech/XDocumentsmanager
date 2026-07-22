@@ -1,15 +1,24 @@
-import { useMemo, useCallback, useRef, useEffect } from 'react';
+import { useCallback, useRef, useEffect } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useFileStore } from '../../stores/fileStore';
 import { useFolderStore } from '../../stores/folderStore';
 import { formatFileSize, formatDateTime } from '../../lib/format';
-import { FileText, AlertCircle, Loader2, Eye } from 'lucide-react';
+import { FileText, AlertCircle, Loader2 } from 'lucide-react';
 import type { FileInfo } from '../../types';
 import { useUIStore } from '../../stores/uiStore';
+import { useI18n, type TranslationKey } from '../../lib/i18n';
 
 const ROW_HEIGHT = 40;
+const fileStatusKeys: Record<FileInfo['index_status'], TranslationKey> = {
+  indexed: 'files.indexed',
+  indexing: 'files.indexing',
+  error: 'common.error',
+  pending: 'files.pending',
+  skipped: 'files.skipped',
+};
 
 export function FileTable() {
+  const { locale, t } = useI18n();
   const files = useFileStore((s) => s.files);
   const total = useFileStore((s) => s.total);
   const sort = useFileStore((s) => s.sort);
@@ -24,6 +33,9 @@ export function FileTable() {
   const setView = useUIStore((s) => s.setView);
 
   const parentRef = useRef<HTMLDivElement>(null);
+  const isManualPageChange = useRef(false);
+
+  const totalPages = Math.ceil(total / pageSize);
 
   const rowVirtualizer = useVirtualizer({
     count: total,
@@ -32,8 +44,13 @@ export function FileTable() {
     overscan: 10,
   });
 
+  useEffect(() => {
+    parentRef.current?.scrollTo({ top: 0 });
+  }, [sort.field, sort.direction]);
+
   // Load page when virtual scroll moves to a new page range
   useEffect(() => {
+    if (isManualPageChange.current) return;
     const items = rowVirtualizer.getVirtualItems();
     if (items.length === 0) return;
     const firstIdx = items[0].index;
@@ -46,13 +63,26 @@ export function FileTable() {
     }
   }, [rowVirtualizer.getVirtualItems(), page, pageSize, selectedFolderId]);
 
-  const handleSort = (field: string) => {
-    if (sort.field === field) {
-      setSort({ field: field as typeof sort.field, direction: sort.direction === 'asc' ? 'desc' : 'asc' });
-    } else {
-      setSort({ field: field as typeof sort.field, direction: 'asc' });
+  const handlePageJump = useCallback((newPage: number) => {
+    if (newPage < 0 || newPage >= totalPages) return;
+    isManualPageChange.current = true;
+    setPage(newPage);
+    if (selectedFolderId !== null) {
+      loadFiles(selectedFolderId);
     }
+    rowVirtualizer.scrollToIndex(newPage * pageSize, { align: 'start' });
+    requestAnimationFrame(() => {
+      isManualPageChange.current = false;
+    });
+  }, [totalPages, pageSize, setPage, selectedFolderId, loadFiles, rowVirtualizer]);
+
+  const handleSort = (field: string) => {
+    const nextSort = sort.field === field
+      ? { field: field as typeof sort.field, direction: sort.direction === 'asc' ? 'desc' as const : 'asc' as const }
+      : { field: field as typeof sort.field, direction: 'asc' as const };
+    void setSort(nextSort, selectedFolderId);
     selectFile(null);
+    rowVirtualizer.scrollToIndex(0, { align: 'start' });
   };
 
   const SortIcon = ({ field }: { field: string }) => {
@@ -71,33 +101,34 @@ export function FileTable() {
   };
 
   return (
-    <div ref={parentRef} className="flex-1 overflow-auto">
-      {/* Header */}
+    <div className="flex-1 flex flex-col min-h-0">
+      <div ref={parentRef} className="flex-1 overflow-auto">
+        {/* Header */}
       <div className="sticky top-0 z-10 flex items-center h-9 bg-surface-100 dark:bg-surface-900 border-b border-surface-200 dark:border-surface-800 text-xs font-semibold text-surface-500 uppercase tracking-wider">
         <div className="w-8 shrink-0" />
         <div
           className="flex-1 min-w-0 px-3 cursor-pointer hover:text-surface-700 dark:hover:text-surface-300"
           onClick={() => handleSort('file_name')}
         >
-          Name <SortIcon field="file_name" />
+          {t('files.name')} <SortIcon field="file_name" />
         </div>
         <div
           className="w-28 shrink-0 px-2 cursor-pointer hover:text-surface-700 dark:hover:text-surface-300 hidden md:block"
           onClick={() => handleSort('file_size_bytes')}
         >
-          Size <SortIcon field="file_size_bytes" />
+          {t('files.size')} <SortIcon field="file_size_bytes" />
         </div>
         <div
           className="w-44 shrink-0 px-2 cursor-pointer hover:text-surface-700 dark:hover:text-surface-300 hidden lg:block"
           onClick={() => handleSort('file_modified_at')}
         >
-          Modified <SortIcon field="file_modified_at" />
+          {t('files.modified')} <SortIcon field="file_modified_at" />
         </div>
         <div className="w-20 shrink-0 px-2 hidden xl:block">
-          Pages
+          {t('files.pages')}
         </div>
         <div className="w-24 shrink-0 px-2">
-          Status
+          {t('files.status')}
         </div>
       </div>
 
@@ -153,7 +184,7 @@ export function FileTable() {
                 {formatFileSize(file.file_size_bytes)}
               </div>
               <div className="w-44 shrink-0 px-2 text-sm text-surface-500 hidden lg:block">
-                {formatDateTime(file.file_modified_at)}
+                {formatDateTime(file.file_modified_at, locale)}
               </div>
               <div className="w-20 shrink-0 px-2 text-sm text-surface-500 hidden xl:block tabular-nums">
                 {file.page_count ?? '—'}
@@ -165,13 +196,40 @@ export function FileTable() {
                     file.index_status === 'error' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' :
                     'bg-surface-200 text-surface-500 dark:bg-surface-800'}
                 `}>
-                  {file.index_status}
+                  {t(fileStatusKeys[file.index_status])}
                 </span>
               </div>
             </div>
           );
         })}
+        </div>
       </div>
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between px-4 py-2 bg-surface-100 dark:bg-surface-900 border-t border-surface-200 dark:border-surface-800 shrink-0">
+          <span className="text-xs text-surface-500">
+            {t('files.total', { count: total.toLocaleString(locale) })}
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => handlePageJump(page - 1)}
+              disabled={page <= 0}
+              className="btn-ghost px-2 py-1 rounded text-xs disabled:opacity-30"
+            >
+              {t('common.previous')}
+            </button>
+            <span className="text-xs text-surface-600 dark:text-surface-400 tabular-nums">
+              {t('files.pageOf', { page: page + 1, total: totalPages })}
+            </span>
+            <button
+              onClick={() => handlePageJump(page + 1)}
+              disabled={page >= totalPages - 1}
+              className="btn-ghost px-2 py-1 rounded text-xs disabled:opacity-30"
+            >
+              {t('common.next')}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

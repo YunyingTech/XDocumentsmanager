@@ -11,11 +11,13 @@ interface FileStore {
   isLoading: boolean;
   selectedFileId: number | null;
 
-  setSort: (sort: SortConfig) => void;
+  setSort: (sort: SortConfig, folderId: number | null) => Promise<void>;
   selectFile: (id: number | null) => void;
   loadFiles: (folderId: number) => Promise<void>;
   setPage: (page: number) => void;
 }
+
+let latestLoadRequest = 0;
 
 export const useFileStore = create<FileStore>((set, get) => ({
   files: [],
@@ -26,19 +28,27 @@ export const useFileStore = create<FileStore>((set, get) => ({
   isLoading: false,
   selectedFileId: null,
 
-  setSort: (sort: SortConfig) => set({ sort }),
+  setSort: async (sort: SortConfig, folderId: number | null) => {
+    set({ sort, page: 0, selectedFileId: null });
+    if (folderId !== null) {
+      await get().loadFiles(folderId);
+    }
+  },
 
   selectFile: (id) => set({ selectedFileId: id }),
 
   loadFiles: async (folderId: number) => {
+    const requestId = ++latestLoadRequest;
     set({ isLoading: true });
     try {
       const { sort, page, pageSize } = get();
       const result: PaginatedResult<FileInfo> = await listFiles(folderId, sort, page, pageSize);
-      set({ files: result.items, total: result.total, isLoading: false });
+      if (requestId === latestLoadRequest) {
+        set({ files: result.items, total: result.total, isLoading: false });
+      }
     } catch (err) {
       console.error('Failed to load files:', err);
-      set({ isLoading: false });
+      if (requestId === latestLoadRequest) set({ isLoading: false });
     }
   },
 

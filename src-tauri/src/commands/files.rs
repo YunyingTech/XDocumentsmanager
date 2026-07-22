@@ -1,6 +1,7 @@
 use tauri::State;
 use crate::db::Database;
 use crate::models::{FileInfo, SortConfig, PaginatedResult};
+use crate::search::SearchEngine;
 
 #[tauri::command]
 pub fn list_files(
@@ -11,18 +12,10 @@ pub fn list_files(
     db: State<'_, Database>,
 ) -> Result<PaginatedResult<FileInfo>, String> {
     let conn = db.get_connection();
+    let page = page.max(0);
+    let page_size = page_size.clamp(1, 500);
 
-    // Validate sort field to prevent SQL injection
-    let sort_field = match sort.field.as_str() {
-        "file_name" => "file_name",
-        "file_size_bytes" => "file_size_bytes",
-        "file_modified_at" => "file_modified_at",
-        "page_count" => "page_count",
-        "index_status" => "index_status",
-        _ => "file_modified_at",
-    };
-
-    let sort_dir = if sort.direction == "asc" { "ASC" } else { "DESC" };
+    let (sort_field, sort_dir) = sort_clause(&sort);
 
     // Get total count
     let total: i64 = conn.query_row(
@@ -41,9 +34,9 @@ pub fn list_files(
                 indexed_at, index_status, index_error, text_preview, ocr_applied,
                 pdf_title, pdf_author, pdf_subject, pdf_keywords
          FROM files WHERE folder_id = ?1
-         ORDER BY {} {}
+         ORDER BY {} {}, id {}
          LIMIT ?2 OFFSET ?3",
-        sort_field, sort_dir
+        sort_field, sort_dir, sort_dir
     );
 
     let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
@@ -64,6 +57,33 @@ pub fn list_files(
     })
 }
 
+fn sort_clause(sort: &SortConfig) -> (&'static str, &'static str) {
+    let field = match sort.field.as_str() {
+        "file_name" => "file_name COLLATE NOCASE",
+        "file_size_bytes" => "file_size_bytes",
+        "file_modified_at" => "file_modified_at",
+        "page_count" => "page_count",
+        "index_status" => "index_status",
+        _ => "file_modified_at",
+    };
+    let direction = if sort.direction == "asc" { "ASC" } else { "DESC" };
+    (field, direction)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sort_clause;
+    use crate::models::SortConfig;
+
+    #[test]
+    fn validates_sort_sql_components() {
+        let name = SortConfig { field: "file_name".into(), direction: "asc".into() };
+        assert_eq!(sort_clause(&name), ("file_name COLLATE NOCASE", "ASC"));
+        let hostile = SortConfig { field: "id; DROP TABLE files".into(), direction: "ASC; DROP TABLE files".into() };
+        assert_eq!(sort_clause(&hostile), ("file_modified_at", "DESC"));
+    }
+}
+
 #[tauri::command]
 pub fn get_file(file_id: i64, db: State<'_, Database>) -> Result<FileInfo, String> {
     let conn = db.get_connection();
@@ -80,10 +100,11 @@ pub fn get_file(file_id: i64, db: State<'_, Database>) -> Result<FileInfo, Strin
 }
 
 #[tauri::command]
-pub fn delete_file_record(file_id: i64, db: State<'_, Database>) -> Result<(), String> {
+pub fn delete_file_record(file_id: i64, db: State<'_, Database>, engine: State<'_, SearchEngine>) -> Result<(), String> {
     let conn = db.get_connection();
     conn.execute("DELETE FROM files WHERE id = ?1", [file_id])
         .map_err(|e| e.to_string())?;
+    engine.delete_file(file_id)?;
     Ok(())
 }
 

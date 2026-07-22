@@ -6,20 +6,20 @@ export function formatFileSize(bytes: number): string {
   return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
-export function formatDate(dateStr: string | null): string {
+export function formatDate(dateStr: string | null, locale?: string): string {
   if (!dateStr) return '—';
   const date = new Date(dateStr);
-  return date.toLocaleDateString(undefined, {
+  return date.toLocaleDateString(locale, {
     year: 'numeric',
     month: 'short',
     day: 'numeric',
   });
 }
 
-export function formatDateTime(dateStr: string | null): string {
+export function formatDateTime(dateStr: string | null, locale?: string): string {
   if (!dateStr) return '—';
   const date = new Date(dateStr);
-  return date.toLocaleString(undefined, {
+  return date.toLocaleString(locale, {
     year: 'numeric',
     month: 'short',
     day: 'numeric',

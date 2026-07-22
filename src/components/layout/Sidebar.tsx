@@ -5,8 +5,10 @@ import {
 import { useUIStore } from '../../stores/uiStore';
 import { useFolderStore } from '../../stores/folderStore';
 import { useSearchStore } from '../../stores/searchStore';
+import { useI18n } from '../../lib/i18n';
 
 export function Sidebar() {
+  const { t, plural } = useI18n();
   const activeView = useUIStore((s) => s.activeView);
   const setView = useUIStore((s) => s.setView);
   const toggleSidebar = useUIStore((s) => s.toggleSidebar);
@@ -29,7 +31,8 @@ export function Sidebar() {
         <button
           onClick={toggleSidebar}
           className="ml-auto btn-ghost p-1.5 rounded-lg no-drag"
-          title="Collapse sidebar"
+          title={t('sidebar.collapse')}
+          aria-label={t('sidebar.collapse')}
         >
           <ChevronLeft size={16} />
         </button>
@@ -42,35 +45,35 @@ export function Sidebar() {
           className={`sidebar-item ${activeView === 'files' ? 'active' : ''}`}
         >
           <FolderOpen size={18} />
-          Files
+          {t('nav.files')}
         </button>
         <button
           onClick={() => setView('search')}
           className={`sidebar-item ${activeView === 'search' ? 'active' : ''}`}
         >
           <Search size={18} />
-          Search
+          {t('nav.search')}
         </button>
         <button
           onClick={() => setView('ocr')}
           className={`sidebar-item ${activeView === 'ocr' ? 'active' : ''}`}
         >
           <ScanText size={18} />
-          OCR
+          {t('nav.ocr')}
         </button>
         <button
           onClick={() => setView('folders')}
           className={`sidebar-item ${activeView === 'folders' ? 'active' : ''}`}
         >
           <HardDrive size={18} />
-          Folders
+          {t('nav.folders')}
         </button>
         <button
           onClick={() => setView('settings')}
           className={`sidebar-item ${activeView === 'settings' ? 'active' : ''}`}
         >
           <Settings size={18} />
-          Settings
+          {t('nav.settings')}
         </button>
       </nav>
 
@@ -80,12 +83,13 @@ export function Sidebar() {
       {/* Folders List */}
       <div className="flex items-center justify-between px-4 py-2">
         <span className="text-xs font-semibold text-surface-400 uppercase tracking-wider">
-          Indexed Folders
+          {t('sidebar.indexedFolders')}
         </span>
         <button
           onClick={() => setView('folders')}
           className="p-1 rounded-lg hover:bg-surface-200 dark:hover:bg-surface-800 text-surface-400 hover:text-surface-700"
-          title="Add folder"
+          title={t('sidebar.addFolder')}
+          aria-label={t('sidebar.addFolder')}
         >
           <Plus size={14} />
         </button>
@@ -121,7 +125,7 @@ export function Sidebar() {
 
         {folders.length === 0 && (
           <p className="text-xs text-surface-400 text-center py-4">
-            No folders indexed yet
+            {t('sidebar.empty')}
           </p>
         )}
       </div>
@@ -129,7 +133,7 @@ export function Sidebar() {
       {/* Bottom */}
       <div className="px-4 py-3 border-t border-surface-200 dark:border-surface-800">
         <p className="text-xs text-surface-400">
-          {folders.length} folder{folders.length !== 1 ? 's' : ''} indexed
+          {plural('sidebar.folderCount', folders.length)}
         </p>
       </div>
     </aside>

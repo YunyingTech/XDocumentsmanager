@@ -44,7 +44,10 @@ notify-debouncer-full = "0.3"
 tokio = { version = "1", features = ["full"] }
 
 # HTTP client for OCR API (MinerU)
-reqwest = { version = "0.12", features = ["json", "multipart"] }
+reqwest = { version = "0.12", features = ["json", "multipart", "blocking"] }
+tantivy = "0.22"
+zip = "2.2"
+base64 = "0.22"
 
 # Logging
 log = "0.4"
@@ -57,6 +60,9 @@ anyhow = "1"
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 # PDF text extraction (Phase 2+)
 # pdfium-render = "0.8"

@@ -7,8 +7,10 @@ import { EmptyState } from '../common/EmptyState';
 import { LoadingOverlay } from '../common/LoadingOverlay';
 import { Plus } from 'lucide-react';
 import { useUIStore } from '../../stores/uiStore';
+import { useI18n } from '../../lib/i18n';
 
 export function FileBrowser() {
+  const { t } = useI18n();
   const selectedFolderId = useFolderStore((s) => s.selectedFolderId);
   const folders = useFolderStore((s) => s.folders);
   const files = useFileStore((s) => s.files);
@@ -31,9 +33,9 @@ export function FileBrowser() {
         <div className="flex-1">
           <EmptyState
             icon={Plus}
-            title="No folders indexed"
-            description="Add a local folder or SMB network share to start indexing your PDF documents."
-            action={{ label: 'Add Folder', onClick: () => setView('folders') }}
+            title={t('files.noFolders')}
+            description={t('files.noFoldersHint')}
+            action={{ label: t('folders.add'), onClick: () => setView('folders') }}
           />
         </div>
       </div>
@@ -46,8 +48,8 @@ export function FileBrowser() {
         <Toolbar />
         <div className="flex-1">
           <EmptyState
-            title="Select a folder"
-            description="Choose a folder from the sidebar to browse its PDF files."
+            title={t('files.selectFolder')}
+            description={t('files.selectFolderHint')}
           />
         </div>
       </div>
@@ -58,14 +60,14 @@ export function FileBrowser() {
     <div className="flex flex-col h-full">
       <Toolbar />
       {isLoading && files.length === 0 ? (
-        <LoadingOverlay message="Loading files..." />
+        <LoadingOverlay message={t('files.loading')} />
       ) : files.length === 0 ? (
         <EmptyState
-          title="No PDFs found"
+          title={t('files.noPdfs')}
           description={
             selectedFolder.last_scan_status === 'running'
-              ? 'Indexing is in progress. Files will appear here shortly.'
-              : 'This folder has no PDF files, or indexing has not been started yet.'
+              ? t('files.indexingHint')
+              : t('files.emptyHint')
           }
         />
       ) : (

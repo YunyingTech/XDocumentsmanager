@@ -22,3 +22,20 @@ pub fn read_file_bytes_range(path: String, start: u64, end: u64) -> Result<Vec<u
 
     Ok(buffer)
 }
+
+#[tauri::command]
+pub fn show_in_folder(path: String) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        std::process::Command::new("explorer.exe")
+            .arg(format!("/select,{}", path))
+            .spawn()
+            .map_err(|e| format!("Failed to open File Explorer: {}", e))?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err("Show in folder is currently supported on Windows only".to_string())
+    }
+}

@@ -16,6 +16,8 @@ interface SearchStore {
   clearSearch: () => void;
 }
 
+let latestSearchRequest = 0;
+
 export const useSearchStore = create<SearchStore>((set, get) => ({
   query: '',
   results: [],
@@ -28,6 +30,7 @@ export const useSearchStore = create<SearchStore>((set, get) => ({
   setFilters: (filters) => set({ filters }),
 
   doSearch: async () => {
+    const requestId = ++latestSearchRequest;
     const { query, filters } = get();
     if (!query.trim()) {
       set({ results: [], isSearching: false });
@@ -36,10 +39,10 @@ export const useSearchStore = create<SearchStore>((set, get) => ({
     set({ isSearching: true });
     try {
       const results = await search(query, filters);
-      set({ results, isSearching: false });
+      if (requestId === latestSearchRequest) set({ results, isSearching: false });
     } catch (err) {
       console.error('Search failed:', err);
-      set({ isSearching: false });
+      if (requestId === latestSearchRequest) set({ isSearching: false });
     }
   },
 

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { X, ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from 'lucide-react';
 import { readFileBytes } from '../../lib/tauri';
+import { useI18n } from '../../lib/i18n';
 
 interface PdfViewerProps {
   filePath: string;
@@ -9,6 +10,7 @@ interface PdfViewerProps {
 }
 
 export function PdfViewer({ filePath, fileName, onClose }: PdfViewerProps) {
+  const { locale, t } = useI18n();
   const [pdfData, setPdfData] = useState<Uint8Array | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -42,7 +44,7 @@ export function PdfViewer({ filePath, fileName, onClose }: PdfViewerProps) {
         setPageNum(1);
       } catch (err: any) {
         if (!cancelled) {
-          setError(err?.message || 'Failed to load PDF');
+          setError(err?.message || t('viewer.loadFailed'));
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -51,7 +53,7 @@ export function PdfViewer({ filePath, fileName, onClose }: PdfViewerProps) {
 
     loadPdf();
     return () => { cancelled = true; };
-  }, [filePath]);
+  }, [filePath, t]);
 
   return (
     <div className="fixed inset-0 z-50 bg-surface-950/90 flex flex-col">
@@ -63,6 +65,8 @@ export function PdfViewer({ filePath, fileName, onClose }: PdfViewerProps) {
           onClick={() => setScale((s) => Math.max(0.5, s - 0.2))}
           className="p-1.5 rounded-lg hover:bg-surface-800"
           disabled={!pdfDoc}
+          title={t('viewer.zoomOut')}
+          aria-label={t('viewer.zoomOut')}
         >
           <ZoomOut size={16} />
         </button>
@@ -71,6 +75,8 @@ export function PdfViewer({ filePath, fileName, onClose }: PdfViewerProps) {
           onClick={() => setScale((s) => Math.min(3, s + 0.2))}
           className="p-1.5 rounded-lg hover:bg-surface-800"
           disabled={!pdfDoc}
+          title={t('viewer.zoomIn')}
+          aria-label={t('viewer.zoomIn')}
         >
           <ZoomIn size={16} />
         </button>
@@ -80,6 +86,8 @@ export function PdfViewer({ filePath, fileName, onClose }: PdfViewerProps) {
             onClick={() => setPageNum((p) => Math.max(1, p - 1))}
             className="p-1.5 rounded-lg hover:bg-surface-800"
             disabled={!pdfDoc || pageNum <= 1}
+            title={t('viewer.previousPage')}
+            aria-label={t('viewer.previousPage')}
           >
             <ChevronLeft size={16} />
           </button>
@@ -90,12 +98,14 @@ export function PdfViewer({ filePath, fileName, onClose }: PdfViewerProps) {
             onClick={() => setPageNum((p) => Math.min(totalPages, p + 1))}
             className="p-1.5 rounded-lg hover:bg-surface-800"
             disabled={!pdfDoc || pageNum >= totalPages}
+            title={t('viewer.nextPage')}
+            aria-label={t('viewer.nextPage')}
           >
             <ChevronRight size={16} />
           </button>
         </div>
 
-        <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-surface-800 ml-2">
+        <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-surface-800 ml-2" title={t('viewer.close')} aria-label={t('viewer.close')}>
           <X size={18} />
         </button>
       </div>
@@ -103,17 +113,17 @@ export function PdfViewer({ filePath, fileName, onClose }: PdfViewerProps) {
       {/* Content */}
       <div className="flex-1 overflow-auto flex items-start justify-center p-4">
         {loading && (
-          <div className="text-surface-400 text-sm py-16">Loading PDF...</div>
+          <div className="text-surface-400 text-sm py-16">{t('viewer.loading')}</div>
         )}
         {error && (
           <div className="text-red-400 text-sm py-16">{error}</div>
         )}
         {pdfData && !pdfDoc && !loading && !error && (
           <div className="text-surface-400 text-sm py-16">
-            PDF loaded. Rendering will be available when PDF.js worker is configured.
+            {t('viewer.loadedFallback')}
             <br />
             <span className="text-xs mt-2 block">
-              File size: {pdfData.byteLength.toLocaleString()} bytes
+              {t('viewer.fileSize', { size: pdfData.byteLength.toLocaleString(locale) })}
             </span>
           </div>
         )}

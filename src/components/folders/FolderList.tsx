@@ -5,16 +5,20 @@ import { HardDrive, Network, MoreVertical, RefreshCw, Trash2, Pause, Play } from
 import { useState } from 'react';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 import { removeFolder, startIndexing } from '../../lib/tauri';
+import { useI18n } from '../../lib/i18n';
 
 interface FolderListProps {
   onAddFolder: () => void;
 }
 
-export function FolderList({ onAddFolder }: FolderListProps) {
+export function FolderList({ onAddFolder: _onAddFolder }: FolderListProps) {
+  const { locale, t } = useI18n();
   const folders = useFolderStore((s) => s.folders);
   const loadFolders = useFolderStore((s) => s.loadFolders);
   const [menuOpen, setMenuOpen] = useState<number | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
+  const folderTypeLabel = { local: t('folders.typeLocal'), smb: t('folders.typeSmb') };
+  const watchModeLabel = { auto: t('folders.modeAuto'), polling: t('folders.modePolling'), manual: t('folders.modeManual') };
 
   const handleRemove = async () => {
     if (deleteTarget !== null) {
@@ -58,9 +62,9 @@ export function FolderList({ onAddFolder }: FolderListProps) {
             </div>
             <p className="text-xs text-surface-400 mt-0.5 truncate">{folder.path}</p>
             <div className="flex items-center gap-4 mt-1.5 text-xs text-surface-500">
-              <span>{folder.total_files.toLocaleString()} files</span>
+              <span>{t('folders.fileCount', { count: folder.total_files.toLocaleString(locale) })}</span>
               <span>{formatFileSize(folder.total_size_bytes)}</span>
-              <span className="capitalize">{folder.folder_type} • {folder.watch_mode}</span>
+              <span>{t('folders.typeMode', { type: folderTypeLabel[folder.folder_type], mode: watchModeLabel[folder.watch_mode] })}</span>
             </div>
           </div>
 
@@ -81,15 +85,15 @@ export function FolderList({ onAddFolder }: FolderListProps) {
                     onClick={() => handleReindex(folder.id)}
                     className="w-full flex items-center gap-2 px-3 py-2 text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-800"
                   >
-                    <RefreshCw size={14} /> Re-index
+                    <RefreshCw size={14} /> {t('folders.reindex')}
                   </button>
                   {folder.is_active ? (
                     <button className="w-full flex items-center gap-2 px-3 py-2 text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-800">
-                      <Pause size={14} /> Pause watching
+                      <Pause size={14} /> {t('folders.pause')}
                     </button>
                   ) : (
                     <button className="w-full flex items-center gap-2 px-3 py-2 text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-800">
-                      <Play size={14} /> Resume watching
+                      <Play size={14} /> {t('folders.resume')}
                     </button>
                   )}
                   <hr className="my-1 border-surface-200 dark:border-surface-800" />
@@ -97,7 +101,7 @@ export function FolderList({ onAddFolder }: FolderListProps) {
                     onClick={() => { setMenuOpen(null); setDeleteTarget(folder.id); }}
                     className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-950"
                   >
-                    <Trash2 size={14} /> Remove
+                    <Trash2 size={14} /> {t('common.remove')}
                   </button>
                 </div>
               </>
@@ -109,9 +113,9 @@ export function FolderList({ onAddFolder }: FolderListProps) {
       {deleteTarget !== null && (
         <ConfirmDialog
           open={true}
-          title="Remove Folder"
-          message="This will remove the folder from indexing and delete all associated file records. The actual PDF files on disk will not be affected."
-          confirmLabel="Remove"
+          title={t('folders.removeTitle')}
+          message={t('folders.removeMessage')}
+          confirmLabel={t('common.remove')}
           onConfirm={handleRemove}
           onCancel={() => setDeleteTarget(null)}
           danger

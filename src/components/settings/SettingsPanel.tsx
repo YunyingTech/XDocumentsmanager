@@ -1,10 +1,13 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Settings, Wifi, Loader2, CheckCircle, XCircle } from 'lucide-react';
-import { getSetting, setSetting, checkOcrHealth, vacuumDatabase } from '../../lib/tauri';
+import { Wifi, Loader2, CheckCircle, XCircle, Save, Trash2 } from 'lucide-react';
+import { getSetting, setSetting, checkOcrHealth, vacuumDatabase, getOpenAiConfig, setOpenAiConfig, testOpenAiConnection, getSearchBackendStatus } from '../../lib/tauri';
 import { useUIStore } from '../../stores/uiStore';
-import type { MinerUHealthInfo } from '../../types';
+import type { MinerUHealthInfo, SearchBackendStatus } from '../../types';
+import { useI18n } from '../../lib/i18n';
+import type { Language } from '../../stores/uiStore';
 
 export function SettingsPanel() {
+  const { t } = useI18n();
   // ── State ──
   const [indexLocation, setIndexLocation] = useState('');
   const [maxFileSizeMb, setMaxFileSizeMb] = useState('500');
@@ -14,10 +17,20 @@ export function SettingsPanel() {
   const [ocrOutputDir, setOcrOutputDir] = useState('');
   const [ocrHealth, setOcrHealth] = useState<MinerUHealthInfo | null>(null);
   const [ocrChecking, setOcrChecking] = useState(false);
+  const [openAiEndpoint, setOpenAiEndpoint] = useState('https://api.openai.com/v1');
+  const [openAiModel, setOpenAiModel] = useState('gpt-4.1-mini');
+  const [openAiApiKey, setOpenAiApiKey] = useState('');
+  const [openAiKeyConfigured, setOpenAiKeyConfigured] = useState(false);
+  const [smartSearchEnabled, setSmartSearchEnabled] = useState(true);
+  const [openAiChecking, setOpenAiChecking] = useState(false);
+  const [openAiConnection, setOpenAiConnection] = useState<{ connected: boolean; message: string } | null>(null);
+  const [searchBackend, setSearchBackend] = useState<SearchBackendStatus | null>(null);
   const [vacuumResult, setVacuumResult] = useState('');
   const [vacuuming, setVacuuming] = useState(false);
   const theme = useUIStore((s) => s.theme);
   const setTheme = useUIStore((s) => s.setTheme);
+  const language = useUIStore((s) => s.language);
+  const setLanguage = useUIStore((s) => s.setLanguage);
 
   // ── Load settings on mount ──
   useEffect(() => {
@@ -39,7 +52,30 @@ export function SettingsPanel() {
           }
         }
       }
+      const openAi = await getOpenAiConfig();
+      setOpenAiEndpoint(openAi.endpoint);
+      setOpenAiModel(openAi.model);
+      setOpenAiKeyConfigured(openAi.api_key_configured);
+      setSmartSearchEnabled(openAi.smart_search_enabled);
     })();
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const refresh = async () => {
+      try {
+        const status = await getSearchBackendStatus();
+        if (active) setSearchBackend(status);
+      } catch {
+        // The desktop backend may be unavailable in browser-only development.
+      }
+    };
+    void refresh();
+    const interval = window.setInterval(refresh, 2000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
   }, []);
 
   // ── Save helpers (auto-save on change) ──
@@ -69,15 +105,38 @@ export function SettingsPanel() {
     setOcrChecking(false);
   };
 
+  const saveOpenAi = async (apiKey: string | undefined = openAiApiKey || undefined) => {
+    const config = await setOpenAiConfig(openAiEndpoint, openAiModel, apiKey, smartSearchEnabled);
+    setOpenAiKeyConfigured(config.api_key_configured);
+    setOpenAiApiKey('');
+    return config;
+  };
+
+  const checkOpenAi = async () => {
+    setOpenAiChecking(true);
+    setOpenAiConnection(null);
+    try {
+      await saveOpenAi();
+      setOpenAiConnection(await testOpenAiConnection());
+    } catch (error) {
+      setOpenAiConnection({ connected: false, message: String(error) });
+    } finally {
+      setOpenAiChecking(false);
+    }
+  };
+
   // ── Vacuum ──
   const runVacuum = async () => {
     setVacuuming(true);
     setVacuumResult('');
     try {
       const result = await vacuumDatabase();
-      setVacuumResult(result);
+      const match = result.match(/^VACUUM complete: (.+?) → (.+?) \(saved (.+?)\)$/);
+      setVacuumResult(match
+        ? t('settings.vacuumResult', { before: match[1], after: match[2], saved: match[3] })
+        : t('settings.vacuumComplete'));
     } catch (e: any) {
-      setVacuumResult(`Error: ${e}`);
+      setVacuumResult(t('settings.vacuumError', { error: String(e) }));
     }
     setVacuuming(false);
   };
@@ -87,7 +146,7 @@ export function SettingsPanel() {
       {/* Header */}
       <div className="flex items-center px-4 h-12 border-b border-surface-200 dark:border-surface-800 bg-white dark:bg-surface-950">
         <h2 className="text-sm font-semibold text-surface-700 dark:text-surface-300">
-          Settings
+          {t('settings.title')}
         </h2>
       </div>
 
@@ -97,24 +156,24 @@ export function SettingsPanel() {
           {/* ── Index Settings ── */}
           <div className="card p-5">
             <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 mb-4">
-              Index Settings
+              {t('settings.index')}
             </h3>
             <div className="space-y-4">
               <div>
                 <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
-                  Index Storage Location
+                  {t('settings.indexLocation')}
                 </label>
                 <input
                   type="text"
                   className="input"
                   value={indexLocation}
                   onChange={(e) => { setIndexLocation(e.target.value); save('index_location', e.target.value); }}
-                  placeholder="Default: app data directory"
+                  placeholder={t('settings.indexLocationPlaceholder')}
                 />
               </div>
               <div>
                 <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
-                  Max File Size (MB) — skip larger PDFs
+                  {t('settings.maxFileSize')}
                 </label>
                 <input
                   type="number"
@@ -126,7 +185,7 @@ export function SettingsPanel() {
               </div>
               <div>
                 <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
-                  Indexer Threads
+                  {t('settings.indexerThreads')}
                 </label>
                 <input
                   type="number"
@@ -143,12 +202,12 @@ export function SettingsPanel() {
           {/* ── OCR (MinerU API) Settings ── */}
           <div className="card p-5">
             <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 mb-4">
-              OCR — MinerU API
+              {t('settings.ocr')}
             </h3>
             <div className="space-y-4">
               <div>
                 <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
-                  MinerU API URL
+                  {t('settings.ocrApiUrl')}
                 </label>
                 <input
                   type="text"
@@ -160,17 +219,17 @@ export function SettingsPanel() {
               </div>
               <div>
                 <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
-                  OCR Output Directory
+                  {t('settings.ocrOutput')}
                 </label>
                 <input
                   type="text"
                   className="input"
                   value={ocrOutputDir}
                   onChange={(e) => { setOcrOutputDir(e.target.value); save('ocr_output_dir', e.target.value); }}
-                  placeholder="Default: {project}/OCR_result"
+                  placeholder={t('ocr.outputPlaceholder', { project: '{project}' })}
                 />
                 <p className="text-xs text-surface-400 mt-1">
-                  Leave empty to use the default location under the project directory.
+                  {t('settings.ocrOutputHint')}
                 </p>
               </div>
 
@@ -186,21 +245,111 @@ export function SettingsPanel() {
                   ) : (
                     <Wifi size={14} className="inline mr-1.5" />
                   )}
-                  Test Connection
+                  {t('settings.testConnection')}
                 </button>
                 {ocrHealth && (
                   <span className={`text-xs inline-flex items-center gap-1 ${ocrHealth.connected ? 'text-green-600' : 'text-red-500'}`}>
                     {ocrHealth.connected ? (
                       <>
                         <CheckCircle size={12} />
-                        Connected — v{ocrHealth.protocol_version || '?'}, max {ocrHealth.max_concurrent_requests} concurrent
+                        {t('settings.connected', { version: ocrHealth.protocol_version || '?', count: ocrHealth.max_concurrent_requests })}
                       </>
                     ) : (
                       <>
                         <XCircle size={12} />
-                        Cannot connect
+                        {t('settings.cannotConnect')}
                       </>
                     )}
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="card p-5">
+            <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 mb-4">
+              {t('settings.smartSearch')}
+            </h3>
+            <div className="space-y-4">
+              <div className="flex items-center justify-between gap-4 text-sm">
+                <span className="text-surface-600 dark:text-surface-400">{t('settings.searchBackend')}</span>
+                {searchBackend?.connected ? (
+                  <span className="inline-flex items-center gap-1.5 text-green-600" title={searchBackend.endpoint ?? undefined}>
+                    <CheckCircle size={13} />
+                    {t('settings.elasticsearchReady', { version: searchBackend.version ?? '?' })}
+                  </span>
+                ) : searchBackend?.error ? (
+                  <span className="inline-flex items-center gap-1.5 text-red-500 min-w-0" title={searchBackend.error}>
+                    <XCircle size={13} className="shrink-0" />
+                    <span className="truncate">{t('settings.elasticsearchFailed')}</span>
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1.5 text-surface-500">
+                    <Loader2 size={13} className="animate-spin" />
+                    {t('settings.elasticsearchStarting')}
+                  </span>
+                )}
+              </div>
+              <label className="flex items-center justify-between gap-4 text-sm text-surface-600 dark:text-surface-400">
+                <span>{t('settings.smartSearchEnabled')}</span>
+                <input
+                  type="checkbox"
+                  checked={smartSearchEnabled}
+                  onChange={(event) => setSmartSearchEnabled(event.target.checked)}
+                  className="h-4 w-4 accent-accent-500"
+                />
+              </label>
+              <div>
+                <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
+                  {t('settings.openAiEndpoint')}
+                </label>
+                <input className="input" value={openAiEndpoint} onChange={(event) => setOpenAiEndpoint(event.target.value)} placeholder="https://api.openai.com/v1" />
+              </div>
+              <div>
+                <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
+                  {t('settings.openAiModel')}
+                </label>
+                <input className="input" value={openAiModel} onChange={(event) => setOpenAiModel(event.target.value)} placeholder="gpt-4.1-mini" />
+              </div>
+              <div>
+                <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
+                  {t('settings.openAiApiKey')}
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="password"
+                    className="input flex-1"
+                    value={openAiApiKey}
+                    onChange={(event) => setOpenAiApiKey(event.target.value)}
+                    placeholder={openAiKeyConfigured ? t('settings.apiKeySaved') : 'sk-...'}
+                    autoComplete="off"
+                  />
+                  {openAiKeyConfigured && (
+                    <button
+                      type="button"
+                      className="btn-ghost p-2 rounded-lg"
+                      title={t('settings.removeApiKey')}
+                      aria-label={t('settings.removeApiKey')}
+                      onClick={() => void saveOpenAi('')}
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <button type="button" className="btn-secondary px-3 py-1.5 rounded-lg text-sm" onClick={() => void saveOpenAi()}>
+                  <Save size={14} className="inline mr-1.5" />
+                  {t('common.save')}
+                </button>
+                <button type="button" className="btn-secondary px-3 py-1.5 rounded-lg text-sm disabled:opacity-50" disabled={openAiChecking} onClick={checkOpenAi}>
+                  {openAiChecking ? <Loader2 size={14} className="animate-spin inline mr-1.5" /> : <Wifi size={14} className="inline mr-1.5" />}
+                  {t('settings.testConnection')}
+                </button>
+                {openAiConnection && (
+                  <span className={`text-xs inline-flex items-center gap-1 min-w-0 ${openAiConnection.connected ? 'text-green-600' : 'text-red-500'}`} title={openAiConnection.message}>
+                    {openAiConnection.connected ? <CheckCircle size={12} /> : <XCircle size={12} />}
+                    <span className="truncate">{openAiConnection.message}</span>
                   </span>
                 )}
               </div>
@@ -210,11 +359,11 @@ export function SettingsPanel() {
           {/* ── Network (SMB) Settings ── */}
           <div className="card p-5">
             <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 mb-4">
-              Network (SMB) Settings
+              {t('settings.network')}
             </h3>
             <div>
               <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
-                Poll Interval (seconds)
+                {t('settings.pollInterval')}
               </label>
               <input
                 type="number"
@@ -224,7 +373,7 @@ export function SettingsPanel() {
                 onChange={(e) => { setPollIntervalSecs(e.target.value); save('poll_interval_secs', e.target.value); }}
               />
               <p className="text-xs text-surface-400 mt-1">
-                How often to check SMB shares for changes.
+                {t('settings.pollIntervalHint')}
               </p>
             </div>
           </div>
@@ -232,30 +381,43 @@ export function SettingsPanel() {
           {/* ── Appearance ── */}
           <div className="card p-5">
             <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 mb-4">
-              Appearance
+              {t('settings.appearance')}
             </h3>
             <div className="space-y-4">
               <div>
                 <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
-                  Theme
+                  {t('settings.language')}
+                </label>
+                <select
+                  className="input w-48"
+                  value={language}
+                  onChange={(e) => setLanguage(e.target.value as Language)}
+                >
+                  <option value="en">{t('settings.languageEnglish')}</option>
+                  <option value="zh-CN">{t('settings.languageChinese')}</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
+                  {t('settings.theme')}
                 </label>
                 <select
                   className="input w-40"
                   value={theme}
                   onChange={(e) => setTheme(e.target.value as 'light' | 'dark' | 'system')}
                 >
-                  <option value="system">System</option>
-                  <option value="light">Light</option>
-                  <option value="dark">Dark</option>
+                  <option value="system">{t('settings.themeSystem')}</option>
+                  <option value="light">{t('settings.themeLight')}</option>
+                  <option value="dark">{t('settings.themeDark')}</option>
                 </select>
               </div>
               <div>
                 <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
-                  Default View
+                  {t('settings.defaultView')}
                 </label>
                 <select className="input w-40">
-                  <option value="table">Table</option>
-                  <option value="grid">Grid</option>
+                  <option value="table">{t('settings.viewTable')}</option>
+                  <option value="grid">{t('settings.viewGrid')}</option>
                 </select>
               </div>
             </div>
@@ -264,7 +426,7 @@ export function SettingsPanel() {
           {/* ── Maintenance ── */}
           <div className="card p-5">
             <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 mb-4">
-              Database
+              {t('settings.database')}
             </h3>
             <div className="flex items-center gap-3">
               <button
@@ -273,7 +435,7 @@ export function SettingsPanel() {
                 className="btn-secondary px-3 py-1.5 rounded-lg text-sm disabled:opacity-50"
               >
                 {vacuuming && <Loader2 size={14} className="animate-spin inline mr-1.5" />}
-                Vacuum Database
+                {t('settings.vacuum')}
               </button>
               {vacuumResult && (
                 <span className="text-xs text-surface-500">{vacuumResult}</span>
@@ -284,10 +446,10 @@ export function SettingsPanel() {
           {/* ── About ── */}
           <div className="card p-5">
             <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 mb-2">
-              About
+              {t('settings.about')}
             </h3>
             <p className="text-sm text-surface-500">
-              XDocuments Manager v0.1.0 — A 60TB-scale PDF document manager for Windows.
+              {t('settings.aboutText')}
             </p>
           </div>
         </div>

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { CheckCircle2, XCircle, X } from 'lucide-react';
+import { useI18n } from '../../lib/i18n';
 
 export interface ToastData {
   id: string;
@@ -13,6 +14,7 @@ interface ToastProps {
 }
 
 export function ToastItem({ toast, onDismiss }: ToastProps) {
+  const { t } = useI18n();
   const [exiting, setExiting] = useState(false);
 
   useEffect(() => {
@@ -42,6 +44,8 @@ export function ToastItem({ toast, onDismiss }: ToastProps) {
       <button
         onClick={() => onDismiss(toast.id)}
         className="p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/10"
+        title={t('common.close')}
+        aria-label={t('common.close')}
       >
         <X size={14} />
       </button>

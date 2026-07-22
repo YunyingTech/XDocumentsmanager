@@ -29,45 +29,52 @@
     overflow: hidden;
   }
 
+  button, input, select {
+    font: inherit;
+  }
+
+  button:focus-visible,
+  input:focus-visible,
+  select:focus-visible {
+    outline: 2px solid #f18445;
+    outline-offset: 2px;
+  }
+
   #root {
     height: 100vh;
     width: 100vw;
     overflow: hidden;
   }
 
-  @media (prefers-color-scheme: dark) {
-    body {
-      @apply bg-surface-950 text-surface-100;
-    }
-    * {
-      scrollbar-color: var(--color-surface-600) transparent;
-    }
+  .dark body {
+    @apply bg-surface-950 text-surface-100;
+  }
+  .dark * {
+    scrollbar-color: var(--color-surface-600) transparent;
   }
 }
 
 @layer components {
   .sidebar-item {
-    @apply flex items-center gap-3 px-3 py-2.5 rounded-xl text-surface-600
+    @apply flex items-center gap-3 px-3 py-2.5 rounded-lg text-surface-600
            hover:bg-surface-200 hover:text-surface-900
            transition-colors duration-150 cursor-pointer text-sm font-medium;
   }
   .sidebar-item.active {
     @apply bg-surface-200 text-surface-900;
   }
-  @media (prefers-color-scheme: dark) {
-    .sidebar-item {
-      @apply text-surface-400 hover:bg-surface-800 hover:text-surface-100;
-    }
-    .sidebar-item.active {
-      @apply bg-surface-800 text-surface-100;
-    }
+  .dark .sidebar-item {
+    @apply text-surface-400 hover:bg-surface-800 hover:text-surface-100;
+  }
+  .dark .sidebar-item.active {
+    @apply bg-surface-800 text-surface-100;
   }
 
   .btn {
-    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg
            text-sm font-medium transition-all duration-150 cursor-pointer
            focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-400
-           disabled:opacity-50 disabled:cursor-not-allowed select-none;
+           disabled:opacity-50 disabled:cursor-not-allowed select-none active:translate-y-px;
   }
   .btn-primary {
     @apply btn bg-accent-500 text-white hover:bg-accent-600 active:bg-accent-700;
@@ -78,34 +85,47 @@
   .btn-ghost {
     @apply btn text-surface-600 hover:bg-surface-200 hover:text-surface-900;
   }
-  @media (prefers-color-scheme: dark) {
-    .btn-secondary {
-      @apply bg-surface-800 text-surface-300 hover:bg-surface-700;
-    }
-    .btn-ghost {
-      @apply text-surface-400 hover:bg-surface-800 hover:text-surface-100;
-    }
+  .dark .btn-secondary {
+    @apply bg-surface-800 text-surface-300 hover:bg-surface-700;
+  }
+  .dark .btn-ghost {
+    @apply text-surface-400 hover:bg-surface-800 hover:text-surface-100;
   }
 
   .input {
-    @apply w-full px-3.5 py-2.5 rounded-xl bg-surface-100 border border-surface-200
+    @apply w-full px-3.5 py-2.5 rounded-lg bg-surface-100 border border-surface-200
            text-surface-900 text-sm placeholder:text-surface-400
            focus:outline-none focus:ring-2 focus:ring-accent-400 focus:border-transparent
            transition-all duration-150;
   }
-  @media (prefers-color-scheme: dark) {
-    .input {
-      @apply bg-surface-900 border-surface-700 text-surface-100 placeholder:text-surface-500;
-    }
+  .dark .input {
+    @apply bg-surface-900 border-surface-700 text-surface-100 placeholder:text-surface-500;
   }
 
   .card {
-    @apply bg-white border border-surface-200 rounded-2xl;
+    @apply bg-white border border-surface-200 rounded-lg;
   }
-  @media (prefers-color-scheme: dark) {
-    .card {
-      @apply bg-surface-900 border-surface-800;
-    }
+  .dark .card {
+    @apply bg-surface-900 border-surface-800;
+  }
+
+  .icon-button {
+    @apply inline-flex h-8 w-8 items-center justify-center rounded-md text-surface-500
+           transition-colors duration-150 hover:bg-surface-100 hover:text-surface-800
+           focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-400
+           dark:hover:bg-surface-800 dark:hover:text-surface-100;
+  }
+
+  .task-trigger {
+    @apply flex h-full min-w-[11rem] items-center justify-end gap-1.5 border-l border-surface-200
+           px-3 text-xs font-medium text-surface-600 transition-colors duration-150
+           hover:bg-surface-100 hover:text-surface-900 focus:outline-none focus-visible:ring-2
+           focus-visible:ring-inset focus-visible:ring-accent-400 dark:border-surface-800
+           dark:text-surface-400 dark:hover:bg-surface-900 dark:hover:text-surface-100;
+  }
+
+  .task-trigger-open {
+    @apply bg-surface-100 text-surface-900 dark:bg-surface-900 dark:text-surface-100;
   }
 }
 
@@ -115,5 +135,13 @@
   }
   .no-drag {
     -webkit-app-region: no-drag;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

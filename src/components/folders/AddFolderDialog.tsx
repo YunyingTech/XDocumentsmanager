@@ -3,6 +3,7 @@ import { X, HardDrive, Network, FolderOpen } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { addFolder } from '../../lib/tauri';
 import type { FolderConfig } from '../../types';
+import { useI18n } from '../../lib/i18n';
 
 interface AddFolderDialogProps {
   onClose: () => void;
@@ -10,6 +11,7 @@ interface AddFolderDialogProps {
 }
 
 export function AddFolderDialog({ onClose, onAdded }: AddFolderDialogProps) {
+  const { t } = useI18n();
   const [path, setPath] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [folderType, setFolderType] = useState<'local' | 'smb'>('local');
@@ -21,7 +23,7 @@ export function AddFolderDialog({ onClose, onAdded }: AddFolderDialogProps) {
 
   const handleSubmit = async () => {
     if (!path.trim()) {
-      setError('Please enter a folder path.');
+      setError(t('addFolder.pathRequired'));
       return;
     }
 
@@ -43,7 +45,7 @@ export function AddFolderDialog({ onClose, onAdded }: AddFolderDialogProps) {
       await addFolder(path.trim(), config);
       onAdded();
     } catch (err: any) {
-      setError(typeof err === 'string' ? err : 'Failed to add folder.');
+      setError(err ? t('addFolder.failedWithReason', { error: String(err) }) : t('addFolder.failed'));
     } finally {
       setIsSubmitting(false);
     }
@@ -55,9 +57,9 @@ export function AddFolderDialog({ onClose, onAdded }: AddFolderDialogProps) {
         {/* Header */}
         <div className="flex items-center justify-between p-5 border-b border-surface-200 dark:border-surface-800">
           <h2 className="text-lg font-semibold text-surface-900 dark:text-surface-100">
-            Add Folder
+            {t('addFolder.title')}
           </h2>
-          <button onClick={onClose} className="btn-ghost p-1.5 rounded-lg">
+          <button onClick={onClose} className="btn-ghost p-1.5 rounded-lg" title={t('addFolder.close')} aria-label={t('addFolder.close')}>
             <X size={18} />
           </button>
         </div>
@@ -67,7 +69,7 @@ export function AddFolderDialog({ onClose, onAdded }: AddFolderDialogProps) {
           {/* Folder type toggle */}
           <div>
             <label className="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-2">
-              Folder Type
+              {t('addFolder.type')}
             </label>
             <div className="flex gap-2">
               <button
@@ -78,7 +80,7 @@ export function AddFolderDialog({ onClose, onAdded }: AddFolderDialogProps) {
                     : 'border-surface-200 dark:border-surface-700 text-surface-500 hover:bg-surface-50 dark:hover:bg-surface-900'
                   }`}
               >
-                <HardDrive size={16} /> Local
+                <HardDrive size={16} /> {t('addFolder.local')}
               </button>
               <button
                 onClick={() => setFolderType('smb')}
@@ -88,7 +90,7 @@ export function AddFolderDialog({ onClose, onAdded }: AddFolderDialogProps) {
                     : 'border-surface-200 dark:border-surface-700 text-surface-500 hover:bg-surface-50 dark:hover:bg-surface-900'
                   }`}
               >
-                <Network size={16} /> Network Share (SMB)
+                <Network size={16} /> {t('addFolder.network')}
               </button>
             </div>
           </div>
@@ -96,7 +98,7 @@ export function AddFolderDialog({ onClose, onAdded }: AddFolderDialogProps) {
           {/* Path */}
           <div>
             <label className="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-1.5">
-              {folderType === 'local' ? 'Folder Path' : 'SMB / UNC Path'}
+              {folderType === 'local' ? t('addFolder.path') : t('addFolder.smbPath')}
             </label>
             <div className="flex gap-2">
               <input
@@ -116,7 +118,7 @@ export function AddFolderDialog({ onClose, onAdded }: AddFolderDialogProps) {
                   onClick={async () => {
                     const selected = await open({
                       directory: true,
-                      title: 'Select Folder',
+                      title: t('addFolder.select'),
                     });
                     if (selected && typeof selected === 'string') {
                       setPath(selected);
@@ -124,14 +126,14 @@ export function AddFolderDialog({ onClose, onAdded }: AddFolderDialogProps) {
                   }}
                 >
                   <FolderOpen size={16} />
-                  Browse
+                  {t('common.browse')}
                 </button>
               )}
             </div>
             <p className="text-xs text-surface-400 mt-1">
               {folderType === 'local'
-                ? 'Enter an absolute path to a local folder.'
-                : 'Enter a UNC path to a network share. Use \\\\server\\share format.'
+                ? t('addFolder.localPathHint')
+                : t('addFolder.smbPathHint')
               }
             </p>
           </div>
@@ -139,12 +141,12 @@ export function AddFolderDialog({ onClose, onAdded }: AddFolderDialogProps) {
           {/* Display name */}
           <div>
             <label className="block text-sm font-medium text-surface-700 dark:text-surface-300 mb-1.5">
-              Display Name <span className="text-surface-400">(optional)</span>
+              {t('addFolder.displayName')} <span className="text-surface-400">({t('common.optional')})</span>
             </label>
             <input
               type="text"
               className="input"
-              placeholder="Friendly name for this folder"
+              placeholder={t('addFolder.displayNamePlaceholder')}
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
             />
@@ -154,13 +156,12 @@ export function AddFolderDialog({ onClose, onAdded }: AddFolderDialogProps) {
           {folderType === 'smb' && (
             <div className="space-y-3 p-4 rounded-xl bg-surface-50 dark:bg-surface-900 border border-surface-200 dark:border-surface-800">
               <p className="text-xs text-surface-500">
-                If the share requires different credentials than your Windows login, enter them below.
-                Leave blank to use your current Windows session.
+                {t('addFolder.credentialsHint')}
               </p>
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-medium text-surface-600 dark:text-surface-400 mb-1">
-                    Username
+                    {t('addFolder.username')}
                   </label>
                   <input
                     type="text"
@@ -172,7 +173,7 @@ export function AddFolderDialog({ onClose, onAdded }: AddFolderDialogProps) {
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-surface-600 dark:text-surface-400 mb-1">
-                    Domain
+                    {t('addFolder.domain')}
                   </label>
                   <input
                     type="text"
@@ -185,7 +186,7 @@ export function AddFolderDialog({ onClose, onAdded }: AddFolderDialogProps) {
               </div>
               <div>
                 <label className="block text-xs font-medium text-surface-600 dark:text-surface-400 mb-1">
-                  Password
+                  {t('addFolder.password')}
                 </label>
                 <input
                   type="password"
@@ -208,13 +209,13 @@ export function AddFolderDialog({ onClose, onAdded }: AddFolderDialogProps) {
 
         {/* Footer */}
         <div className="flex justify-end gap-3 px-5 pb-5">
-          <button onClick={onClose} className="btn-secondary">Cancel</button>
+          <button onClick={onClose} className="btn-secondary">{t('common.cancel')}</button>
           <button
             onClick={handleSubmit}
             disabled={isSubmitting || !path.trim()}
             className="btn-primary"
           >
-            {isSubmitting ? 'Adding...' : 'Add Folder'}
+            {isSubmitting ? t('common.adding') : t('addFolder.title')}
           </button>
         </div>
       </div>

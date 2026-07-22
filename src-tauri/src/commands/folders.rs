@@ -1,6 +1,7 @@
 use tauri::State;
 use crate::db::Database;
 use crate::models::{FolderInfo, FolderConfig};
+use crate::search::SearchEngine;
 
 #[tauri::command]
 pub fn add_folder(
@@ -57,10 +58,11 @@ pub fn add_folder(
 }
 
 #[tauri::command]
-pub fn remove_folder(folder_id: i64, db: State<'_, Database>) -> Result<(), String> {
+pub fn remove_folder(folder_id: i64, db: State<'_, Database>, engine: State<'_, SearchEngine>) -> Result<(), String> {
     let conn = db.get_connection();
     conn.execute("DELETE FROM watched_folders WHERE id = ?1", [folder_id])
         .map_err(|e| e.to_string())?;
+    engine.delete_folder(folder_id)?;
     Ok(())
 }
 

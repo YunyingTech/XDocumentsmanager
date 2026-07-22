@@ -11,6 +11,11 @@ node_modules
 dist
 dist-ssr
 *.local
+src-tauri/resources/elasticsearch/*
+!src-tauri/resources/elasticsearch/README.txt
+src-tauri/resources/elasticsearch-*-windows-x86_64.zip*
+src-tauri/resources/elasticsearch.part*
+src-tauri/resources/.elasticsearch-extract/
 
 # Editor directories and files
 .vscode/*

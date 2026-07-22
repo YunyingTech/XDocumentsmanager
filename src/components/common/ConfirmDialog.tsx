@@ -1,3 +1,5 @@
+import { useI18n } from '../../lib/i18n';
+
 interface ConfirmDialogProps {
   open: boolean;
   title: string;
@@ -10,9 +12,10 @@ interface ConfirmDialogProps {
 }
 
 export function ConfirmDialog({
-  open, title, message, confirmLabel = 'Confirm', cancelLabel = 'Cancel',
+  open, title, message, confirmLabel, cancelLabel,
   onConfirm, onCancel, danger = false,
 }: ConfirmDialogProps) {
+  const { t } = useI18n();
   if (!open) return null;
 
   return (
@@ -23,12 +26,12 @@ export function ConfirmDialog({
         </h2>
         <p className="text-sm text-surface-500 mb-6">{message}</p>
         <div className="flex justify-end gap-3">
-          <button onClick={onCancel} className="btn-secondary">{cancelLabel}</button>
+          <button onClick={onCancel} className="btn-secondary">{cancelLabel || t('common.cancel')}</button>
           <button
             onClick={onConfirm}
             className={danger ? 'btn bg-red-500 text-white hover:bg-red-600' : 'btn-primary'}
           >
-            {confirmLabel}
+            {confirmLabel || t('common.confirm')}
           </button>
         </div>
       </div>

@@ -91,6 +91,30 @@ pub struct SearchResult {
     pub score: f64,
     pub snippet: String,
     pub folder_path: String,
+    pub absolute_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAiConfig {
+    pub endpoint: String,
+    pub model: String,
+    pub api_key_configured: bool,
+    pub smart_search_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAiConnectionInfo {
+    pub connected: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchBackendStatus {
+    pub backend: String,
+    pub connected: bool,
+    pub endpoint: Option<String>,
+    pub version: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
