@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   AlertCircle, CheckCircle2, ChevronDown, ChevronUp, Clipboard,
   Download, Loader2, ListChecks, Trash2,
+  X,
 } from 'lucide-react';
 import { useFolderStore } from '../../stores/folderStore';
 import { useOcrStore, type OcrTask } from '../../stores/ocrStore';
@@ -15,6 +16,7 @@ const ocrStatusKeys: Record<OcrTask['status'], TranslationKey> = {
   running: 'tasks.processing',
   completed: 'tasks.completedStatus',
   failed: 'tasks.failedStatus',
+  cancelled: 'tasks.cancelledStatus',
 };
 export function TaskCenter() {
   const { t, plural } = useI18n();
@@ -25,6 +27,7 @@ export function TaskCenter() {
   const tasks = useOcrStore((s) => s.tasks);
   const clearTasks = useOcrStore((s) => s.clearTasks);
   const downloadResult = useOcrStore((s) => s.downloadResult);
+  const cancelTask = useOcrStore((s) => s.cancelTask);
 
   const indexActive = indexProgress?.status === 'running' || indexProgress?.status === 'queued';
   const indexFailed = indexProgress?.status === 'error';
@@ -95,8 +98,8 @@ export function TaskCenter() {
               <div className={indexProgress ? 'mt-2 border-t border-surface-200 pt-2 dark:border-surface-800' : ''}>
                 <p className="px-2 pb-1.5 text-[11px] font-semibold text-surface-400">OCR</p>
                 <div className="space-y-1">
-                  {[...tasks].reverse().map((task, index) => (
-                    <OcrTaskRow key={`${task.fileId}-${task.taskId}-${task.submittedAt}-${index}`} task={task} onDownload={downloadResult} />
+                  {[...tasks].reverse().map((task) => (
+                    <OcrTaskRow key={`${task.fileId}-${task.taskId}-${task.submittedAt}`} task={task} onDownload={downloadResult} onCancel={cancelTask} />
                   ))}
                 </div>
               </div>
@@ -151,28 +154,35 @@ function IndexTask({ progress, folderName }: { progress: IndexProgress; folderNa
   );
 }
 
-function OcrTaskRow({ task, onDownload }: { task: OcrTask; onDownload: (taskId: string, fileId: number) => Promise<void> }) {
+function OcrTaskRow({ task, onDownload, onCancel }: { task: OcrTask; onDownload: (taskId: string, fileId: number) => Promise<void>; onCancel: (taskId: string) => Promise<void> }) {
   const { t } = useI18n();
   const active = activeOcrStatuses.includes(task.status);
   const failed = task.status === 'failed';
+  const cancelled = task.status === 'cancelled';
   const percentage = task.progress == null ? null : Math.min(100, Math.max(0, Math.round(task.progress)));
 
   return (
     <div className="flex min-h-12 items-center gap-2.5 rounded-md px-2 py-2 hover:bg-surface-50 dark:hover:bg-surface-800/60">
       {active ? <Loader2 size={15} className="shrink-0 animate-spin text-accent-500" />
         : failed ? <AlertCircle size={15} className="shrink-0 text-red-500" />
+        : cancelled ? <X size={15} className="shrink-0 text-surface-400" />
         : <CheckCircle2 size={15} className="shrink-0 text-emerald-600" />}
       <div className="min-w-0 flex-1">
         <div className="flex items-center justify-between gap-3">
           <p className="truncate text-xs font-medium text-surface-700 dark:text-surface-300">{task.fileName}</p>
-          <span className={`shrink-0 text-[11px] font-medium ${failed ? 'text-red-600 dark:text-red-400' : active ? 'text-accent-700 dark:text-accent-300' : 'text-emerald-700 dark:text-emerald-400'}`}>
+          <span className={`shrink-0 text-[11px] font-medium ${failed ? 'text-red-600 dark:text-red-400' : active ? 'text-accent-700 dark:text-accent-300' : cancelled ? 'text-surface-400' : 'text-emerald-700 dark:text-emerald-400'}`}>
             {t(ocrStatusKeys[task.status])}{percentage !== null && active ? ` ${percentage}%` : ''}
           </span>
         </div>
         {task.error ? <p className="mt-0.5 truncate text-[11px] text-red-500" title={task.error}>{task.error}</p>
           : task.status === 'queued' && task.queuedAhead != null ? <p className="mt-0.5 text-[11px] text-surface-400">{t('tasks.queueAhead', { count: task.queuedAhead })}</p>
-          : <p className="mt-0.5 text-[11px] text-surface-400">{task.engine === 'windows' ? 'Windows OCR' : 'MinerU'} - {t('tasks.ocrProcessing')}</p>}
+          : <p className="mt-0.5 text-[11px] text-surface-400">{task.engine === 'windows' ? 'Windows OCR' : task.engine === 'paddle' ? 'PaddleOCR' : 'MinerU'} - {t('tasks.ocrProcessing')}</p>}
       </div>
+      {active && (
+        <button type="button" onClick={() => void onCancel(task.taskId)} className="icon-button shrink-0 text-surface-400 hover:text-red-600" title={t('tasks.cancel')} aria-label={t('tasks.cancelFor', { name: task.fileName })}>
+          <X size={14} />
+        </button>
+      )}
       {task.status === 'completed' && !task.resultPath && (
         <button type="button" onClick={() => onDownload(task.taskId, task.fileId)} className="icon-button shrink-0" title={t('tasks.downloadResult')} aria-label={t('tasks.downloadResultFor', { name: task.fileName })}>
           <Download size={14} />

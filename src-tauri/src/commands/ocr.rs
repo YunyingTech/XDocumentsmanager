@@ -1,3 +1,4 @@
+use crate::commands::ocr_control::OcrTaskManager;
 use crate::db::Database;
 use crate::models::PaginatedResult;
 use crate::search::{
@@ -6,7 +7,10 @@ use crate::search::{
 };
 use serde::{Deserialize, Serialize};
 use std::io::{Cursor, Read};
-use tauri::{AppHandle, Emitter, State};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Instant;
+use tauri::{AppHandle, Emitter, Manager, State};
 
 // ── Response types for frontend ──
 
@@ -76,7 +80,7 @@ fn get_ocr_api_url(db: &Database) -> String {
     get_setting_value(db, "ocr_api_url", "http://127.0.0.1:8000")
 }
 
-fn resolve_output_dir(db: &Database) -> Result<String, String> {
+pub(crate) fn resolve_output_dir(db: &Database) -> Result<String, String> {
     let dir = get_setting_value(db, "ocr_output_dir", "");
     if dir.is_empty() {
         let app_data_dir = db
@@ -92,7 +96,7 @@ fn resolve_output_dir(db: &Database) -> Result<String, String> {
     }
 }
 
-fn get_file_abs_path(db: &Database, file_id: i64) -> Result<(String, String), String> {
+pub(crate) fn get_file_abs_path(db: &Database, file_id: i64) -> Result<(String, String), String> {
     let conn = db.get_connection();
     let mut stmt = conn
         .prepare(
@@ -244,8 +248,8 @@ pub async fn query_ocr_task(
 pub async fn get_ocr_result(
     task_id: String,
     file_id: i64,
+    app: AppHandle,
     db: State<'_, Database>,
-    engine: State<'_, SearchEngine>,
 ) -> Result<String, String> {
     let api_url = get_ocr_api_url(&db);
     let output_dir = resolve_output_dir(&db)?;
@@ -311,7 +315,7 @@ pub async fn get_ocr_result(
 
     std::fs::write(&output_path, &bytes).map_err(|e| format!("Cannot write OCR result: {}", e))?;
 
-    persist_ocr_text(&db, &engine, file_id, &bytes, ext == "zip")?;
+    persist_ocr_text_async(app, file_id, bytes.to_vec(), ext == "zip").await?;
 
     Ok(output_path.to_string_lossy().to_string())
 }
@@ -323,8 +327,8 @@ pub async fn sync_ocr_parse(
     file_id: i64,
     return_md: Option<bool>,
     response_format_zip: Option<bool>,
+    app: AppHandle,
     db: State<'_, Database>,
-    engine: State<'_, SearchEngine>,
 ) -> Result<String, String> {
     let api_url = get_ocr_api_url(&db);
     let (file_path, file_name) = get_file_abs_path(&db, file_id)?;
@@ -391,7 +395,7 @@ pub async fn sync_ocr_parse(
 
     std::fs::write(&output_path, &bytes).map_err(|e| format!("Cannot write OCR result: {}", e))?;
 
-    persist_ocr_text(&db, &engine, file_id, &bytes, ext == "zip")?;
+    persist_ocr_text_async(app, file_id, bytes.to_vec(), ext == "zip").await?;
 
     Ok(output_path.to_string_lossy().to_string())
 }
@@ -410,27 +414,92 @@ pub async fn run_windows_ocr(
     language: Option<String>,
     app: AppHandle,
     db: State<'_, Database>,
-    engine: State<'_, SearchEngine>,
+    tasks: State<'_, OcrTaskManager>,
 ) -> Result<String, String> {
+    let registration = tasks.register(&task_id)?;
+    let cancellation = registration.cancellation_flag();
     let (file_path, file_name) = get_file_abs_path(&db, file_id)?;
     let output_dir = resolve_output_dir(&db)?;
+    let started = Instant::now();
+    log::info!(
+        "Windows OCR [{}] started: file_id={}, file='{}', language='{}'",
+        task_id,
+        file_id,
+        file_name,
+        language.as_deref().unwrap_or("auto")
+    );
+    let progress_app = app.clone();
+    let worker_cancellation = cancellation.clone();
     let task_id_for_worker = task_id.clone();
-    let markdown = tokio::task::spawn_blocking(move || {
+    let file_name_for_worker = file_name.clone();
+    let worker_result = tokio::task::spawn_blocking(move || {
         windows_ocr_pdf(
             &file_path,
             file_id,
             &task_id_for_worker,
             language.as_deref(),
+            worker_cancellation,
             |progress| {
-                let _ = app.emit("ocr:progress", progress);
+                if progress.processed_pages == 1
+                    || progress.processed_pages == progress.total_pages
+                    || progress.processed_pages % 5 == 0
+                {
+                    log::info!(
+                        "Windows OCR [{}] progress: file='{}', pages={}/{}, {:.0}%",
+                        progress.task_id,
+                        file_name_for_worker,
+                        progress.processed_pages,
+                        progress.total_pages,
+                        progress.progress
+                    );
+                }
+                let _ = progress_app.emit("ocr:progress", progress);
             },
         )
     })
-    .await
-    .map_err(|e| format!("Windows OCR task failed: {e}"))??;
+    .await;
+    let markdown = match worker_result {
+        Ok(Ok(markdown)) => markdown,
+        Ok(Err(error)) => {
+            if error == "OCR task cancelled" {
+                log::info!("Windows OCR [{}] cancelled", task_id);
+            } else {
+                log::error!(
+                    "Windows OCR [{}] failed for '{}': {}",
+                    task_id,
+                    file_name,
+                    error
+                );
+            }
+            return Err(error);
+        }
+        Err(error) => {
+            let message = format!("Windows OCR task failed: {error}");
+            log::error!(
+                "Windows OCR [{}] worker failed for '{}': {}",
+                task_id,
+                file_name,
+                error
+            );
+            return Err(message);
+        }
+    };
+    log::info!(
+        "Windows OCR [{}] recognition complete: file='{}', characters={}",
+        task_id,
+        file_name,
+        markdown.chars().count()
+    );
+    if cancellation.load(Ordering::Acquire) {
+        log::info!("Windows OCR [{}] cancelled before saving results", task_id);
+        return Err("OCR task cancelled".to_string());
+    }
 
-    std::fs::create_dir_all(&output_dir)
-        .map_err(|e| format!("Cannot create output directory '{output_dir}': {e}"))?;
+    std::fs::create_dir_all(&output_dir).map_err(|error| {
+        let message = format!("Cannot create output directory '{output_dir}': {error}");
+        log::error!("Windows OCR [{}] failed: {}", task_id, message);
+        message
+    })?;
     let file_stem = std::path::Path::new(&file_name)
         .file_stem()
         .map(|value| value.to_string_lossy().to_string())
@@ -438,10 +507,40 @@ pub async fn run_windows_ocr(
     let suffix = &task_id[..8.min(task_id.len())];
     let output_path =
         std::path::Path::new(&output_dir).join(format!("{file_stem}_{suffix}_windows.md"));
-    std::fs::write(&output_path, markdown.as_bytes())
-        .map_err(|e| format!("Cannot write Windows OCR result: {e}"))?;
-    persist_ocr_text(&db, &engine, file_id, markdown.as_bytes(), false)?;
+    std::fs::write(&output_path, markdown.as_bytes()).map_err(|error| {
+        let message = format!("Cannot write Windows OCR result: {error}");
+        log::error!("Windows OCR [{}] failed: {}", task_id, message);
+        message
+    })?;
+    if let Err(error) = persist_ocr_text_async(app, file_id, markdown.into_bytes(), false).await {
+        log::error!(
+            "Windows OCR [{}] could not update the search index for '{}': {}",
+            task_id,
+            file_name,
+            error
+        );
+        return Err(error);
+    }
+    log::info!(
+        "Windows OCR [{}] completed: file='{}', output='{}', elapsed_ms={}",
+        task_id,
+        file_name,
+        output_path.display(),
+        started.elapsed().as_millis()
+    );
     Ok(output_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub fn cancel_ocr_task(
+    task_id: String,
+    tasks: State<'_, OcrTaskManager>,
+) -> Result<bool, String> {
+    let cancelled = tasks.cancel(&task_id);
+    if cancelled {
+        log::info!("OCR task [{}] cancellation requested", task_id);
+    }
+    Ok(cancelled)
 }
 
 #[cfg(windows)]
@@ -494,6 +593,7 @@ fn windows_ocr_pdf<F>(
     file_id: i64,
     task_id: &str,
     language_tag: Option<&str>,
+    cancellation: Arc<std::sync::atomic::AtomicBool>,
     on_progress: F,
 ) -> Result<String, String>
 where
@@ -505,6 +605,10 @@ where
     use windows::Graphics::Imaging::BitmapDecoder;
     use windows::Media::Ocr::OcrEngine;
     use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream};
+
+    if cancellation.load(Ordering::Acquire) {
+        return Err("OCR task cancelled".to_string());
+    }
 
     let ocr_engine = match language_tag.filter(|value| !value.is_empty() && *value != "auto") {
         Some(tag) => {
@@ -560,6 +664,9 @@ where
     let mut pages = Vec::with_capacity(total_pages as usize);
     let mut recognized_text = false;
     for page_index in 0..total_pages {
+        if cancellation.load(Ordering::Acquire) {
+            return Err("OCR task cancelled".to_string());
+        }
         let page = document
             .GetPage(page_index)
             .map_err(|e| format!("Cannot open PDF page {}: {e}", page_index + 1))?;
@@ -595,6 +702,9 @@ where
             total_pages,
             progress: processed_pages as f64 * 100.0 / total_pages as f64,
         });
+        if cancellation.load(Ordering::Acquire) {
+            return Err("OCR task cancelled".to_string());
+        }
         let _ = page.Close();
     }
 
@@ -631,6 +741,7 @@ fn windows_ocr_pdf<F>(
     _file_id: i64,
     _task_id: &str,
     _language_tag: Option<&str>,
+    _cancellation: Arc<std::sync::atomic::AtomicBool>,
     _on_progress: F,
 ) -> Result<String, String>
 where
@@ -639,7 +750,7 @@ where
     Err("Windows OCR is only available on Windows".to_string())
 }
 
-fn persist_ocr_text(
+pub(crate) fn persist_ocr_text(
     db: &Database,
     engine: &SearchEngine,
     file_id: i64,
@@ -664,6 +775,21 @@ fn persist_ocr_text(
         document_for_file(&conn, file_id)?
     };
     engine.upsert(document)
+}
+
+pub(crate) async fn persist_ocr_text_async(
+    app: AppHandle,
+    file_id: i64,
+    bytes: Vec<u8>,
+    is_zip: bool,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let db = app.state::<Database>();
+        let engine = app.state::<SearchEngine>();
+        persist_ocr_text(&db, &engine, file_id, &bytes, is_zip)
+    })
+    .await
+    .map_err(|error| format!("OCR result indexing task failed: {error}"))?
 }
 
 fn markdown_from_zip(bytes: &[u8]) -> Result<String, String> {
@@ -736,13 +862,34 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn cancels_windows_ocr_before_opening_the_pdf() {
+        let result = super::windows_ocr_pdf(
+            "missing.pdf",
+            1,
+            "cancelled-task",
+            None,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            |_| {},
+        );
+        assert_eq!(result.unwrap_err(), "OCR task cancelled");
+    }
+
+    #[cfg(windows)]
+    #[test]
     #[ignore = "requires XDOCUMENTS_WINDOWS_OCR_PDF to point to a real PDF"]
     fn recognizes_a_real_pdf_with_windows_ocr() {
         let path = std::env::var("XDOCUMENTS_WINDOWS_OCR_PDF")
             .expect("XDOCUMENTS_WINDOWS_OCR_PDF must point to a real PDF");
         let markdown =
-            super::windows_ocr_pdf(&path, 1, "windows-ocr-test", Some("zh-Hans-CN"), |_| {})
-                .unwrap();
+            super::windows_ocr_pdf(
+                &path,
+                1,
+                "windows-ocr-test",
+                Some("zh-Hans-CN"),
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                |_| {},
+            )
+            .unwrap();
         assert!(markdown.contains("## Page 1"));
         assert!(markdown.chars().count() > 20);
     }
@@ -779,6 +926,7 @@ mod tests {
             1,
             "windows-ocr-long-path-test",
             Some("zh-Hans-CN"),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             |_| {},
         )
         .unwrap();

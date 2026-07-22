@@ -147,8 +147,9 @@ impl SearchEngine {
             vec![self.fields.file_name, self.fields.content, self.fields.title, self.fields.author, self.fields.keywords],
         );
         parser.set_conjunction_by_default();
+        let embedded_query = query_text.replace(" | ", " OR ");
         let query = parser
-            .parse_query(query_text)
+            .parse_query(&embedded_query)
             .or_else(|_| parser.parse_query(&escape_query(query_text)))
             .map_err(|e| e.to_string())?;
         let top_docs = searcher
@@ -280,6 +281,7 @@ mod tests {
         }).unwrap();
 
         assert_eq!(engine.search("compliance", None, 10).unwrap()[0].file_id, 7);
+        assert_eq!(engine.search("\"compliance\" | \"missingterm\"", None, 10).unwrap()[0].file_id, 7);
         assert_eq!(engine.search("供应商风险", None, 10).unwrap()[0].file_id, 7);
         assert_eq!(engine.search("中国", None, 10).unwrap()[0].file_id, 7);
 

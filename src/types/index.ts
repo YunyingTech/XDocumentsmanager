@@ -88,6 +88,17 @@ export interface SearchResult {
   absolute_path: string;
 }
 
+export interface SearchResponse {
+  results: SearchResult[];
+  elapsed_ms: number;
+}
+
+export interface SearchQueryAnalysis {
+  terms: string[];
+  elapsed_ms: number;
+  model: string;
+}
+
 export type SearchProgressStage = 'preparing' | 'analyzing' | 'searching' | 'resolving' | 'completed' | 'failed';
 
 export interface SearchProgress {
@@ -163,7 +174,7 @@ export interface AppSettings {
 
 // ── OCR (MinerU API) ──
 
-export type OcrEngine = 'mineru' | 'windows';
+export type OcrEngine = 'mineru' | 'windows' | 'paddle';
 
 export interface MinerUHealthInfo {
   protocol_version: string;
@@ -195,6 +206,14 @@ export interface WindowsOcrStatus {
   available: boolean;
   languages: WindowsOcrLanguage[];
   error?: string | null;
+}
+
+export interface PaddleOcrStatus {
+  available: boolean;
+  python_path: string;
+  paddle_version: string | null;
+  paddleocr_version: string | null;
+  error: string | null;
 }
 
 export interface WindowsOcrProgress {

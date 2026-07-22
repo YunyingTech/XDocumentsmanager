@@ -9,6 +9,7 @@ mod watcher;
 
 use db::Database;
 use search::SearchEngine;
+use commands::ocr_control::OcrTaskManager;
 use tauri::Manager;
 use std::path::PathBuf;
 
@@ -25,6 +26,9 @@ pub fn run() {
             app.handle().plugin(
                 tauri_plugin_log::Builder::default()
                     .level(log::LevelFilter::Info)
+                    .level_for("tantivy", log::LevelFilter::Warn)
+                    .max_file_size(5 * 1024 * 1024)
+                    .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(3))
                     .build(),
             )?;
 
@@ -67,6 +71,7 @@ pub fn run() {
             // Store database in app state
             app.manage(search_engine);
             app.manage(database);
+            app.manage(OcrTaskManager::default());
 
             let app_handle = app.handle().clone();
             std::thread::Builder::new()
@@ -112,6 +117,7 @@ pub fn run() {
             commands::index::reindex_file,
             // Search
             commands::search::search,
+            commands::search::analyze_search_query,
             // Runtime logs
             commands::logs::get_runtime_logs,
             // Viewer
@@ -126,6 +132,10 @@ pub fn run() {
             commands::ocr::sync_ocr_parse,
             commands::ocr::get_windows_ocr_status,
             commands::ocr::run_windows_ocr,
+            commands::ocr::cancel_ocr_task,
+            commands::paddle_ocr::get_paddle_ocr_status,
+            commands::paddle_ocr::install_paddle_ocr,
+            commands::paddle_ocr::run_paddle_ocr,
             commands::ocr::get_ocr_output_dir,
             commands::ocr::list_ocr_candidates,
             // Settings

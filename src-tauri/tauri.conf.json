@@ -30,7 +30,9 @@
     "active": true,
     "targets": "all",
     "resources": [
-      "resources/elasticsearch/**/*"
+      "resources/elasticsearch/**/*",
+      "scripts/paddle_ocr_worker.py",
+      "scripts/paddleocr-requirements.txt"
     ],
     "icon": [
       "icons/32x32.png",

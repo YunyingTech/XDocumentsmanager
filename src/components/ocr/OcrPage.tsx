@@ -9,6 +9,8 @@ import {
   FileText,
   Monitor,
   Server,
+  Boxes,
+  Download,
 } from 'lucide-react';
 import { useOcrStore } from '../../stores/ocrStore';
 import { useFolderStore } from '../../stores/folderStore';
@@ -17,18 +19,34 @@ import { useI18n } from '../../lib/i18n';
 
 export function OcrPage() {
   const { t } = useI18n();
-  const store = useOcrStore();
-  const engineAvailable = store.engine === 'mineru'
-    ? Boolean(store.health?.connected)
-    : Boolean(store.windowsStatus?.available);
+  const engine = useOcrStore((state) => state.engine);
+  const health = useOcrStore((state) => state.health);
+  const windowsStatus = useOcrStore((state) => state.windowsStatus);
+  const paddleStatus = useOcrStore((state) => state.paddleStatus);
+  const healthChecking = useOcrStore((state) => state.healthChecking);
+  const candidates = useOcrStore((state) => state.candidates);
+  const loadingCandidates = useOcrStore((state) => state.loadingCandidates);
+  const selectedFileIds = useOcrStore((state) => state.selectedFileIds);
+  const isSubmitting = useOcrStore((state) => state.isSubmitting);
+  const loadSettings = useOcrStore((state) => state.loadSettings);
+  const checkHealth = useOcrStore((state) => state.checkHealth);
+  const loadCandidates = useOcrStore((state) => state.loadCandidates);
+  const selectAll = useOcrStore((state) => state.selectAll);
+  const deselectAll = useOcrStore((state) => state.deselectAll);
+  const submitTasks = useOcrStore((state) => state.submitTasks);
+  const engineAvailable = engine === 'mineru'
+    ? Boolean(health?.connected)
+    : engine === 'windows'
+      ? Boolean(windowsStatus?.available)
+      : Boolean(paddleStatus?.available);
 
   // Load settings and health on mount
   useEffect(() => {
-    store.loadSettings().then(() => {
-      store.checkHealth();
+    void loadSettings().then(() => {
+      void checkHealth();
     });
-    store.loadCandidates();
-  }, []);
+    void loadCandidates();
+  }, [checkHealth, loadCandidates, loadSettings]);
 
   return (
     <div className="flex flex-col h-full relative">
@@ -43,12 +61,12 @@ export function OcrPage() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => { store.checkHealth(); store.loadCandidates(); }}
+            onClick={() => { void checkHealth(); void loadCandidates(); }}
             className="btn-ghost p-1.5 rounded-lg"
             title={t('common.refresh')}
             aria-label={t('common.refresh')}
           >
-            <RefreshCw size={16} className={store.healthChecking ? 'animate-spin' : ''} />
+            <RefreshCw size={16} className={healthChecking ? 'animate-spin' : ''} />
           </button>
         </div>
       </div>
@@ -66,34 +84,35 @@ export function OcrPage() {
                 {t('ocr.selectFiles')}
               </h3>
               <div className="flex items-center gap-2">
-                <button onClick={store.selectAll} className="btn-ghost text-xs px-2 py-1 rounded">
+                <button onClick={selectAll} className="btn-ghost text-xs px-2 py-1 rounded">
                   {t('ocr.selectAll')}
                 </button>
-                <button onClick={store.deselectAll} className="btn-ghost text-xs px-2 py-1 rounded">
+                <button onClick={deselectAll} className="btn-ghost text-xs px-2 py-1 rounded">
                   {t('ocr.deselectAll')}
                 </button>
-                {store.candidates.length > 0 && (
+                {candidates.length > 0 && (
                   <button
-                    onClick={() => store.submitTasks()}
+                    onClick={() => void submitTasks()}
                     disabled={
-                      store.selectedFileIds.size === 0 ||
-                      !engineAvailable
+                      selectedFileIds.size === 0 ||
+                      !engineAvailable ||
+                      isSubmitting
                     }
                     className="btn-primary px-4 py-2 rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <ScanText size={16} className="inline mr-1.5" />
-                    {t('ocr.start', { count: store.selectedFileIds.size })}
+                    {t('ocr.start', { count: selectedFileIds.size })}
                   </button>
                 )}
               </div>
             </div>
 
-            {store.loadingCandidates ? (
+            {loadingCandidates ? (
               <div className="flex items-center justify-center py-8 text-surface-400">
                 <Loader2 size={20} className="animate-spin mr-2" />
                 {t('ocr.loadingFiles')}
               </div>
-            ) : store.candidates.length === 0 ? (
+            ) : candidates.length === 0 ? (
               <div className="text-center py-8 text-surface-400">
                 <FileText size={32} className="mx-auto mb-2 opacity-50" />
                 <p className="text-sm">{t('ocr.noFiles')}</p>
@@ -119,6 +138,7 @@ function HealthBadge() {
   const healthChecking = useOcrStore((s) => s.healthChecking);
   const engine = useOcrStore((s) => s.engine);
   const windowsStatus = useOcrStore((s) => s.windowsStatus);
+  const paddleStatus = useOcrStore((s) => s.paddleStatus);
 
   if (healthChecking) {
     return (
@@ -141,6 +161,22 @@ function HealthBadge() {
       <span className="inline-flex items-center gap-1.5 text-xs text-red-500" title={windowsStatus?.error || undefined}>
         <WifiOff size={12} />
         {t('ocr.windowsUnavailable')}
+      </span>
+    );
+  }
+  if (engine === 'paddle') {
+    if (paddleStatus?.available) {
+      return (
+        <span className="inline-flex items-center gap-1.5 text-xs text-green-600" title={`Paddle ${paddleStatus.paddle_version ?? ''} / PaddleOCR ${paddleStatus.paddleocr_version ?? ''}`}>
+          <Boxes size={12} />
+          {t('ocr.paddleReady')}
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs text-red-500" title={paddleStatus?.error || undefined}>
+        <WifiOff size={12} />
+        {t('ocr.paddleUnavailable')}
       </span>
     );
   }
@@ -177,8 +213,17 @@ function SettingsCard() {
   const engine = useOcrStore((s) => s.engine);
   const windowsStatus = useOcrStore((s) => s.windowsStatus);
   const windowsLanguage = useOcrStore((s) => s.windowsLanguage);
+  const paddleStatus = useOcrStore((s) => s.paddleStatus);
+  const paddlePythonPath = useOcrStore((s) => s.paddlePythonPath);
+  const paddleLanguage = useOcrStore((s) => s.paddleLanguage);
+  const paddleModel = useOcrStore((s) => s.paddleModel);
   const saveEngine = useOcrStore((s) => s.saveEngine);
   const saveWindowsLanguage = useOcrStore((s) => s.saveWindowsLanguage);
+  const savePaddlePythonPath = useOcrStore((s) => s.savePaddlePythonPath);
+  const savePaddleLanguage = useOcrStore((s) => s.savePaddleLanguage);
+  const savePaddleModel = useOcrStore((s) => s.savePaddleModel);
+  const installPaddle = useOcrStore((s) => s.installPaddle);
+  const healthChecking = useOcrStore((s) => s.healthChecking);
 
   return (
     <div className="card p-5">
@@ -205,6 +250,13 @@ function SettingsCard() {
             >
               <Monitor size={14} /> {t('ocr.windowsEngine')}
             </button>
+            <button
+              type="button"
+              onClick={() => saveEngine('paddle')}
+              className={`inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs font-medium transition-colors ${engine === 'paddle' ? 'bg-white text-surface-900 shadow-sm dark:bg-surface-700 dark:text-surface-100' : 'text-surface-500 hover:text-surface-800 dark:hover:text-surface-200'}`}
+            >
+              <Boxes size={14} /> PaddleOCR
+            </button>
           </div>
         </div>
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -219,7 +271,7 @@ function SettingsCard() {
             onChange={(e) => saveApiUrl(e.target.value)}
             placeholder="http://127.0.0.1:8000"
           />
-        </div> : <div>
+        </div> : engine === 'windows' ? <div>
           <label className="block text-xs text-surface-500 mb-1">
             {t('ocr.windowsLanguage')}
           </label>
@@ -237,6 +289,46 @@ function SettingsCard() {
             ))}
           </select>
           {windowsStatus?.error && <p className="mt-1 text-xs text-red-500">{windowsStatus.error}</p>}
+        </div> : <div className="space-y-3">
+          <div>
+            <label className="block text-xs text-surface-500 mb-1">{t('ocr.paddlePython')}</label>
+            <input
+              type="text"
+              className="input text-sm"
+              value={paddlePythonPath}
+              onChange={(event) => void savePaddlePythonPath(event.target.value)}
+              placeholder="python"
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="block text-xs text-surface-500 mb-1">{t('ocr.paddleLanguage')}</label>
+              <select className="input text-sm" value={paddleLanguage} onChange={(event) => void savePaddleLanguage(event.target.value)}>
+                <option value="ch">中文</option>
+                <option value="en">English</option>
+                <option value="japan">日本語</option>
+                <option value="korean">한국어</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs text-surface-500 mb-1">{t('ocr.paddleModel')}</label>
+              <select className="input text-sm" value={paddleModel} onChange={(event) => void savePaddleModel(event.target.value)}>
+                <option value="PP-OCRv5_mobile">PP-OCRv5 Mobile</option>
+                <option value="PP-OCRv5_server">PP-OCRv5 Server</option>
+              </select>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button type="button" className="btn-secondary flex h-8 items-center gap-1.5 px-2.5 text-xs disabled:opacity-50" onClick={() => void installPaddle()} disabled={healthChecking}>
+              {healthChecking ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+              {t('ocr.installPaddle')}
+            </button>
+            {paddleStatus && (
+              <span className={`min-w-0 truncate text-xs ${paddleStatus.available ? 'text-green-600' : 'text-red-500'}`} title={paddleStatus.error ?? undefined}>
+                {paddleStatus.available ? `PaddleOCR ${paddleStatus.paddleocr_version ?? ''}` : paddleStatus.error}
+              </span>
+            )}
+          </div>
         </div>}
         <div>
           <label className="block text-xs text-surface-500 mb-1">
@@ -309,6 +401,7 @@ function FileTable() {
                     <input
                       type="checkbox"
                       checked={isSelected}
+                      onClick={(event) => event.stopPropagation()}
                       onChange={() => toggleFile(file.id)}
                       className="rounded"
                     />

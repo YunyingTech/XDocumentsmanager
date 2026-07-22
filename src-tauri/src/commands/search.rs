@@ -1,12 +1,12 @@
 use std::path::Path;
+use std::time::Instant;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::db::Database;
-use crate::models::{FileInfo, SearchFilters, SearchResult};
+use crate::models::{FileInfo, SearchFilters, SearchQueryAnalysis, SearchResponse, SearchResult};
 use crate::search::engine::normalize_cjk_ocr_spacing;
-use crate::search::query::expand_query;
 use crate::search::SearchEngine;
 
 #[derive(Clone, Serialize)]
@@ -30,23 +30,17 @@ fn emit_progress(app: &AppHandle, request_id: u64, stage: &'static str, progress
 #[tauri::command]
 pub async fn search(
     query: String,
+    terms: Option<Vec<String>>,
     filters: Option<SearchFilters>,
     limit: Option<i64>,
     request_id: Option<u64>,
     app: AppHandle,
     db: State<'_, Database>,
-) -> Result<Vec<SearchResult>, String> {
+) -> Result<SearchResponse, String> {
+    let started = Instant::now();
     let request_id = request_id.unwrap_or(0);
     let limit = limit.unwrap_or(100).clamp(1, 500) as usize;
-    emit_progress(&app, request_id, "analyzing", 15);
-    log::info!("Search {}: analyzing query", request_id);
-    let expanded = expand_query(&db, &query).await.unwrap_or_else(|error| {
-        log::warn!(
-            "Smart query expansion failed; using the original query: {}",
-            error
-        );
-        query.clone()
-    });
+    let engine_query = selected_terms_query(terms.as_deref()).unwrap_or_else(|| query.clone());
     emit_progress(&app, request_id, "searching", 50);
     log::info!("Search {}: querying full-text index", request_id);
     let search_app = app.clone();
@@ -54,7 +48,7 @@ pub async fn search(
     let hit_limit = limit.saturating_mul(5).min(1_000);
     let hits = match tokio::task::spawn_blocking(move || {
         let engine = search_app.state::<SearchEngine>();
-        engine.search(&expanded, search_filters.as_ref(), hit_limit)
+        engine.search(&engine_query, search_filters.as_ref(), hit_limit)
     })
     .await
     {
@@ -108,11 +102,38 @@ pub async fn search(
     );
     emit_progress(&app, request_id, "completed", 100);
     log::info!(
-        "Search {} completed with {} results",
+        "Search {} completed with {} results in {} ms",
         request_id,
-        results.len()
+        results.len(),
+        started.elapsed().as_millis()
     );
-    Ok(results)
+    Ok(SearchResponse {
+        results,
+        elapsed_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+    })
+}
+
+#[tauri::command]
+pub async fn analyze_search_query(
+    query: String,
+    db: State<'_, Database>,
+) -> Result<SearchQueryAnalysis, String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err("Search query cannot be empty".to_string());
+    }
+    crate::search::query::analyze_query(&db, query).await
+}
+
+fn selected_terms_query(terms: Option<&[String]>) -> Option<String> {
+    let terms = terms?
+        .iter()
+        .map(|term| term.trim().replace(['\"', '\\'], ""))
+        .filter(|term| !term.is_empty())
+        .take(16)
+        .map(|term| format!("\"{term}\""))
+        .collect::<Vec<_>>();
+    (!terms.is_empty()).then(|| terms.join(" | "))
 }
 
 fn make_snippet(content: &str, query: &str) -> String {
@@ -187,4 +208,22 @@ fn matches_filters(file: &FileInfo, filters: Option<&SearchFilters>) -> bool {
         return false;
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::selected_terms_query;
+
+    #[test]
+    fn builds_safe_or_query_from_selected_terms() {
+        let terms = vec![
+            "中科院".to_string(),
+            " 中国科学院 ".to_string(),
+            "\\\"网络安全\\\"".to_string(),
+        ];
+        assert_eq!(
+            selected_terms_query(Some(&terms)),
+            Some("\"中科院\" | \"中国科学院\" | \"网络安全\"".to_string())
+        );
+    }
 }

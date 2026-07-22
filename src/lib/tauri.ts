@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
   FileInfo, FolderInfo, FolderConfig, IndexJob,
-  SearchResult, SearchFilters, PaginatedResult, SortConfig,
+  SearchResponse, SearchFilters, PaginatedResult, SortConfig, SearchQueryAnalysis,
   RuntimeLogSnapshot, RuntimeLogSource,
 } from '../types';
 
@@ -71,8 +71,13 @@ export async function search(
   filters?: SearchFilters,
   limit: number = 100,
   requestId?: number,
-): Promise<SearchResult[]> {
-  return invoke('search', { query, filters, limit, requestId });
+  terms?: string[],
+): Promise<SearchResponse> {
+  return invoke('search', { query, terms, filters, limit, requestId });
+}
+
+export async function analyzeSearchQuery(query: string): Promise<SearchQueryAnalysis> {
+  return invoke('analyze_search_query', { query });
 }
 
 export async function getRuntimeLogs(
@@ -136,6 +141,27 @@ export async function runWindowsOcr(
   language?: string
 ): Promise<string> {
   return invoke('run_windows_ocr', { fileId, taskId, language });
+}
+
+export async function getPaddleOcrStatus(): Promise<import('../types').PaddleOcrStatus> {
+  return invoke('get_paddle_ocr_status');
+}
+
+export async function installPaddleOcr(): Promise<import('../types').PaddleOcrStatus> {
+  return invoke('install_paddle_ocr');
+}
+
+export async function runPaddleOcr(
+  fileId: number,
+  taskId: string,
+  language: string,
+  model: string,
+): Promise<string> {
+  return invoke('run_paddle_ocr', { fileId, taskId, language, model });
+}
+
+export async function cancelOcrTask(taskId: string): Promise<boolean> {
+  return invoke('cancel_ocr_task', { taskId });
 }
 
 export async function getOcrOutputDir(): Promise<string> {

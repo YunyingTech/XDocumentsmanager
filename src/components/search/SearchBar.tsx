@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useSearchStore } from '../../stores/searchStore';
-import { Search, X } from 'lucide-react';
+import { Search, Sparkles, X } from 'lucide-react';
 import { useI18n } from '../../lib/i18n';
 
 export function SearchBar() {
@@ -8,6 +8,8 @@ export function SearchBar() {
   const query = useSearchStore((s) => s.query);
   const setQuery = useSearchStore((s) => s.setQuery);
   const doSearch = useSearchStore((s) => s.doSearch);
+  const analyzeQuery = useSearchStore((s) => s.analyzeQuery);
+  const isAnalyzing = useSearchStore((s) => s.isAnalyzing);
   const inputRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
@@ -38,7 +40,7 @@ export function SearchBar() {
       <input
         ref={inputRef}
         type="text"
-        className="input pl-9 pr-8"
+        className="input pl-9 pr-16"
         placeholder={t('search.placeholder')}
         value={query}
         onChange={(e) => setQuery(e.target.value)}
@@ -47,14 +49,27 @@ export function SearchBar() {
         }}
       />
       {query && (
-        <button
-          onClick={() => setQuery('')}
-          className="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 rounded text-surface-400 hover:text-surface-600"
-          title={t('search.clear')}
-          aria-label={t('search.clear')}
-        >
-          <X size={14} />
-        </button>
+        <div className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5">
+          <button
+            type="button"
+            onClick={() => void analyzeQuery()}
+            disabled={isAnalyzing}
+            className="icon-button h-7 w-7 text-accent-600 disabled:opacity-50 dark:text-accent-400"
+            title={t('search.analyze')}
+            aria-label={t('search.analyze')}
+          >
+            <Sparkles size={14} className={isAnalyzing ? 'animate-pulse' : ''} />
+          </button>
+          <button
+            type="button"
+            onClick={() => setQuery('')}
+            className="icon-button h-7 w-7"
+            title={t('search.clear')}
+            aria-label={t('search.clear')}
+          >
+            <X size={14} />
+          </button>
+        </div>
       )}
     </div>
   );

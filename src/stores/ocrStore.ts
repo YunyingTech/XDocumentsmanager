@@ -7,11 +7,15 @@ import {
   syncOcrParse,
   getWindowsOcrStatus,
   runWindowsOcr,
+  getPaddleOcrStatus,
+  installPaddleOcr,
+  runPaddleOcr,
+  cancelOcrTask,
   listOcrCandidates,
   getSetting,
   setSetting,
 } from '../lib/tauri';
-import type { FileInfo, MinerUHealthInfo, OcrEngine, OcrTaskStatus, PaginatedResult, WindowsOcrProgress, WindowsOcrStatus } from '../types';
+import type { FileInfo, MinerUHealthInfo, OcrEngine, OcrTaskStatus, PaddleOcrStatus, PaginatedResult, WindowsOcrProgress, WindowsOcrStatus } from '../types';
 import { translate } from '../lib/i18n';
 import { useUIStore } from './uiStore';
 
@@ -21,7 +25,7 @@ export interface OcrTask {
   taskId: string;
   fileId: number;
   fileName: string;
-  status: 'submitting' | 'queued' | 'running' | 'completed' | 'failed';
+  status: 'submitting' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
   queuedAhead: number | null;
   progress: number | null;
   error?: string;
@@ -30,10 +34,15 @@ export interface OcrTask {
   engine: OcrEngine;
 }
 
+const WINDOWS_OCR_CONCURRENCY = 2;
+const pendingWindowsProgress = new Map<string, WindowsOcrProgress>();
+let windowsProgressFrame: number | null = null;
+
 interface OcrStore {
   // Health
   health: MinerUHealthInfo | null;
   windowsStatus: WindowsOcrStatus | null;
+  paddleStatus: PaddleOcrStatus | null;
   healthChecking: boolean;
 
   // Files
@@ -51,6 +60,7 @@ interface OcrStore {
 
   // Tasks
   tasks: OcrTask[];
+  isSubmitting: boolean;
   polling: boolean;
   pollTimer: ReturnType<typeof setInterval> | null;
 
@@ -59,6 +69,9 @@ interface OcrStore {
   outputDir: string;
   engine: OcrEngine;
   windowsLanguage: string;
+  paddlePythonPath: string;
+  paddleLanguage: string;
+  paddleModel: string;
 
   // Actions
   checkHealth: () => Promise<void>;
@@ -79,6 +92,11 @@ interface OcrStore {
   saveOutputDir: (dir: string) => Promise<void>;
   saveEngine: (engine: OcrEngine) => Promise<void>;
   saveWindowsLanguage: (language: string) => Promise<void>;
+  savePaddlePythonPath: (path: string) => Promise<void>;
+  savePaddleLanguage: (language: string) => Promise<void>;
+  savePaddleModel: (model: string) => Promise<void>;
+  installPaddle: () => Promise<void>;
+  cancelTask: (taskId: string) => Promise<void>;
   updateWindowsProgress: (progress: WindowsOcrProgress) => void;
   clearTasks: () => void;
 }
@@ -86,6 +104,7 @@ interface OcrStore {
 export const useOcrStore = create<OcrStore>((set, get) => ({
   health: null,
   windowsStatus: null,
+  paddleStatus: null,
   healthChecking: false,
   candidates: [],
   loadingCandidates: false,
@@ -95,12 +114,16 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
   totalPages: 0,
   selectedFileIds: new Set<number>(),
   tasks: [],
+  isSubmitting: false,
   polling: false,
   pollTimer: null,
   apiUrl: 'http://127.0.0.1:8000',
   outputDir: '',
   engine: 'mineru',
   windowsLanguage: 'auto',
+  paddlePythonPath: 'python',
+  paddleLanguage: 'ch',
+  paddleModel: 'PP-OCRv5_mobile',
 
   // ── Health check ──
   checkHealth: async () => {
@@ -117,10 +140,22 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
       }
       return;
     }
+    if (get().engine === 'paddle') {
+      try {
+        const paddleStatus = await getPaddleOcrStatus();
+        set({ paddleStatus, healthChecking: false });
+      } catch (error) {
+        set({
+          paddleStatus: { available: false, python_path: get().paddlePythonPath, paddle_version: null, paddleocr_version: null, error: String(error) },
+          healthChecking: false,
+        });
+      }
+      return;
+    }
     try {
       const result = await checkOcrHealth();
       set({ health: result, healthChecking: false });
-    } catch (e) {
+    } catch {
       set({
         health: {
           protocol_version: '',
@@ -177,60 +212,94 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
 
   // ── Submit async tasks ──
   submitTasks: async () => {
-    const { selectedFileIds, candidates, engine, windowsLanguage } = get();
+    if (get().isSubmitting) return;
+    const { selectedFileIds, candidates, engine, windowsLanguage, paddleLanguage, paddleModel } = get();
     const fileIds = [...selectedFileIds];
+    if (fileIds.length === 0) return;
+    const submittedAt = Date.now();
+    const batch = fileIds.map((fileId, index): OcrTask => ({
+      taskId: crypto.randomUUID(),
+      fileId,
+      fileName: candidates.find((file) => file.id === fileId)?.file_name || `file_${fileId}`,
+      status: engine === 'mineru' ? 'submitting' : 'queued',
+      queuedAhead: engine === 'mineru' ? null : index,
+      progress: engine === 'mineru' ? null : 0,
+      submittedAt: submittedAt + index,
+      engine,
+    }));
+    const batchTaskIds = new Set(batch.map((task) => task.taskId));
+    set((state) => ({
+      tasks: [...state.tasks, ...batch],
+      selectedFileIds: new Set(),
+      isSubmitting: true,
+    }));
 
-    for (const fileId of fileIds) {
-      const file = candidates.find((f) => f.id === fileId);
-      const fileName = file?.file_name || `file_${fileId}`;
-
-      // Mark as submitting
-      const task: OcrTask = {
-        taskId: engine === 'windows' ? crypto.randomUUID() : '',
-        fileId,
-        fileName,
-        status: 'submitting',
-        queuedAhead: null,
-        progress: null,
-        submittedAt: Date.now(),
-        engine,
-      };
-      set((s) => ({ tasks: [...s.tasks, task] }));
-
-      try {
-        if (engine === 'windows') {
-          const localTaskId = task.taskId;
-          set((s) => ({
-            tasks: s.tasks.map((item) =>
-              item.taskId === localTaskId
-                ? { ...item, status: 'running' as const, progress: 0 }
-                : item
+    if (engine === 'windows' || engine === 'paddle') {
+      let nextIndex = 0;
+      const runWorker = async () => {
+        while (nextIndex < batch.length) {
+          const task = batch[nextIndex++];
+          if (get().tasks.find((item) => item.taskId === task.taskId)?.status === 'cancelled') {
+            continue;
+          }
+          set((state) => ({
+            tasks: state.tasks.map((item) =>
+              item.taskId === task.taskId
+                ? { ...item, status: 'running' as const, queuedAhead: null, progress: 0 }
+                : batchTaskIds.has(item.taskId) && item.status === 'queued' && item.queuedAhead !== null
+                  ? { ...item, queuedAhead: Math.max(0, item.queuedAhead - 1) }
+                  : item
             ),
           }));
-          const resultPath = await runWindowsOcr(fileId, localTaskId, windowsLanguage);
-          set((s) => ({
-            tasks: s.tasks.map((item) =>
-              item.taskId === localTaskId
-                ? { ...item, status: 'completed' as const, progress: 100, resultPath }
-                : item
-            ),
-          }));
-          continue;
+          try {
+            const resultPath = engine === 'windows'
+              ? await runWindowsOcr(task.fileId, task.taskId, windowsLanguage)
+              : await runPaddleOcr(task.fileId, task.taskId, paddleLanguage, paddleModel);
+            set((state) => ({
+              tasks: state.tasks.map((item) =>
+                item.taskId === task.taskId
+                  ? item.status === 'cancelled'
+                    ? item
+                    : { ...item, status: 'completed' as const, progress: 100, resultPath }
+                  : item
+              ),
+            }));
+          } catch (error) {
+            set((state) => ({
+              tasks: state.tasks.map((item) =>
+                item.taskId === task.taskId
+                  ? item.status === 'cancelled'
+                    ? item
+                    : { ...item, status: 'failed' as const, error: String(error) }
+                  : item
+              ),
+            }));
+          }
         }
-        const resp = await submitOcrTask(fileId, true);
-        // Update task with real ID
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(engine === 'paddle' ? 1 : WINDOWS_OCR_CONCURRENCY, batch.length) }, () => runWorker())
+      );
+      await get().loadCandidates();
+      set({ isSubmitting: false });
+      return;
+    }
+
+    for (const task of batch) {
+      try {
+        const resp = await submitOcrTask(task.fileId, true);
         set((s) => ({
           tasks: s.tasks.map((t) =>
-            t.fileId === fileId && t.status === 'submitting'
+            t.taskId === task.taskId && t.status !== 'cancelled'
               ? { ...t, taskId: resp.task_id, status: 'queued' as const }
               : t
           ),
         }));
-      } catch (e: any) {
+      } catch (error) {
         set((s) => ({
           tasks: s.tasks.map((t) =>
-            (engine === 'windows' ? t.taskId === task.taskId : t.fileId === fileId && t.status === 'submitting')
-              ? { ...t, status: 'failed' as const, error: String(e) }
+            t.taskId === task.taskId && t.status !== 'cancelled'
+              ? { ...t, status: 'failed' as const, error: String(error) }
               : t
           ),
         }));
@@ -241,10 +310,8 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
     const { polling } = get();
     if (engine === 'mineru' && !polling) {
       get().startPolling();
-    } else if (engine === 'windows') {
-      set({ selectedFileIds: new Set() });
-      await get().loadCandidates();
     }
+    set({ isSubmitting: false });
   },
 
   // ── Synchronous parse for single file ──
@@ -388,17 +455,23 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
   // ── Settings ──
   loadSettings: async () => {
     try {
-      const [apiUrl, outputDir, engine, windowsLanguage] = await Promise.all([
+      const [apiUrl, outputDir, engine, windowsLanguage, paddlePythonPath, paddleLanguage, paddleModel] = await Promise.all([
         getSetting('ocr_api_url'),
         getSetting('ocr_output_dir'),
         getSetting('ocr_engine'),
         getSetting('windows_ocr_language'),
+        getSetting('paddle_python_path'),
+        getSetting('paddle_ocr_language'),
+        getSetting('paddle_ocr_model'),
       ]);
       set({
         apiUrl: apiUrl || 'http://127.0.0.1:8000',
         outputDir: outputDir || '',
-        engine: engine === 'windows' ? 'windows' : 'mineru',
+        engine: engine === 'windows' || engine === 'paddle' ? engine : 'mineru',
         windowsLanguage: windowsLanguage || 'auto',
+        paddlePythonPath: paddlePythonPath || 'python',
+        paddleLanguage: paddleLanguage || 'ch',
+        paddleModel: paddleModel || 'PP-OCRv5_mobile',
       });
     } catch {
       // use defaults
@@ -417,7 +490,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
 
   saveEngine: async (engine: OcrEngine) => {
     await setSetting('ocr_engine', engine);
-    set({ engine, health: null, windowsStatus: null });
+    set({ engine, health: null, windowsStatus: null, paddleStatus: null });
     await get().checkHealth();
   },
 
@@ -426,19 +499,79 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
     set({ windowsLanguage });
   },
 
-  updateWindowsProgress: (progress: WindowsOcrProgress) => {
+  savePaddlePythonPath: async (paddlePythonPath: string) => {
+    await setSetting('paddle_python_path', paddlePythonPath);
+    set({ paddlePythonPath, paddleStatus: null });
+  },
+
+  savePaddleLanguage: async (paddleLanguage: string) => {
+    await setSetting('paddle_ocr_language', paddleLanguage);
+    set({ paddleLanguage });
+  },
+
+  savePaddleModel: async (paddleModel: string) => {
+    await setSetting('paddle_ocr_model', paddleModel);
+    set({ paddleModel });
+  },
+
+  installPaddle: async () => {
+    set({ healthChecking: true });
+    try {
+      const paddleStatus = await installPaddleOcr();
+      set({ paddleStatus, paddlePythonPath: paddleStatus.python_path, healthChecking: false });
+    } catch (error) {
+      set({
+        paddleStatus: { available: false, python_path: get().paddlePythonPath, paddle_version: null, paddleocr_version: null, error: String(error) },
+        healthChecking: false,
+      });
+    }
+  },
+
+  cancelTask: async (taskId: string) => {
+    const task = get().tasks.find((item) => item.taskId === taskId);
+    if (!task || !['submitting', 'queued', 'running'].includes(task.status)) return;
     set((state) => ({
-      tasks: state.tasks.map((task) =>
-        task.taskId === progress.task_id && task.engine === 'windows'
-          ? { ...task, status: 'running' as const, progress: progress.progress }
-          : task
+      tasks: state.tasks.map((item) =>
+        item.taskId === taskId
+          ? { ...item, status: 'cancelled' as const, queuedAhead: null, error: undefined }
+          : item
       ),
     }));
+    if (task.status === 'running' && task.engine !== 'mineru') {
+      try {
+        await cancelOcrTask(taskId);
+      } catch (error) {
+        console.error(`Failed to cancel OCR task ${taskId}:`, error);
+      }
+    }
+  },
+
+  updateWindowsProgress: (progress: WindowsOcrProgress) => {
+    pendingWindowsProgress.set(progress.task_id, progress);
+    if (windowsProgressFrame !== null) return;
+    windowsProgressFrame = window.requestAnimationFrame(() => {
+      const updates = new Map(pendingWindowsProgress);
+      pendingWindowsProgress.clear();
+      windowsProgressFrame = null;
+      set((state) => ({
+        tasks: state.tasks.map((task) => {
+          const update = updates.get(task.taskId);
+          return update && (task.engine === 'windows' || task.engine === 'paddle') && task.status !== 'cancelled'
+            ? { ...task, status: 'running' as const, progress: update.progress }
+            : task;
+        }),
+      }));
+    });
   },
 
   clearTasks: () => {
     get().stopPolling();
-    set({ tasks: [] });
+    pendingWindowsProgress.clear();
+    if (windowsProgressFrame !== null) {
+      window.cancelAnimationFrame(windowsProgressFrame);
+      windowsProgressFrame = null;
+    }
+    set({ tasks: [], isSubmitting: false });
   },
 }));
 

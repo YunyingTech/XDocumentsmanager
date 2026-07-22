@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Wifi, Loader2, CheckCircle, XCircle, Save, Trash2, Monitor, Server } from 'lucide-react';
-import { getSetting, setSetting, checkOcrHealth, getWindowsOcrStatus, vacuumDatabase, getOpenAiConfig, setOpenAiConfig, testOpenAiConnection, getSearchBackendStatus } from '../../lib/tauri';
+import { Wifi, Loader2, CheckCircle, XCircle, Save, Trash2, Monitor, Server, Boxes, Download } from 'lucide-react';
+import { getSetting, setSetting, checkOcrHealth, getWindowsOcrStatus, getPaddleOcrStatus, installPaddleOcr, vacuumDatabase, getOpenAiConfig, setOpenAiConfig, testOpenAiConnection, getSearchBackendStatus } from '../../lib/tauri';
 import { useUIStore } from '../../stores/uiStore';
-import type { MinerUHealthInfo, OcrEngine, SearchBackendStatus, WindowsOcrStatus } from '../../types';
+import type { MinerUHealthInfo, OcrEngine, PaddleOcrStatus, SearchBackendStatus, WindowsOcrStatus } from '../../types';
 import { useI18n } from '../../lib/i18n';
 import type { Language } from '../../stores/uiStore';
 
@@ -18,6 +18,10 @@ export function SettingsPanel() {
   const [ocrEngine, setOcrEngine] = useState<OcrEngine>('mineru');
   const [windowsOcrLanguage, setWindowsOcrLanguage] = useState('auto');
   const [windowsOcrStatus, setWindowsOcrStatus] = useState<WindowsOcrStatus | null>(null);
+  const [paddlePythonPath, setPaddlePythonPath] = useState('python');
+  const [paddleLanguage, setPaddleLanguage] = useState('ch');
+  const [paddleModel, setPaddleModel] = useState('PP-OCRv5_mobile');
+  const [paddleStatus, setPaddleStatus] = useState<PaddleOcrStatus | null>(null);
   const [ocrHealth, setOcrHealth] = useState<MinerUHealthInfo | null>(null);
   const [ocrChecking, setOcrChecking] = useState(false);
   const [openAiEndpoint, setOpenAiEndpoint] = useState('https://api.openai.com/v1');
@@ -40,7 +44,8 @@ export function SettingsPanel() {
     (async () => {
       const keys = [
         'index_location', 'max_file_size_mb', 'indexer_threads',
-        'poll_interval_secs', 'ocr_api_url', 'ocr_output_dir', 'ocr_engine', 'windows_ocr_language'
+        'poll_interval_secs', 'ocr_api_url', 'ocr_output_dir', 'ocr_engine', 'windows_ocr_language',
+        'paddle_python_path', 'paddle_ocr_language', 'paddle_ocr_model'
       ];
       for (const key of keys) {
         const val = await getSetting(key);
@@ -52,8 +57,11 @@ export function SettingsPanel() {
             case 'poll_interval_secs': setPollIntervalSecs(val); break;
             case 'ocr_api_url': setOcrApiUrl(val); break;
             case 'ocr_output_dir': setOcrOutputDir(val); break;
-            case 'ocr_engine': setOcrEngine(val === 'windows' ? 'windows' : 'mineru'); break;
+            case 'ocr_engine': setOcrEngine(val === 'windows' || val === 'paddle' ? val : 'mineru'); break;
             case 'windows_ocr_language': setWindowsOcrLanguage(val); break;
+            case 'paddle_python_path': setPaddlePythonPath(val); break;
+            case 'paddle_ocr_language': setPaddleLanguage(val); break;
+            case 'paddle_ocr_model': setPaddleModel(val); break;
           }
         }
       }
@@ -94,6 +102,25 @@ export function SettingsPanel() {
     return () => { active = false; };
   }, [ocrEngine, windowsOcrStatus]);
 
+  useEffect(() => {
+    if (ocrEngine !== 'paddle') return;
+    let active = true;
+    getPaddleOcrStatus()
+      .then((status) => { if (active) setPaddleStatus(status); })
+      .catch((error) => {
+        if (active) {
+          setPaddleStatus({
+            available: false,
+            python_path: '',
+            paddle_version: null,
+            paddleocr_version: null,
+            error: String(error),
+          });
+        }
+      });
+    return () => { active = false; };
+  }, [ocrEngine]);
+
   // ── Save helpers (auto-save on change) ──
   const save = useCallback(async (key: string, value: string) => {
     try {
@@ -115,6 +142,21 @@ export function SettingsPanel() {
       setOcrChecking(false);
       return;
     }
+    if (ocrEngine === 'paddle') {
+      try {
+        setPaddleStatus(await getPaddleOcrStatus());
+      } catch (error) {
+        setPaddleStatus({
+          available: false,
+          python_path: paddlePythonPath,
+          paddle_version: null,
+          paddleocr_version: null,
+          error: String(error),
+        });
+      }
+      setOcrChecking(false);
+      return;
+    }
     try {
       const result = await checkOcrHealth();
       setOcrHealth(result);
@@ -128,6 +170,25 @@ export function SettingsPanel() {
       });
     }
     setOcrChecking(false);
+  };
+
+  const installPaddle = async () => {
+    setOcrChecking(true);
+    try {
+      const status = await installPaddleOcr();
+      setPaddleStatus(status);
+      setPaddlePythonPath(status.python_path);
+    } catch (error) {
+      setPaddleStatus({
+        available: false,
+        python_path: paddlePythonPath,
+        paddle_version: null,
+        paddleocr_version: null,
+        error: String(error),
+      });
+    } finally {
+      setOcrChecking(false);
+    }
   };
 
   const saveOpenAi = async (apiKey: string | undefined = openAiApiKey || undefined) => {
@@ -241,6 +302,9 @@ export function SettingsPanel() {
                   <button type="button" onClick={() => { setOcrEngine('windows'); save('ocr_engine', 'windows'); setWindowsOcrStatus(null); }} className={`inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs font-medium ${ocrEngine === 'windows' ? 'bg-white shadow-sm dark:bg-surface-700' : 'text-surface-500'}`}>
                     <Monitor size={14} /> {t('ocr.windowsEngine')}
                   </button>
+                  <button type="button" onClick={() => { setOcrEngine('paddle'); save('ocr_engine', 'paddle'); setPaddleStatus(null); }} className={`inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs font-medium ${ocrEngine === 'paddle' ? 'bg-white shadow-sm dark:bg-surface-700' : 'text-surface-500'}`}>
+                    <Boxes size={14} /> PaddleOCR
+                  </button>
                 </div>
               </div>
               {ocrEngine === 'mineru' ? <div>
@@ -254,7 +318,7 @@ export function SettingsPanel() {
                   onChange={(e) => { setOcrApiUrl(e.target.value); save('ocr_api_url', e.target.value); }}
                   placeholder="http://127.0.0.1:8000"
                 />
-              </div> : <div>
+              </div> : ocrEngine === 'windows' ? <div>
                 <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
                   {t('ocr.windowsLanguage')}
                 </label>
@@ -263,6 +327,38 @@ export function SettingsPanel() {
                   {windowsOcrStatus?.languages.map((item) => <option key={item.tag} value={item.tag}>{item.native_name} ({item.tag})</option>)}
                 </select>
                 {windowsOcrStatus?.error && <p className="mt-1 text-xs text-red-500">{windowsOcrStatus.error}</p>}
+              </div> : <div className="space-y-3">
+                <div>
+                  <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
+                    {t('ocr.paddlePython')}
+                  </label>
+                  <input className="input" value={paddlePythonPath} onChange={(event) => { setPaddlePythonPath(event.target.value); save('paddle_python_path', event.target.value); setPaddleStatus(null); }} placeholder="python" />
+                </div>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div>
+                    <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">{t('ocr.paddleLanguage')}</label>
+                    <select className="input" value={paddleLanguage} onChange={(event) => { setPaddleLanguage(event.target.value); save('paddle_ocr_language', event.target.value); }}>
+                      <option value="ch">中文</option>
+                      <option value="en">English</option>
+                      <option value="japan">日本語</option>
+                      <option value="korean">한국어</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">{t('ocr.paddleModel')}</label>
+                    <select className="input" value={paddleModel} onChange={(event) => { setPaddleModel(event.target.value); save('paddle_ocr_model', event.target.value); }}>
+                      <option value="PP-OCRv5_mobile">PP-OCRv5 Mobile</option>
+                      <option value="PP-OCRv5_server">PP-OCRv5 Server</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="flex min-w-0 items-center gap-2">
+                  <button type="button" className="btn-secondary inline-flex h-8 shrink-0 items-center gap-1.5 px-2.5 text-xs disabled:opacity-50" onClick={() => void installPaddle()} disabled={ocrChecking}>
+                    {ocrChecking ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+                    {t('ocr.installPaddle')}
+                  </button>
+                  {paddleStatus?.error && <p className="min-w-0 truncate text-xs text-red-500" title={paddleStatus.error}>{paddleStatus.error}</p>}
+                </div>
               </div>}
               <div>
                 <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
@@ -313,6 +409,12 @@ export function SettingsPanel() {
                   <span className={`text-xs inline-flex items-center gap-1 ${windowsOcrStatus.available ? 'text-green-600' : 'text-red-500'}`}>
                     {windowsOcrStatus.available ? <CheckCircle size={12} /> : <XCircle size={12} />}
                     {windowsOcrStatus.available ? t('ocr.windowsReady') : t('ocr.windowsUnavailable')}
+                  </span>
+                )}
+                {ocrEngine === 'paddle' && paddleStatus && (
+                  <span className={`text-xs inline-flex min-w-0 items-center gap-1 ${paddleStatus.available ? 'text-green-600' : 'text-red-500'}`} title={paddleStatus.error ?? undefined}>
+                    {paddleStatus.available ? <CheckCircle size={12} /> : <XCircle size={12} />}
+                    <span className="truncate">{paddleStatus.available ? t('ocr.paddleReady') : t('ocr.paddleUnavailable')}</span>
                   </span>
                 )}
               </div>

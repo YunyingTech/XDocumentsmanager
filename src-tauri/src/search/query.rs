@@ -2,7 +2,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::db::Database;
-use crate::models::{OpenAiConfig, OpenAiConnectionInfo};
+use crate::models::{OpenAiConfig, OpenAiConnectionInfo, SearchQueryAnalysis};
 use crate::utils::crypto::{decrypt_credential, encrypt_credential};
 
 const DEFAULT_ENDPOINT: &str = "https://api.openai.com/v1";
@@ -34,52 +34,93 @@ pub fn save_config(
 ) -> Result<OpenAiConfig, String> {
     set_setting(db, "openai_endpoint", endpoint.trim().trim_end_matches('/'))?;
     set_setting(db, "openai_model", model.trim())?;
-    set_setting(db, "smart_search_enabled", if smart_search_enabled { "true" } else { "false" })?;
+    set_setting(
+        db,
+        "smart_search_enabled",
+        if smart_search_enabled {
+            "true"
+        } else {
+            "false"
+        },
+    )?;
     if let Some(key) = api_key {
         if key.is_empty() {
             set_setting(db, "openai_api_key_protected", "")?;
         } else {
-            set_setting(db, "openai_api_key_protected", &encrypt_credential(key.trim())?)?;
+            set_setting(
+                db,
+                "openai_api_key_protected",
+                &encrypt_credential(key.trim())?,
+            )?;
         }
     }
     Ok(load_config(db))
 }
 
-pub async fn expand_query(db: &Database, query: &str) -> Result<String, String> {
+pub async fn analyze_query(db: &Database, query: &str) -> Result<SearchQueryAnalysis, String> {
     let config = load_config(db);
-    if !config.smart_search_enabled || !config.api_key_configured {
-        return Ok(query.to_string());
+    if !config.smart_search_enabled {
+        return Err("Smart search is disabled in settings".to_string());
     }
+    if !config.api_key_configured {
+        return Err("API key is not configured".to_string());
+    }
+    let started = std::time::Instant::now();
     let terms = request_terms(db, &config, query).await?;
     let mut all_terms = terms.phrases;
     all_terms.extend(terms.keywords);
-    all_terms.push(query.to_string());
-    all_terms.retain(|term| !term.trim().is_empty());
-    all_terms.sort();
-    all_terms.dedup();
+    let all_terms = normalize_terms(all_terms);
     if all_terms.is_empty() {
-        return Ok(query.to_string());
+        return Err("The model returned no search terms".to_string());
     }
-    Ok(all_terms
-        .into_iter()
-        .take(16)
-        .map(|term| format!("\"{}\"", term.replace(['\"', '\\'], "")))
-        .collect::<Vec<_>>()
-        .join(" OR "))
+    Ok(SearchQueryAnalysis {
+        terms: all_terms,
+        elapsed_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+        model: config.model,
+    })
+}
+
+fn normalize_terms(terms: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for term in terms {
+        let term = term.trim().replace(['\"', '\\'], "");
+        let key = term.to_lowercase();
+        if !term.is_empty() && seen.insert(key) {
+            normalized.push(term);
+        }
+        if normalized.len() == 16 {
+            break;
+        }
+    }
+    normalized
 }
 
 pub async fn test_connection(db: &Database) -> Result<OpenAiConnectionInfo, String> {
     let config = load_config(db);
     if !config.api_key_configured {
-        return Ok(OpenAiConnectionInfo { connected: false, message: "API key is not configured".to_string() });
+        return Ok(OpenAiConnectionInfo {
+            connected: false,
+            message: "API key is not configured".to_string(),
+        });
     }
     match request_terms(db, &config, "quarterly compliance report").await {
-        Ok(_) => Ok(OpenAiConnectionInfo { connected: true, message: format!("Connected to {}", config.model) }),
-        Err(error) => Ok(OpenAiConnectionInfo { connected: false, message: error }),
+        Ok(_) => Ok(OpenAiConnectionInfo {
+            connected: true,
+            message: format!("Connected to {}", config.model),
+        }),
+        Err(error) => Ok(OpenAiConnectionInfo {
+            connected: false,
+            message: error,
+        }),
     }
 }
 
-async fn request_terms(db: &Database, config: &OpenAiConfig, query: &str) -> Result<QueryTerms, String> {
+async fn request_terms(
+    db: &Database,
+    config: &OpenAiConfig,
+    query: &str,
+) -> Result<QueryTerms, String> {
     let protected = setting(db, "openai_api_key_protected", "");
     let api_key = decrypt_credential(&protected)?;
     let endpoint = chat_completions_url(&config.endpoint);
@@ -96,7 +137,7 @@ async fn request_terms(db: &Database, config: &OpenAiConfig, query: &str) -> Res
         "messages": [
             {
                 "role": "system",
-                "content": "Extract precise document-search terms from the user's request. Return only JSON with arrays named keywords and phrases. Preserve names, identifiers, dates, quoted wording, and the user's language. Do not answer the request."
+                "content": "You prepare search terms for a Chinese and English PDF policy archive. Return only JSON with arrays named keywords and phrases. Extract named entities and core concepts, then add useful aliases, full names, synonyms, and closely related policy or incident-response terminology. Produce 6 to 12 concise candidates in the user's language. Preserve names, identifiers, dates, and quoted wording. Do not answer the request and do not include generic filler words."
             },
             { "role": "user", "content": query }
         ]
@@ -111,13 +152,22 @@ async fn request_terms(db: &Database, config: &OpenAiConfig, query: &str) -> Res
     let status = response.status();
     let value: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
-        let message = value.pointer("/error/message").and_then(|v| v.as_str()).unwrap_or("OpenAI-compatible endpoint rejected the request");
+        let message = value
+            .pointer("/error/message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("OpenAI-compatible endpoint rejected the request");
         return Err(format!("{}: {}", status, message));
     }
-    let content = value.pointer("/choices/0/message/content")
+    let content = value
+        .pointer("/choices/0/message/content")
         .and_then(|value| value.as_str())
         .ok_or_else(|| "Response has no choices[0].message.content".to_string())?;
-    let cleaned = content.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
+    let cleaned = content
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
     serde_json::from_str(cleaned).map_err(|e| format!("Invalid structured query response: {}", e))
 }
 
@@ -134,8 +184,10 @@ fn chat_completions_url(endpoint: &str) -> String {
 
 fn setting(db: &Database, key: &str, default: &str) -> String {
     let conn = db.get_connection();
-    conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| row.get(0))
-        .unwrap_or_else(|_| default.to_string())
+    conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+        row.get(0)
+    })
+    .unwrap_or_else(|_| default.to_string())
 }
 
 fn set_setting(db: &Database, key: &str, value: &str) -> Result<(), String> {
@@ -149,12 +201,35 @@ fn set_setting(db: &Database, key: &str, value: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::chat_completions_url;
+    use super::{chat_completions_url, normalize_terms};
 
     #[test]
     fn normalizes_compatible_endpoints() {
-        assert_eq!(chat_completions_url("https://api.openai.com/v1"), "https://api.openai.com/v1/chat/completions");
-        assert_eq!(chat_completions_url("http://localhost:11434"), "http://localhost:11434/v1/chat/completions");
-        assert_eq!(chat_completions_url("http://host/v1/chat/completions"), "http://host/v1/chat/completions");
+        assert_eq!(
+            chat_completions_url("https://api.openai.com/v1"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_completions_url("http://localhost:11434"),
+            "http://localhost:11434/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_completions_url("http://host/v1/chat/completions"),
+            "http://host/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn normalizes_and_deduplicates_suggested_terms() {
+        assert_eq!(
+            normalize_terms(vec![
+                " 中科院 ".to_string(),
+                "中科院".to_string(),
+                "中国科学院".to_string(),
+                "\\\"网络安全\\\"".to_string(),
+                "".to_string(),
+            ]),
+            vec!["中科院", "中国科学院", "网络安全"]
+        );
     }
 }

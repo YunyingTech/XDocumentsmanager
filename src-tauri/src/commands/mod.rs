@@ -3,6 +3,8 @@ pub mod folders;
 pub mod index;
 pub mod logs;
 pub mod ocr;
+pub mod ocr_control;
+pub mod paddle_ocr;
 pub mod search;
 pub mod viewer;
 pub mod settings;

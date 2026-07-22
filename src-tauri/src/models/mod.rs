@@ -95,6 +95,19 @@ pub struct SearchResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchResponse {
+    pub results: Vec<SearchResult>,
+    pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchQueryAnalysis {
+    pub terms: Vec<String>,
+    pub elapsed_ms: u64,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAiConfig {
     pub endpoint: String,
     pub model: String,
