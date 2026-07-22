@@ -5,6 +5,10 @@ use std::path::{Path, PathBuf};
 pub fn normalize_path(path: &str) -> PathBuf {
     let path = path.trim_matches('"');
 
+    if path.starts_with(r"\\?\") {
+        return PathBuf::from(path);
+    }
+
     // Handle UNC paths
     if path.starts_with("\\\\") {
         let normalized = format!(r"\\?\UNC\{}", &path[2..]);
@@ -38,13 +42,21 @@ mod tests {
     #[test]
     fn test_normalize_unc_path() {
         let result = normalize_path(r"\\server\share\folder");
-        assert!(result.to_string_lossy().contains(r"\\?\UNC\server\share\folder"));
+        assert!(result
+            .to_string_lossy()
+            .contains(r"\\?\UNC\server\share\folder"));
     }
 
     #[test]
     fn test_normalize_short_path() {
         let result = normalize_path(r"C:\data");
         assert_eq!(result, PathBuf::from(r"C:\data"));
+    }
+
+    #[test]
+    fn test_preserves_extended_path() {
+        let path = r"\\?\C:\data\file.pdf";
+        assert_eq!(normalize_path(path), PathBuf::from(path));
     }
 
     #[test]

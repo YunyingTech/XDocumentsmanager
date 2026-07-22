@@ -89,7 +89,8 @@ impl SearchEngine {
         self.reader.searcher().num_docs() == 0
     }
 
-    pub fn upsert(&self, document: SearchDocument) -> Result<(), String> {
+    pub fn upsert(&self, mut document: SearchDocument) -> Result<(), String> {
+        document.content = normalize_cjk_ocr_spacing(&document.content);
         {
             let mut writer = self.writer.lock().map_err(|e| e.to_string())?;
             writer.delete_term(Term::from_field_i64(self.fields.file_id, document.file_id));
@@ -201,11 +202,12 @@ pub fn documents_from_connection(conn: &Connection) -> Result<Vec<SearchDocument
 }
 
 fn row_to_document(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchDocument> {
+    let content: String = row.get(3)?;
     Ok(SearchDocument {
         file_id: row.get(0)?,
         folder_id: row.get(1)?,
         file_name: row.get(2)?,
-        content: row.get(3)?,
+        content: normalize_cjk_ocr_spacing(&content),
         title: row.get(4)?,
         author: row.get(5)?,
         keywords: row.get(6)?,
@@ -213,6 +215,39 @@ fn row_to_document(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchDocument> 
         modified_at: row.get(8)?,
         size_bytes: row.get(9)?,
     })
+}
+
+pub(crate) fn normalize_cjk_ocr_spacing(text: &str) -> String {
+    let mut normalized = String::with_capacity(text.len());
+    let mut whitespace = String::new();
+
+    for character in text.chars() {
+        if character.is_whitespace() {
+            whitespace.push(character);
+            continue;
+        }
+
+        if !whitespace.is_empty() {
+            let previous = normalized.chars().next_back();
+            if !previous.is_some_and(is_cjk) || !is_cjk(character) {
+                normalized.push_str(&whitespace);
+            }
+            whitespace.clear();
+        }
+        normalized.push(character);
+    }
+    normalized.push_str(&whitespace);
+    normalized
+}
+
+fn is_cjk(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0x20000..=0x2FA1F
+    )
 }
 
 fn escape_query(query: &str) -> String {
@@ -235,7 +270,7 @@ mod tests {
             file_id: 7,
             folder_id: 2,
             file_name: "audit.pdf".to_string(),
-            content: "Quarterly compliance report. 供应商风险评估。".to_string(),
+            content: "Quarterly compliance report. 供 应 商 风 险 评 估。中 国 科 学 院。".to_string(),
             title: String::new(),
             author: String::new(),
             keywords: "audit risk".to_string(),
@@ -246,8 +281,18 @@ mod tests {
 
         assert_eq!(engine.search("compliance", None, 10).unwrap()[0].file_id, 7);
         assert_eq!(engine.search("供应商风险", None, 10).unwrap()[0].file_id, 7);
+        assert_eq!(engine.search("中国", None, 10).unwrap()[0].file_id, 7);
 
         drop(engine);
         let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn removes_only_whitespace_between_cjk_characters() {
+        assert_eq!(
+            normalize_cjk_ocr_spacing("## Page 1\n\n中 国 科 学 院 OCR 2026"),
+            "## Page 1\n\n中国科学院 OCR 2026"
+        );
+        assert_eq!(normalize_cjk_ocr_spacing("云 上  i 西 安"), "云上  i 西安");
     }
 }

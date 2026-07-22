@@ -60,24 +60,44 @@ impl ElasticRuntime {
     }
 
     pub fn is_ready(&self) -> bool {
-        self.endpoint.read().map(|value| value.is_some()).unwrap_or(false)
+        self.endpoint
+            .read()
+            .map(|value| value.is_some())
+            .unwrap_or(false)
     }
 
     pub fn start(&self) -> Result<(), String> {
         let result = self.start_inner();
         if let Err(ref message) = result {
-            if let Ok(mut error) = self.error.write() { *error = Some(message.clone()); }
+            if let Ok(mut error) = self.error.write() {
+                *error = Some(message.clone());
+            }
         }
         result
     }
 
     fn start_inner(&self) -> Result<(), String> {
-        let config = self.config.read().map_err(|e| e.to_string())?.clone()
+        let config = self
+            .config
+            .read()
+            .map_err(|e| e.to_string())?
+            .clone()
             .ok_or_else(|| "Bundled Elasticsearch runtime is not configured".to_string())?;
         std::fs::create_dir_all(&config.data_dir).map_err(|e| e.to_string())?;
         std::fs::create_dir_all(&config.logs_dir).map_err(|e| e.to_string())?;
         let distribution_dir = resolve_distribution_dir(&config.distribution_dir)?;
         let launcher = distribution_dir.join("bin").join("elasticsearch.bat");
+        let elastic_root = config
+            .data_dir
+            .parent()
+            .ok_or_else(|| "Elasticsearch data directory has no parent".to_string())?;
+        let runtime_config_dir = elastic_root.join("config");
+        prepare_runtime_config(
+            &distribution_dir.join("config"),
+            &runtime_config_dir,
+            &config.data_dir,
+            &config.logs_dir,
+        )?;
         let http_port = reserve_port()?;
         let transport_port = reserve_port()?;
         let endpoint = format!("http://127.0.0.1:{}", http_port);
@@ -87,6 +107,7 @@ impl ElasticRuntime {
         let mut command = Command::new(&launcher);
         command
             .current_dir(&distribution_dir)
+            .env("ES_PATH_CONF", &runtime_config_dir)
             .env("ES_JAVA_OPTS", "-Xms512m -Xmx512m -Djava.awt.headless=true")
             .args([
                 "-Ecluster.name=xdocuments",
@@ -111,7 +132,9 @@ impl ElasticRuntime {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x08000000);
         }
-        let mut child = command.spawn().map_err(|e| format!("Cannot start bundled Elasticsearch: {}", e))?;
+        let mut child = command
+            .spawn()
+            .map_err(|e| format!("Cannot start bundled Elasticsearch: {}", e))?;
         #[cfg(windows)]
         {
             match create_kill_on_close_job(&child) {
@@ -126,35 +149,62 @@ impl ElasticRuntime {
 
         let deadline = Instant::now() + Duration::from_secs(180);
         loop {
-            if let Some(status) = self.process.lock().map_err(|e| e.to_string())?
-                .as_mut().and_then(|child| child.try_wait().ok()).flatten()
+            if let Some(status) = self
+                .process
+                .lock()
+                .map_err(|e| e.to_string())?
+                .as_mut()
+                .and_then(|child| child.try_wait().ok())
+                .flatten()
             {
-                return self.fail(format!("Elasticsearch exited during startup with {}", status));
+                return self.fail(format!(
+                    "Elasticsearch exited during startup with {}",
+                    status
+                ));
             }
             if let Ok(response) = self.client.get(&endpoint).send() {
                 if response.status().is_success() {
                     let body: Value = response.json().map_err(|e| e.to_string())?;
-                    let version = body.pointer("/version/number").and_then(Value::as_str).unwrap_or("unknown").to_string();
+                    let version = body
+                        .pointer("/version/number")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_string();
                     self.ensure_index(&endpoint)?;
                     let endpoint_for_log = endpoint.clone();
                     *self.endpoint.write().map_err(|e| e.to_string())? = Some(endpoint);
                     *self.version.write().map_err(|e| e.to_string())? = Some(version);
                     *self.error.write().map_err(|e| e.to_string())? = None;
-                    log::info!("Elasticsearch {} is ready at {}", self.version.read().ok().and_then(|value| value.clone()).unwrap_or_default(), endpoint_for_log);
+                    log::info!(
+                        "Elasticsearch {} is ready at {}",
+                        self.version
+                            .read()
+                            .ok()
+                            .and_then(|value| value.clone())
+                            .unwrap_or_default(),
+                        endpoint_for_log
+                    );
                     return Ok(());
                 }
             }
             if Instant::now() >= deadline {
-                return self.fail("Elasticsearch did not become ready within 180 seconds".to_string());
+                return self
+                    .fail("Elasticsearch did not become ready within 180 seconds".to_string());
             }
             std::thread::sleep(Duration::from_millis(500));
         }
     }
 
     pub fn upsert(&self, document: &SearchDocument) -> Result<bool, String> {
-        let Some(endpoint) = self.endpoint()? else { return Ok(false) };
-        let response = self.client
-            .put(format!("{}/{}/_doc/{}?refresh=wait_for", endpoint, INDEX_NAME, document.file_id))
+        let Some(endpoint) = self.endpoint()? else {
+            return Ok(false);
+        };
+        let response = self
+            .client
+            .put(format!(
+                "{}/{}/_doc/{}?refresh=wait_for",
+                endpoint, INDEX_NAME, document.file_id
+            ))
             .json(document)
             .send()
             .map_err(|e| e.to_string())?;
@@ -163,9 +213,15 @@ impl ElasticRuntime {
     }
 
     pub fn delete_file(&self, file_id: i64) -> Result<bool, String> {
-        let Some(endpoint) = self.endpoint()? else { return Ok(false) };
-        let response = self.client
-            .delete(format!("{}/{}/_doc/{}?refresh=wait_for", endpoint, INDEX_NAME, file_id))
+        let Some(endpoint) = self.endpoint()? else {
+            return Ok(false);
+        };
+        let response = self
+            .client
+            .delete(format!(
+                "{}/{}/_doc/{}?refresh=wait_for",
+                endpoint, INDEX_NAME, file_id
+            ))
             .send()
             .map_err(|e| e.to_string())?;
         if response.status().as_u16() != 404 {
@@ -175,9 +231,15 @@ impl ElasticRuntime {
     }
 
     pub fn delete_folder(&self, folder_id: i64) -> Result<bool, String> {
-        let Some(endpoint) = self.endpoint()? else { return Ok(false) };
-        let response = self.client
-            .post(format!("{}/{}/_delete_by_query?refresh=true", endpoint, INDEX_NAME))
+        let Some(endpoint) = self.endpoint()? else {
+            return Ok(false);
+        };
+        let response = self
+            .client
+            .post(format!(
+                "{}/{}/_delete_by_query?refresh=true",
+                endpoint, INDEX_NAME
+            ))
             .json(&json!({ "query": { "term": { "folder_id": folder_id } } }))
             .send()
             .map_err(|e| e.to_string())?;
@@ -186,15 +248,26 @@ impl ElasticRuntime {
     }
 
     pub fn rebuild(&self, conn: &rusqlite::Connection) -> Result<bool, String> {
-        let Some(endpoint) = self.endpoint()? else { return Ok(false) };
-        let delete = self.client.delete(format!("{}/{}", endpoint, INDEX_NAME)).send().map_err(|e| e.to_string())?;
-        if delete.status().as_u16() != 404 { ensure_success(delete, "replace Elasticsearch index")?; }
+        let Some(endpoint) = self.endpoint()? else {
+            return Ok(false);
+        };
+        let delete = self
+            .client
+            .delete(format!("{}/{}", endpoint, INDEX_NAME))
+            .send()
+            .map_err(|e| e.to_string())?;
+        if delete.status().as_u16() != 404 {
+            ensure_success(delete, "replace Elasticsearch index")?;
+        }
         self.ensure_index(&endpoint)?;
 
         let documents = documents_from_connection(conn)?;
         let mut body = String::new();
         for document in documents {
-            let action = serde_json::to_string(&json!({ "index": { "_index": INDEX_NAME, "_id": document.file_id } })).map_err(|e| e.to_string())?;
+            let action = serde_json::to_string(
+                &json!({ "index": { "_index": INDEX_NAME, "_id": document.file_id } }),
+            )
+            .map_err(|e| e.to_string())?;
             let source = serde_json::to_string(&document).map_err(|e| e.to_string())?;
             if !body.is_empty() && body.len() + action.len() + source.len() + 2 > 8 * 1024 * 1024 {
                 self.send_bulk(&endpoint, std::mem::take(&mut body))?;
@@ -204,28 +277,53 @@ impl ElasticRuntime {
             body.push_str(&source);
             body.push('\n');
         }
-        if !body.is_empty() { self.send_bulk(&endpoint, body)?; }
-        let refresh = self.client.post(format!("{}/{}/_refresh", endpoint, INDEX_NAME)).send().map_err(|e| e.to_string())?;
+        if !body.is_empty() {
+            self.send_bulk(&endpoint, body)?;
+        }
+        let refresh = self
+            .client
+            .post(format!("{}/{}/_refresh", endpoint, INDEX_NAME))
+            .send()
+            .map_err(|e| e.to_string())?;
         ensure_success(refresh, "refresh Elasticsearch index")?;
         Ok(true)
     }
 
-    pub fn search(&self, query: &str, filters: Option<&SearchFilters>, limit: usize) -> Result<Option<Vec<SearchHit>>, String> {
-        let Some(endpoint) = self.endpoint()? else { return Ok(None) };
+    pub fn search(
+        &self,
+        query: &str,
+        filters: Option<&SearchFilters>,
+        limit: usize,
+    ) -> Result<Option<Vec<SearchHit>>, String> {
+        let Some(endpoint) = self.endpoint()? else {
+            return Ok(None);
+        };
         let mut filter = Vec::new();
         if let Some(filters) = filters {
-            if let Some(folder_id) = filters.folder_id { filter.push(json!({ "term": { "folder_id": folder_id } })); }
-            if let Some(ref extension) = filters.file_extension { filter.push(json!({ "term": { "extension": extension.to_lowercase() } })); }
+            if let Some(folder_id) = filters.folder_id {
+                filter.push(json!({ "term": { "folder_id": folder_id } }));
+            }
+            if let Some(ref extension) = filters.file_extension {
+                filter.push(json!({ "term": { "extension": extension.to_lowercase() } }));
+            }
             if filters.size_min.is_some() || filters.size_max.is_some() {
                 let mut range = serde_json::Map::new();
-                if let Some(value) = filters.size_min { range.insert("gte".to_string(), json!(value)); }
-                if let Some(value) = filters.size_max { range.insert("lte".to_string(), json!(value)); }
+                if let Some(value) = filters.size_min {
+                    range.insert("gte".to_string(), json!(value));
+                }
+                if let Some(value) = filters.size_max {
+                    range.insert("lte".to_string(), json!(value));
+                }
                 filter.push(json!({ "range": { "size_bytes": range } }));
             }
             if filters.date_from.is_some() || filters.date_to.is_some() {
                 let mut range = serde_json::Map::new();
-                if let Some(ref value) = filters.date_from { range.insert("gte".to_string(), json!(value)); }
-                if let Some(ref value) = filters.date_to { range.insert("lte".to_string(), json!(value)); }
+                if let Some(ref value) = filters.date_from {
+                    range.insert("gte".to_string(), json!(value));
+                }
+                if let Some(ref value) = filters.date_to {
+                    range.insert("lte".to_string(), json!(value));
+                }
                 filter.push(json!({ "range": { "modified_at": range } }));
             }
         }
@@ -243,22 +341,37 @@ impl ElasticRuntime {
                 }
             }
         });
-        let response = self.client.post(format!("{}/{}/_search", endpoint, INDEX_NAME))
-            .json(&payload).send().map_err(|e| e.to_string())?;
+        let response = self
+            .client
+            .post(format!("{}/{}/_search", endpoint, INDEX_NAME))
+            .json(&payload)
+            .send()
+            .map_err(|e| e.to_string())?;
         let value = ensure_success_json(response, "search Elasticsearch")?;
-        let hits = value.pointer("/hits/hits").and_then(Value::as_array).ok_or_else(|| "Elasticsearch response has no hits".to_string())?;
-        let results = hits.iter().filter_map(|hit| {
-            Some(SearchHit {
-                file_id: hit.pointer("/_source/file_id")?.as_i64()?,
-                score: hit.get("_score").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+        let hits = value
+            .pointer("/hits/hits")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "Elasticsearch response has no hits".to_string())?;
+        let results = hits
+            .iter()
+            .filter_map(|hit| {
+                Some(SearchHit {
+                    file_id: hit.pointer("/_source/file_id")?.as_i64()?,
+                    score: hit.get("_score").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+                })
             })
-        }).collect();
+            .collect();
         Ok(Some(results))
     }
 
     pub fn status(&self) -> SearchBackendStatus {
         SearchBackendStatus {
-            backend: if self.is_ready() { "elasticsearch" } else { "tantivy-fallback" }.to_string(),
+            backend: if self.is_ready() {
+                "elasticsearch"
+            } else {
+                "tantivy-fallback"
+            }
+            .to_string(),
             connected: self.is_ready(),
             endpoint: self.endpoint.read().ok().and_then(|value| value.clone()),
             version: self.version.read().ok().and_then(|value| value.clone()),
@@ -267,8 +380,14 @@ impl ElasticRuntime {
     }
 
     fn ensure_index(&self, endpoint: &str) -> Result<(), String> {
-        let exists = self.client.head(format!("{}/{}", endpoint, INDEX_NAME)).send().map_err(|e| e.to_string())?;
-        if exists.status().is_success() { return Ok(()) }
+        let exists = self
+            .client
+            .head(format!("{}/{}", endpoint, INDEX_NAME))
+            .send()
+            .map_err(|e| e.to_string())?;
+        if exists.status().is_success() {
+            return Ok(());
+        }
         let mapping = json!({
             "settings": {
                 "index.max_ngram_diff": 2,
@@ -288,16 +407,25 @@ impl ElasticRuntime {
                 "size_bytes": { "type": "long" }
             }}
         });
-        let response = self.client.put(format!("{}/{}", endpoint, INDEX_NAME)).json(&mapping).send().map_err(|e| e.to_string())?;
+        let response = self
+            .client
+            .put(format!("{}/{}", endpoint, INDEX_NAME))
+            .json(&mapping)
+            .send()
+            .map_err(|e| e.to_string())?;
         ensure_success(response, "create Elasticsearch index")
     }
 
     fn endpoint(&self) -> Result<Option<String>, String> {
-        self.endpoint.read().map(|value| value.clone()).map_err(|e| e.to_string())
+        self.endpoint
+            .read()
+            .map(|value| value.clone())
+            .map_err(|e| e.to_string())
     }
 
     fn send_bulk(&self, endpoint: &str, body: String) -> Result<(), String> {
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}/_bulk", endpoint))
             .header("content-type", "application/x-ndjson")
             .body(body)
@@ -311,7 +439,9 @@ impl ElasticRuntime {
     }
 
     fn fail<T>(&self, message: String) -> Result<T, String> {
-        if let Ok(mut error) = self.error.write() { *error = Some(message.clone()); }
+        if let Ok(mut error) = self.error.write() {
+            *error = Some(message.clone());
+        }
         Err(message)
     }
 }
@@ -332,7 +462,9 @@ impl Drop for ElasticRuntime {
                     let _ = Command::new("taskkill")
                         .args(["/PID", &child.id().to_string(), "/T", "/F"])
                         .creation_flags(0x08000000)
-                        .stdout(Stdio::null()).stderr(Stdio::null()).status();
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
                 }
                 let _ = child.kill();
                 let _ = child.wait();
@@ -355,7 +487,10 @@ fn create_kill_on_close_job(child: &Child) -> Result<isize, String> {
 
     let handle = unsafe { CreateJobObjectW(null(), null()) };
     if handle.is_null() {
-        return Err(format!("Cannot create Elasticsearch process job: {}", std::io::Error::last_os_error()));
+        return Err(format!(
+            "Cannot create Elasticsearch process job: {}",
+            std::io::Error::last_os_error()
+        ));
     }
     let mut information: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
     information.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -369,44 +504,151 @@ fn create_kill_on_close_job(child: &Child) -> Result<isize, String> {
     };
     let assigned = if configured != 0 {
         unsafe { AssignProcessToJobObject(handle, child.as_raw_handle() as _) }
-    } else { 0 };
+    } else {
+        0
+    };
     if configured == 0 || assigned == 0 {
         let error = std::io::Error::last_os_error();
         unsafe { CloseHandle(handle) };
-        return Err(format!("Cannot attach Elasticsearch to the application job: {}", error));
+        return Err(format!(
+            "Cannot attach Elasticsearch to the application job: {}",
+            error
+        ));
     }
     Ok(handle as isize)
 }
 
 fn resolve_distribution_dir(path: &Path) -> Result<PathBuf, String> {
-    if path.join("bin").join("elasticsearch.bat").is_file() { return Ok(path.to_path_buf()) }
+    if path.join("bin").join("elasticsearch.bat").is_file() {
+        return Ok(path.to_path_buf());
+    }
     let entries = std::fs::read_dir(path).map_err(|e| e.to_string())?;
     for entry in entries.flatten() {
         let candidate = entry.path();
-        if candidate.join("bin").join("elasticsearch.bat").is_file() { return Ok(candidate) }
+        if candidate.join("bin").join("elasticsearch.bat").is_file() {
+            return Ok(candidate);
+        }
     }
-    Err(format!("No Elasticsearch distribution found under {}", path.display()))
+    Err(format!(
+        "No Elasticsearch distribution found under {}",
+        path.display()
+    ))
+}
+
+fn prepare_runtime_config(
+    source: &Path,
+    destination: &Path,
+    data_dir: &Path,
+    logs_dir: &Path,
+) -> Result<(), String> {
+    copy_directory(source, destination)?;
+
+    let jvm_options_path = destination.join("jvm.options");
+    let options = std::fs::read_to_string(&jvm_options_path).map_err(|e| e.to_string())?;
+    let mut rewritten = Vec::new();
+    for line in options.lines() {
+        if line.starts_with("-Xlog:gc") && line.contains("file=logs/gc.log") {
+            continue;
+        }
+        if line.starts_with("-XX:HeapDumpPath=") {
+            rewritten.push(format!("-XX:HeapDumpPath={}", data_dir.display()));
+        } else if line.starts_with("-XX:ErrorFile=") {
+            rewritten.push(format!(
+                "-XX:ErrorFile={}",
+                logs_dir.join("hs_err_pid%p.log").display()
+            ));
+        } else {
+            rewritten.push(line.to_string());
+        }
+    }
+    std::fs::write(jvm_options_path, format!("{}\n", rewritten.join("\n")))
+        .map_err(|e| e.to_string())
+}
+
+fn copy_directory(source: &Path, destination: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(destination).map_err(|e| e.to_string())?;
+    for entry in std::fs::read_dir(source).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+            copy_directory(&source_path, &destination_path)?;
+        } else {
+            std::fs::copy(source_path, destination_path).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prepare_runtime_config;
+
+    #[test]
+    fn runtime_config_keeps_jvm_writes_out_of_the_distribution() {
+        let root = std::env::temp_dir().join(format!(
+            "xdocuments-elastic-config-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let source = root.join("source");
+        let destination = root.join("runtime");
+        let data = root.join("data");
+        let logs = root.join("logs");
+        std::fs::create_dir_all(source.join("jvm.options.d")).unwrap();
+        std::fs::write(source.join("elasticsearch.yml"), "cluster.name: test\n").unwrap();
+        std::fs::write(
+            source.join("jvm.options"),
+            "-Xms1g\n-XX:HeapDumpPath=data\n-XX:ErrorFile=logs/hs_err_pid%p.log\n-Xlog:gc*:file=logs/gc.log:time\n",
+        )
+        .unwrap();
+
+        prepare_runtime_config(&source, &destination, &data, &logs).unwrap();
+
+        let options = std::fs::read_to_string(destination.join("jvm.options")).unwrap();
+        assert!(!options.contains("logs/gc.log"));
+        assert!(options.contains(&format!("-XX:HeapDumpPath={}", data.display())));
+        assert!(options.contains(&format!(
+            "-XX:ErrorFile={}",
+            logs.join("hs_err_pid%p.log").display()
+        )));
+        assert!(destination.join("elasticsearch.yml").is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 fn reserve_port() -> Result<u16, String> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| e.to_string())?;
-    listener.local_addr().map(|address| address.port()).map_err(|e| e.to_string())
+    listener
+        .local_addr()
+        .map(|address| address.port())
+        .map_err(|e| e.to_string())
 }
 
 fn append_log(path: &Path) -> Result<File, String> {
-    OpenOptions::new().create(true).append(true).open(path).map_err(|e| e.to_string())
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| e.to_string())
 }
 
 fn ensure_success(response: reqwest::blocking::Response, operation: &str) -> Result<(), String> {
     let status = response.status();
-    if status.is_success() { return Ok(()) }
+    if status.is_success() {
+        return Ok(());
+    }
     let body = response.text().unwrap_or_default();
     Err(format!("Failed to {} ({}): {}", operation, status, body))
 }
 
-fn ensure_success_json(response: reqwest::blocking::Response, operation: &str) -> Result<Value, String> {
+fn ensure_success_json(
+    response: reqwest::blocking::Response,
+    operation: &str,
+) -> Result<Value, String> {
     let status = response.status();
     let body = response.text().map_err(|e| e.to_string())?;
-    if !status.is_success() { return Err(format!("Failed to {} ({}): {}", operation, status, body)) }
+    if !status.is_success() {
+        return Err(format!("Failed to {} ({}): {}", operation, status, body));
+    }
     serde_json::from_str(&body).map_err(|e| e.to_string())
 }

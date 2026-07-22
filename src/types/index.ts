@@ -88,6 +88,23 @@ export interface SearchResult {
   absolute_path: string;
 }
 
+export type SearchProgressStage = 'preparing' | 'analyzing' | 'searching' | 'resolving' | 'completed' | 'failed';
+
+export interface SearchProgress {
+  request_id: number;
+  stage: SearchProgressStage;
+  progress: number;
+}
+
+export type RuntimeLogSource = 'application' | 'elasticsearch';
+
+export interface RuntimeLogSnapshot {
+  source: RuntimeLogSource;
+  path: string;
+  lines: string[];
+  updated_at: number | null;
+}
+
 export interface OpenAiConfig {
   endpoint: string;
   model: string;
@@ -146,6 +163,8 @@ export interface AppSettings {
 
 // ── OCR (MinerU API) ──
 
+export type OcrEngine = 'mineru' | 'windows';
+
 export interface MinerUHealthInfo {
   protocol_version: string;
   processing_window_size: number;
@@ -164,4 +183,24 @@ export interface OcrTaskStatus {
   queued_ahead?: number;
   progress?: number;
   error_message?: string;
+}
+
+export interface WindowsOcrLanguage {
+  tag: string;
+  display_name: string;
+  native_name: string;
+}
+
+export interface WindowsOcrStatus {
+  available: boolean;
+  languages: WindowsOcrLanguage[];
+  error?: string | null;
+}
+
+export interface WindowsOcrProgress {
+  task_id: string;
+  file_id: number;
+  processed_pages: number;
+  total_pages: number;
+  progress: number;
 }

@@ -112,6 +112,8 @@ pub fn run() {
             commands::index::reindex_file,
             // Search
             commands::search::search,
+            // Runtime logs
+            commands::logs::get_runtime_logs,
             // Viewer
             commands::viewer::read_file_bytes,
             commands::viewer::read_file_bytes_range,
@@ -122,6 +124,8 @@ pub fn run() {
             commands::ocr::query_ocr_task,
             commands::ocr::get_ocr_result,
             commands::ocr::sync_ocr_parse,
+            commands::ocr::get_windows_ocr_status,
+            commands::ocr::run_windows_ocr,
             commands::ocr::get_ocr_output_dir,
             commands::ocr::list_ocr_candidates,
             // Settings

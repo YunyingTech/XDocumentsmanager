@@ -171,7 +171,7 @@ function OcrTaskRow({ task, onDownload }: { task: OcrTask; onDownload: (taskId: 
         </div>
         {task.error ? <p className="mt-0.5 truncate text-[11px] text-red-500" title={task.error}>{task.error}</p>
           : task.status === 'queued' && task.queuedAhead != null ? <p className="mt-0.5 text-[11px] text-surface-400">{t('tasks.queueAhead', { count: task.queuedAhead })}</p>
-          : <p className="mt-0.5 text-[11px] text-surface-400">{t('tasks.ocrProcessing')}</p>}
+          : <p className="mt-0.5 text-[11px] text-surface-400">{task.engine === 'windows' ? 'Windows OCR' : 'MinerU'} - {t('tasks.ocrProcessing')}</p>}
       </div>
       {task.status === 'completed' && !task.resultPath && (
         <button type="button" onClick={() => onDownload(task.taskId, task.fileId)} className="icon-button shrink-0" title={t('tasks.downloadResult')} aria-label={t('tasks.downloadResultFor', { name: task.fileName })}>

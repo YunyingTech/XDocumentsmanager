@@ -1,7 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
   FileInfo, FolderInfo, FolderConfig, IndexJob,
-  SearchResult, SearchFilters, PaginatedResult, SortConfig
+  SearchResult, SearchFilters, PaginatedResult, SortConfig,
+  RuntimeLogSnapshot, RuntimeLogSource,
 } from '../types';
 
 // ── Files ──
@@ -68,9 +69,17 @@ export async function reindexFile(fileId: number): Promise<void> {
 export async function search(
   query: string,
   filters?: SearchFilters,
-  limit: number = 100
+  limit: number = 100,
+  requestId?: number,
 ): Promise<SearchResult[]> {
-  return invoke('search', { query, filters, limit });
+  return invoke('search', { query, filters, limit, requestId });
+}
+
+export async function getRuntimeLogs(
+  source: RuntimeLogSource,
+  maxLines: number = 500,
+): Promise<RuntimeLogSnapshot> {
+  return invoke('get_runtime_logs', { source, maxLines });
 }
 
 export async function showInFolder(path: string): Promise<void> {
@@ -115,6 +124,18 @@ export async function syncOcrParse(
   responseFormatZip?: boolean
 ): Promise<string> {
   return invoke('sync_ocr_parse', { fileId, returnMd, responseFormatZip });
+}
+
+export async function getWindowsOcrStatus(): Promise<import('../types').WindowsOcrStatus> {
+  return invoke('get_windows_ocr_status');
+}
+
+export async function runWindowsOcr(
+  fileId: number,
+  taskId: string,
+  language?: string
+): Promise<string> {
+  return invoke('run_windows_ocr', { fileId, taskId, language });
 }
 
 export async function getOcrOutputDir(): Promise<string> {

@@ -1,15 +1,18 @@
 import { create } from 'zustand';
 
 type ViewType = 'files' | 'search' | 'folders' | 'settings' | 'ocr';
+export type SurfaceView = 'workspace' | 'logs';
 export type Language = 'en' | 'zh-CN';
 
 interface UIStore {
   activeView: ViewType;
+  surfaceView: SurfaceView;
   sidebarOpen: boolean;
   theme: 'light' | 'dark' | 'system';
   language: Language;
 
   setView: (view: ViewType) => void;
+  setSurfaceView: (view: SurfaceView) => void;
   toggleSidebar: () => void;
   setTheme: (theme: 'light' | 'dark' | 'system') => void;
   setLanguage: (language: Language) => void;
@@ -23,11 +26,13 @@ function initialLanguage(): Language {
 
 export const useUIStore = create<UIStore>((set) => ({
   activeView: 'files',
+  surfaceView: 'workspace',
   sidebarOpen: true,
   theme: 'system',
   language: initialLanguage(),
 
-  setView: (view) => set({ activeView: view }),
+  setView: (view) => set({ activeView: view, surfaceView: 'workspace' }),
+  setSurfaceView: (surfaceView) => set({ surfaceView }),
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
   setTheme: (theme) => set({ theme }),
   setLanguage: (language) => {

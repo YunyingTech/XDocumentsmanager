@@ -53,6 +53,7 @@ pub async fn expand_query(db: &Database, query: &str) -> Result<String, String> 
     let terms = request_terms(db, &config, query).await?;
     let mut all_terms = terms.phrases;
     all_terms.extend(terms.keywords);
+    all_terms.push(query.to_string());
     all_terms.retain(|term| !term.trim().is_empty());
     all_terms.sort();
     all_terms.dedup();

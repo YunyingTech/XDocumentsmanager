@@ -11,11 +11,16 @@ export function SearchBar() {
   const inputRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
+  const runSearch = () => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    void doSearch();
+  };
+
   // Debounced search
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
-      doSearch();
+      void doSearch();
     }, 650);
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -38,7 +43,7 @@ export function SearchBar() {
         value={query}
         onChange={(e) => setQuery(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === 'Enter') doSearch();
+          if (e.key === 'Enter') runSearch();
         }}
       />
       {query && (

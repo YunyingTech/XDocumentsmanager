@@ -5,11 +5,13 @@ import {
   queryOcrTask,
   getOcrResult,
   syncOcrParse,
+  getWindowsOcrStatus,
+  runWindowsOcr,
   listOcrCandidates,
   getSetting,
   setSetting,
 } from '../lib/tauri';
-import type { FileInfo, MinerUHealthInfo, OcrTaskStatus, PaginatedResult } from '../types';
+import type { FileInfo, MinerUHealthInfo, OcrEngine, OcrTaskStatus, PaginatedResult, WindowsOcrProgress, WindowsOcrStatus } from '../types';
 import { translate } from '../lib/i18n';
 import { useUIStore } from './uiStore';
 
@@ -25,11 +27,13 @@ export interface OcrTask {
   error?: string;
   resultPath?: string;
   submittedAt: number;
+  engine: OcrEngine;
 }
 
 interface OcrStore {
   // Health
   health: MinerUHealthInfo | null;
+  windowsStatus: WindowsOcrStatus | null;
   healthChecking: boolean;
 
   // Files
@@ -53,6 +57,8 @@ interface OcrStore {
   // Settings
   apiUrl: string;
   outputDir: string;
+  engine: OcrEngine;
+  windowsLanguage: string;
 
   // Actions
   checkHealth: () => Promise<void>;
@@ -71,11 +77,15 @@ interface OcrStore {
   loadSettings: () => Promise<void>;
   saveApiUrl: (url: string) => Promise<void>;
   saveOutputDir: (dir: string) => Promise<void>;
+  saveEngine: (engine: OcrEngine) => Promise<void>;
+  saveWindowsLanguage: (language: string) => Promise<void>;
+  updateWindowsProgress: (progress: WindowsOcrProgress) => void;
   clearTasks: () => void;
 }
 
 export const useOcrStore = create<OcrStore>((set, get) => ({
   health: null,
+  windowsStatus: null,
   healthChecking: false,
   candidates: [],
   loadingCandidates: false,
@@ -89,10 +99,24 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
   pollTimer: null,
   apiUrl: 'http://127.0.0.1:8000',
   outputDir: '',
+  engine: 'mineru',
+  windowsLanguage: 'auto',
 
   // ── Health check ──
   checkHealth: async () => {
     set({ healthChecking: true });
+    if (get().engine === 'windows') {
+      try {
+        const windowsStatus = await getWindowsOcrStatus();
+        set({ windowsStatus, healthChecking: false });
+      } catch (error) {
+        set({
+          windowsStatus: { available: false, languages: [], error: String(error) },
+          healthChecking: false,
+        });
+      }
+      return;
+    }
     try {
       const result = await checkOcrHealth();
       set({ health: result, healthChecking: false });
@@ -153,7 +177,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
 
   // ── Submit async tasks ──
   submitTasks: async () => {
-    const { selectedFileIds, candidates } = get();
+    const { selectedFileIds, candidates, engine, windowsLanguage } = get();
     const fileIds = [...selectedFileIds];
 
     for (const fileId of fileIds) {
@@ -162,17 +186,37 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
 
       // Mark as submitting
       const task: OcrTask = {
-        taskId: '',
+        taskId: engine === 'windows' ? crypto.randomUUID() : '',
         fileId,
         fileName,
         status: 'submitting',
         queuedAhead: null,
         progress: null,
         submittedAt: Date.now(),
+        engine,
       };
       set((s) => ({ tasks: [...s.tasks, task] }));
 
       try {
+        if (engine === 'windows') {
+          const localTaskId = task.taskId;
+          set((s) => ({
+            tasks: s.tasks.map((item) =>
+              item.taskId === localTaskId
+                ? { ...item, status: 'running' as const, progress: 0 }
+                : item
+            ),
+          }));
+          const resultPath = await runWindowsOcr(fileId, localTaskId, windowsLanguage);
+          set((s) => ({
+            tasks: s.tasks.map((item) =>
+              item.taskId === localTaskId
+                ? { ...item, status: 'completed' as const, progress: 100, resultPath }
+                : item
+            ),
+          }));
+          continue;
+        }
         const resp = await submitOcrTask(fileId, true);
         // Update task with real ID
         set((s) => ({
@@ -185,7 +229,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
       } catch (e: any) {
         set((s) => ({
           tasks: s.tasks.map((t) =>
-            t.fileId === fileId && t.status === 'submitting'
+            (engine === 'windows' ? t.taskId === task.taskId : t.fileId === fileId && t.status === 'submitting')
               ? { ...t, status: 'failed' as const, error: String(e) }
               : t
           ),
@@ -195,8 +239,11 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
 
     // Start polling after submissions
     const { polling } = get();
-    if (!polling) {
+    if (engine === 'mineru' && !polling) {
       get().startPolling();
+    } else if (engine === 'windows') {
+      set({ selectedFileIds: new Set() });
+      await get().loadCandidates();
     }
   },
 
@@ -214,6 +261,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
       queuedAhead: null,
       progress: null,
       submittedAt: Date.now(),
+      engine: 'mineru',
     };
     set((s) => ({ tasks: [...s.tasks, task] }));
 
@@ -243,7 +291,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
   pollAllTasks: async () => {
     const { tasks } = get();
     const activeTasks = tasks.filter(
-      (t) => t.status === 'queued' || t.status === 'running'
+      (t) => t.engine === 'mineru' && (t.status === 'queued' || t.status === 'running')
     );
 
     for (const task of activeTasks) {
@@ -340,9 +388,18 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
   // ── Settings ──
   loadSettings: async () => {
     try {
-      const apiUrl = (await getSetting('ocr_api_url')) || 'http://127.0.0.1:8000';
-      const outputDir = (await getSetting('ocr_output_dir')) || '';
-      set({ apiUrl, outputDir });
+      const [apiUrl, outputDir, engine, windowsLanguage] = await Promise.all([
+        getSetting('ocr_api_url'),
+        getSetting('ocr_output_dir'),
+        getSetting('ocr_engine'),
+        getSetting('windows_ocr_language'),
+      ]);
+      set({
+        apiUrl: apiUrl || 'http://127.0.0.1:8000',
+        outputDir: outputDir || '',
+        engine: engine === 'windows' ? 'windows' : 'mineru',
+        windowsLanguage: windowsLanguage || 'auto',
+      });
     } catch {
       // use defaults
     }
@@ -356,6 +413,27 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
   saveOutputDir: async (dir: string) => {
     await setSetting('ocr_output_dir', dir);
     set({ outputDir: dir });
+  },
+
+  saveEngine: async (engine: OcrEngine) => {
+    await setSetting('ocr_engine', engine);
+    set({ engine, health: null, windowsStatus: null });
+    await get().checkHealth();
+  },
+
+  saveWindowsLanguage: async (windowsLanguage: string) => {
+    await setSetting('windows_ocr_language', windowsLanguage);
+    set({ windowsLanguage });
+  },
+
+  updateWindowsProgress: (progress: WindowsOcrProgress) => {
+    set((state) => ({
+      tasks: state.tasks.map((task) =>
+        task.taskId === progress.task_id && task.engine === 'windows'
+          ? { ...task, status: 'running' as const, progress: progress.progress }
+          : task
+      ),
+    }));
   },
 
   clearTasks: () => {

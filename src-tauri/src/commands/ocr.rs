@@ -1,9 +1,12 @@
-use tauri::State;
 use crate::db::Database;
 use crate::models::PaginatedResult;
+use crate::search::{
+    engine::{document_for_file, normalize_cjk_ocr_spacing},
+    SearchEngine,
+};
 use serde::{Deserialize, Serialize};
 use std::io::{Cursor, Read};
-use crate::search::{engine::document_for_file, SearchEngine};
+use tauri::{AppHandle, Emitter, State};
 
 // ── Response types for frontend ──
 
@@ -33,6 +36,29 @@ pub struct OcrTaskStatus {
     pub error_message: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct WindowsOcrLanguage {
+    pub tag: String,
+    pub display_name: String,
+    pub native_name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WindowsOcrStatus {
+    pub available: bool,
+    pub languages: Vec<WindowsOcrLanguage>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WindowsOcrProgress {
+    pub task_id: String,
+    pub file_id: i64,
+    pub processed_pages: u32,
+    pub total_pages: u32,
+    pub progress: f64,
+}
+
 // ── Helpers ──
 
 fn get_setting_value(db: &Database, key: &str, default: &str) -> String {
@@ -53,10 +79,14 @@ fn get_ocr_api_url(db: &Database) -> String {
 fn resolve_output_dir(db: &Database) -> Result<String, String> {
     let dir = get_setting_value(db, "ocr_output_dir", "");
     if dir.is_empty() {
-        let project_dir = std::env::current_dir()
-            .map_err(|e| e.to_string())?
-            .join("OCR_result");
-        Ok(project_dir.to_string_lossy().to_string())
+        let app_data_dir = db
+            .path()
+            .parent()
+            .ok_or_else(|| "Cannot resolve the application data directory".to_string())?;
+        Ok(app_data_dir
+            .join("OCR_result")
+            .to_string_lossy()
+            .to_string())
     } else {
         Ok(dir)
     }
@@ -73,9 +103,7 @@ fn get_file_abs_path(db: &Database, file_id: i64) -> Result<(String, String), St
         .map_err(|e| e.to_string())?;
 
     let (relative_path, file_name, folder_path): (String, String, String) = stmt
-        .query_row([file_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })
+        .query_row([file_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
         .map_err(|e| format!("File not found (id={}): {}", file_id, e))?;
 
     let abs_path = std::path::Path::new(&folder_path)
@@ -98,16 +126,13 @@ fn create_http_client() -> Result<reqwest::Client, String> {
 
 /// Check MinerU API health. Returns connection status even on failure (connected=false).
 #[tauri::command]
-pub async fn check_ocr_health(
-    db: State<'_, Database>,
-) -> Result<OcrHealthInfo, String> {
+pub async fn check_ocr_health(db: State<'_, Database>) -> Result<OcrHealthInfo, String> {
     let api_url = get_ocr_api_url(&db);
     let client = create_http_client()?;
 
     match client.get(format!("{}/health", api_url)).send().await {
         Ok(resp) => {
-            let json: serde_json::Value =
-                resp.json().await.map_err(|e| e.to_string())?;
+            let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
             Ok(OcrHealthInfo {
                 protocol_version: json["protocol_version"]
                     .as_str()
@@ -199,8 +224,10 @@ pub async fn query_ocr_task(
         return Err(format!("MinerU API error ({}): {}", status, body));
     }
 
-    let json: serde_json::Value =
-        resp.json().await.map_err(|e| format!("Invalid response: {}", e))?;
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Invalid response: {}", e))?;
 
     Ok(OcrTaskStatus {
         task_id,
@@ -229,10 +256,8 @@ pub async fn get_ocr_result(
         let mut stmt = conn
             .prepare("SELECT file_name, ocr_applied FROM files WHERE id = ?1")
             .map_err(|e| e.to_string())?;
-        stmt.query_row([file_id], |row| {
-            row.get::<_, String>(0)
-        })
-        .map_err(|e| format!("File not found (id={}): {}", file_id, e))?
+        stmt.query_row([file_id], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("File not found (id={}): {}", file_id, e))?
     };
 
     let client = create_http_client()?;
@@ -277,11 +302,14 @@ pub async fn get_ocr_result(
         .unwrap_or_else(|| format!("file_{}", file_id));
 
     // Include task_id prefix to avoid overwrites
-    let output_path = std::path::Path::new(&output_dir)
-        .join(format!("{}_{}.{}", file_stem, &task_id[..8.min(task_id.len())], ext));
+    let output_path = std::path::Path::new(&output_dir).join(format!(
+        "{}_{}.{}",
+        file_stem,
+        &task_id[..8.min(task_id.len())],
+        ext
+    ));
 
-    std::fs::write(&output_path, &bytes)
-        .map_err(|e| format!("Cannot write OCR result: {}", e))?;
+    std::fs::write(&output_path, &bytes).map_err(|e| format!("Cannot write OCR result: {}", e))?;
 
     persist_ocr_text(&db, &engine, file_id, &bytes, ext == "zip")?;
 
@@ -361,12 +389,254 @@ pub async fn sync_ocr_parse(
 
     let output_path = std::path::Path::new(&output_dir).join(format!("{}.{}", file_stem, ext));
 
-    std::fs::write(&output_path, &bytes)
-        .map_err(|e| format!("Cannot write OCR result: {}", e))?;
+    std::fs::write(&output_path, &bytes).map_err(|e| format!("Cannot write OCR result: {}", e))?;
 
     persist_ocr_text(&db, &engine, file_id, &bytes, ext == "zip")?;
 
     Ok(output_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn get_windows_ocr_status() -> Result<WindowsOcrStatus, String> {
+    tokio::task::spawn_blocking(windows_ocr_status)
+        .await
+        .map_err(|e| format!("Windows OCR status task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn run_windows_ocr(
+    file_id: i64,
+    task_id: String,
+    language: Option<String>,
+    app: AppHandle,
+    db: State<'_, Database>,
+    engine: State<'_, SearchEngine>,
+) -> Result<String, String> {
+    let (file_path, file_name) = get_file_abs_path(&db, file_id)?;
+    let output_dir = resolve_output_dir(&db)?;
+    let task_id_for_worker = task_id.clone();
+    let markdown = tokio::task::spawn_blocking(move || {
+        windows_ocr_pdf(
+            &file_path,
+            file_id,
+            &task_id_for_worker,
+            language.as_deref(),
+            |progress| {
+                let _ = app.emit("ocr:progress", progress);
+            },
+        )
+    })
+    .await
+    .map_err(|e| format!("Windows OCR task failed: {e}"))??;
+
+    std::fs::create_dir_all(&output_dir)
+        .map_err(|e| format!("Cannot create output directory '{output_dir}': {e}"))?;
+    let file_stem = std::path::Path::new(&file_name)
+        .file_stem()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| format!("file_{file_id}"));
+    let suffix = &task_id[..8.min(task_id.len())];
+    let output_path =
+        std::path::Path::new(&output_dir).join(format!("{file_stem}_{suffix}_windows.md"));
+    std::fs::write(&output_path, markdown.as_bytes())
+        .map_err(|e| format!("Cannot write Windows OCR result: {e}"))?;
+    persist_ocr_text(&db, &engine, file_id, markdown.as_bytes(), false)?;
+    Ok(output_path.to_string_lossy().to_string())
+}
+
+#[cfg(windows)]
+fn windows_ocr_status() -> Result<WindowsOcrStatus, String> {
+    use windows::Media::Ocr::OcrEngine;
+
+    let languages = OcrEngine::AvailableRecognizerLanguages()
+        .map_err(|e| format!("Cannot query Windows OCR languages: {e}"))?;
+    let mut result = Vec::with_capacity(languages.Size().unwrap_or(0) as usize);
+    for index in 0..languages.Size().map_err(|e| e.to_string())? {
+        let language = languages.GetAt(index).map_err(|e| e.to_string())?;
+        result.push(WindowsOcrLanguage {
+            tag: language
+                .LanguageTag()
+                .map_err(|e| e.to_string())?
+                .to_string(),
+            display_name: language
+                .DisplayName()
+                .map_err(|e| e.to_string())?
+                .to_string(),
+            native_name: language
+                .NativeName()
+                .map_err(|e| e.to_string())?
+                .to_string(),
+        });
+    }
+    Ok(WindowsOcrStatus {
+        available: !result.is_empty(),
+        error: if result.is_empty() {
+            Some("No Windows OCR language packs are installed".to_string())
+        } else {
+            None
+        },
+        languages: result,
+    })
+}
+
+#[cfg(not(windows))]
+fn windows_ocr_status() -> Result<WindowsOcrStatus, String> {
+    Ok(WindowsOcrStatus {
+        available: false,
+        languages: Vec::new(),
+        error: Some("Windows OCR is only available on Windows".to_string()),
+    })
+}
+
+#[cfg(windows)]
+fn windows_ocr_pdf<F>(
+    file_path: &str,
+    file_id: i64,
+    task_id: &str,
+    language_tag: Option<&str>,
+    on_progress: F,
+) -> Result<String, String>
+where
+    F: Fn(WindowsOcrProgress),
+{
+    use windows::core::HSTRING;
+    use windows::Data::Pdf::PdfDocument;
+    use windows::Globalization::Language;
+    use windows::Graphics::Imaging::BitmapDecoder;
+    use windows::Media::Ocr::OcrEngine;
+    use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream};
+
+    let ocr_engine = match language_tag.filter(|value| !value.is_empty() && *value != "auto") {
+        Some(tag) => {
+            let language = Language::CreateLanguage(&HSTRING::from(tag))
+                .map_err(|e| format!("Invalid Windows OCR language '{tag}': {e}"))?;
+            if !OcrEngine::IsLanguageSupported(&language).map_err(|e| e.to_string())? {
+                return Err(format!(
+                    "Windows OCR language '{tag}' is not installed. Add its language pack in Windows Settings."
+                ));
+            }
+            OcrEngine::TryCreateFromLanguage(&language)
+                .map_err(|e| format!("Cannot create Windows OCR engine for '{tag}': {e}"))?
+        }
+        None => OcrEngine::TryCreateFromUserProfileLanguages().map_err(|e| {
+            format!("Cannot create Windows OCR engine. Install an OCR language pack: {e}")
+        })?,
+    };
+
+    let file_bytes = std::fs::read(windows_file_system_path(file_path))
+        .map_err(|e| format!("Cannot read PDF '{file_path}': {e}"))?;
+    let pdf_stream = InMemoryRandomAccessStream::new()
+        .map_err(|e| format!("Cannot create PDF input stream: {e}"))?;
+    let writer = DataWriter::CreateDataWriter(&pdf_stream)
+        .map_err(|e| format!("Cannot create PDF stream writer: {e}"))?;
+    for chunk in file_bytes.chunks(16 * 1024 * 1024) {
+        writer
+            .WriteBytes(chunk)
+            .map_err(|e| format!("Cannot buffer PDF data: {e}"))?;
+    }
+    writer
+        .StoreAsync()
+        .map_err(|e| format!("Cannot store PDF data in memory: {e}"))?
+        .get()
+        .map_err(|e| format!("Cannot store PDF data in memory: {e}"))?;
+    writer
+        .FlushAsync()
+        .map_err(|e| format!("Cannot flush PDF data: {e}"))?
+        .get()
+        .map_err(|e| format!("Cannot flush PDF data: {e}"))?;
+    writer
+        .DetachStream()
+        .map_err(|e| format!("Cannot detach PDF input stream: {e}"))?;
+    pdf_stream.Seek(0).map_err(|e| e.to_string())?;
+    let document = PdfDocument::LoadFromStreamAsync(&pdf_stream)
+        .map_err(|e| format!("Cannot load PDF: {e}"))?
+        .get()
+        .map_err(|e| format!("Cannot load PDF '{file_path}': {e}"))?;
+    let total_pages = document.PageCount().map_err(|e| e.to_string())?;
+    if total_pages == 0 {
+        return Err("The PDF contains no pages".to_string());
+    }
+
+    let mut pages = Vec::with_capacity(total_pages as usize);
+    let mut recognized_text = false;
+    for page_index in 0..total_pages {
+        let page = document
+            .GetPage(page_index)
+            .map_err(|e| format!("Cannot open PDF page {}: {e}", page_index + 1))?;
+        let stream = InMemoryRandomAccessStream::new()
+            .map_err(|e| format!("Cannot create page image stream: {e}"))?;
+        page.RenderToStreamAsync(&stream)
+            .map_err(|e| format!("Cannot render PDF page {}: {e}", page_index + 1))?
+            .get()
+            .map_err(|e| format!("Cannot render PDF page {}: {e}", page_index + 1))?;
+        stream.Seek(0).map_err(|e| e.to_string())?;
+        let decoder = BitmapDecoder::CreateAsync(&stream)
+            .map_err(|e| format!("Cannot decode PDF page {}: {e}", page_index + 1))?
+            .get()
+            .map_err(|e| format!("Cannot decode PDF page {}: {e}", page_index + 1))?;
+        let bitmap = decoder
+            .GetSoftwareBitmapAsync()
+            .map_err(|e| format!("Cannot read PDF page {} bitmap: {e}", page_index + 1))?
+            .get()
+            .map_err(|e| format!("Cannot read PDF page {} bitmap: {e}", page_index + 1))?;
+        let result = ocr_engine
+            .RecognizeAsync(&bitmap)
+            .map_err(|e| format!("Cannot OCR PDF page {}: {e}", page_index + 1))?
+            .get()
+            .map_err(|e| format!("Cannot OCR PDF page {}: {e}", page_index + 1))?;
+        let text = result.Text().map_err(|e| e.to_string())?.to_string();
+        recognized_text |= !text.trim().is_empty();
+        pages.push(format!("## Page {}\n\n{}", page_index + 1, text.trim()));
+        let processed_pages = page_index + 1;
+        on_progress(WindowsOcrProgress {
+            task_id: task_id.to_string(),
+            file_id,
+            processed_pages,
+            total_pages,
+            progress: processed_pages as f64 * 100.0 / total_pages as f64,
+        });
+        let _ = page.Close();
+    }
+
+    let markdown = pages.join("\n\n");
+    if !recognized_text {
+        return Err("Windows OCR did not recognize any text".to_string());
+    }
+    Ok(markdown)
+}
+
+#[cfg(windows)]
+fn windows_file_system_path(path: &str) -> std::path::PathBuf {
+    let absolute = if std::path::Path::new(path).is_absolute() {
+        std::path::PathBuf::from(path)
+    } else {
+        std::env::current_dir()
+            .unwrap_or_default()
+            .join(path)
+    };
+    let normalized = absolute.to_string_lossy().replace('/', "\\");
+    if normalized.starts_with(r"\\?\") {
+        return normalized.into();
+    }
+    if let Some(unc) = normalized.strip_prefix(r"\\") {
+        format!(r"\\?\UNC\{unc}").into()
+    } else {
+        format!(r"\\?\{normalized}").into()
+    }
+}
+
+#[cfg(not(windows))]
+fn windows_ocr_pdf<F>(
+    _file_path: &str,
+    _file_id: i64,
+    _task_id: &str,
+    _language_tag: Option<&str>,
+    _on_progress: F,
+) -> Result<String, String>
+where
+    F: Fn(WindowsOcrProgress),
+{
+    Err("Windows OCR is only available on Windows".to_string())
 }
 
 fn persist_ocr_text(
@@ -376,7 +646,12 @@ fn persist_ocr_text(
     bytes: &[u8],
     is_zip: bool,
 ) -> Result<(), String> {
-    let text = if is_zip { markdown_from_zip(bytes)? } else { String::from_utf8_lossy(bytes).into_owned() };
+    let text = if is_zip {
+        markdown_from_zip(bytes)?
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    let text = normalize_cjk_ocr_spacing(&text);
     if text.trim().is_empty() {
         return Err("OCR result did not contain Markdown text".to_string());
     }
@@ -393,12 +668,14 @@ fn persist_ocr_text(
 
 fn markdown_from_zip(bytes: &[u8]) -> Result<String, String> {
     let cursor = Cursor::new(bytes);
-    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("Invalid OCR ZIP result: {}", e))?;
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|e| format!("Invalid OCR ZIP result: {}", e))?;
     for index in 0..archive.len() {
         let mut file = archive.by_index(index).map_err(|e| e.to_string())?;
         if file.name().to_ascii_lowercase().ends_with(".md") {
             let mut text = String::new();
-            file.read_to_string(&mut text).map_err(|e| format!("Cannot read Markdown from OCR ZIP: {}", e))?;
+            file.read_to_string(&mut text)
+                .map_err(|e| format!("Cannot read Markdown from OCR ZIP: {}", e))?;
             return Ok(text);
         }
     }
@@ -407,7 +684,7 @@ fn markdown_from_zip(bytes: &[u8]) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{markdown_from_zip, persist_ocr_text};
+    use super::{markdown_from_zip, persist_ocr_text, resolve_output_dir};
     use crate::db::Database;
     use crate::search::SearchEngine;
     use std::io::{Cursor, Write};
@@ -418,11 +695,99 @@ mod tests {
         let mut output = Cursor::new(Vec::new());
         {
             let mut archive = zip::ZipWriter::new(&mut output);
-            archive.start_file("result/document.md", zip::write::SimpleFileOptions::default()).unwrap();
-            archive.write_all("# OCR result\nneedle".as_bytes()).unwrap();
+            archive
+                .start_file(
+                    "result/document.md",
+                    zip::write::SimpleFileOptions::default(),
+                )
+                .unwrap();
+            archive
+                .write_all("# OCR result\nneedle".as_bytes())
+                .unwrap();
             archive.finish().unwrap();
         }
-        assert!(markdown_from_zip(output.get_ref()).unwrap().contains("needle"));
+        assert!(markdown_from_zip(output.get_ref())
+            .unwrap()
+            .contains("needle"));
+    }
+
+    #[test]
+    fn default_ocr_output_is_stored_beside_the_application_database() {
+        let root = std::env::temp_dir().join(format!(
+            "xdocuments-ocr-output-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = Database::new(&root).unwrap();
+        assert_eq!(
+            PathBuf::from(resolve_output_dir(&database).unwrap()),
+            root.join("OCR_result")
+        );
+        drop(database);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn detects_installed_windows_ocr_languages() {
+        let status = super::windows_ocr_status().unwrap();
+        assert!(status.available, "{:?}", status.error);
+        assert!(!status.languages.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires XDOCUMENTS_WINDOWS_OCR_PDF to point to a real PDF"]
+    fn recognizes_a_real_pdf_with_windows_ocr() {
+        let path = std::env::var("XDOCUMENTS_WINDOWS_OCR_PDF")
+            .expect("XDOCUMENTS_WINDOWS_OCR_PDF must point to a real PDF");
+        let markdown =
+            super::windows_ocr_pdf(&path, 1, "windows-ocr-test", Some("zh-Hans-CN"), |_| {})
+                .unwrap();
+        assert!(markdown.contains("## Page 1"));
+        assert!(markdown.chars().count() > 20);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires XDOCUMENTS_WINDOWS_OCR_PDF to point to a real PDF"]
+    fn recognizes_a_real_pdf_from_a_long_path() {
+        let source = std::env::var("XDOCUMENTS_WINDOWS_OCR_PDF")
+            .expect("XDOCUMENTS_WINDOWS_OCR_PDF must point to a real PDF");
+        let root = std::env::temp_dir().join(format!(
+            "xdocuments-long-path-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let long_dir = (0..6).fold(root.clone(), |path, index| {
+            path.join(format!(
+                "ocr-long-path-segment-{index}-abcdefghijklmnopqrstuvwxyz0123456789"
+            ))
+        });
+        let destination = long_dir.join("windows-ocr-long-path-test.pdf");
+        std::fs::create_dir_all(super::windows_file_system_path(
+            &long_dir.to_string_lossy(),
+        ))
+        .unwrap();
+        std::fs::copy(
+            super::windows_file_system_path(&source),
+            super::windows_file_system_path(&destination.to_string_lossy()),
+        )
+        .unwrap();
+        assert!(destination.to_string_lossy().chars().count() > 260);
+
+        let markdown = super::windows_ocr_pdf(
+            &destination.to_string_lossy(),
+            1,
+            "windows-ocr-long-path-test",
+            Some("zh-Hans-CN"),
+            |_| {},
+        )
+        .unwrap();
+        assert!(markdown.contains("## Page 1"));
+        assert!(markdown.chars().count() > 20);
+
+        let _ = std::fs::remove_dir_all(super::windows_file_system_path(
+            &root.to_string_lossy(),
+        ));
     }
 
     #[test]
@@ -455,13 +820,21 @@ mod tests {
             &database,
             &engine,
             41,
-            "# OCR\nunique-elastic-ocr-token 供应商审计".as_bytes(),
+            "# OCR\nunique-elastic-ocr-token 供 应 商 审 计 中 国 科 学 院".as_bytes(),
             false,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(engine.backend_status().backend, "elasticsearch");
-        assert_eq!(engine.search("unique-elastic-ocr-token", None, 10).unwrap()[0].file_id, 41);
-        assert_eq!(engine.search("供应商审计", None, 10).unwrap()[0].file_id, 41);
+        assert_eq!(
+            engine.search("unique-elastic-ocr-token", None, 10).unwrap()[0].file_id,
+            41
+        );
+        assert_eq!(
+            engine.search("供应商审计", None, 10).unwrap()[0].file_id,
+            41
+        );
+        assert_eq!(engine.search("中国", None, 10).unwrap()[0].file_id, 41);
         drop(engine);
         drop(database);
         let _ = std::fs::remove_dir_all(root);

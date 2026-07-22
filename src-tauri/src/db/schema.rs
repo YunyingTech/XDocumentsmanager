@@ -1,4 +1,8 @@
+use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::Connection;
+
+const WINDOWS_EPOCH_TICKS: i64 = 116_444_736_000_000_000;
+const TICKS_PER_SECOND: i64 = 10_000_000;
 
 pub fn run_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>> {
     // Enable WAL mode for concurrent reads during indexing
@@ -16,6 +20,8 @@ pub fn run_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error
     conn.execute_batch(CREATE_SEARCH_HISTORY)?;
     conn.execute_batch(CREATE_INDEXED_FILES)?;
 
+    normalize_legacy_file_timestamps(conn)?;
+
     // Search is persisted by the embedded Tantivy engine.
     conn.execute_batch("DROP TABLE IF EXISTS files_fts;")?;
 
@@ -27,6 +33,55 @@ pub fn run_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error
     conn.execute_batch("DROP TABLE IF EXISTS tags;")?;
 
     Ok(())
+}
+
+fn normalize_legacy_file_timestamps(conn: &Connection) -> Result<(), Box<dyn std::error::Error>> {
+    let mut statement = conn.prepare(
+        "SELECT id, file_created_at, file_modified_at FROM files \
+         WHERE file_created_at LIKE 'SystemTime { intervals: %' \
+            OR file_modified_at LIKE 'SystemTime { intervals: %'",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    let files = rows.collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+
+    let mut updated = 0usize;
+    for (id, created_at, modified_at) in files {
+        let normalized_created = created_at
+            .as_deref()
+            .and_then(parse_legacy_system_time)
+            .or(created_at);
+        let normalized_modified = parse_legacy_system_time(&modified_at).unwrap_or(modified_at);
+        conn.execute(
+            "UPDATE files SET file_created_at = ?1, file_modified_at = ?2 WHERE id = ?3",
+            rusqlite::params![normalized_created, normalized_modified, id],
+        )?;
+        updated += 1;
+    }
+
+    if updated > 0 {
+        log::info!("Normalized legacy timestamps for {} files", updated);
+    }
+    Ok(())
+}
+
+fn parse_legacy_system_time(value: &str) -> Option<String> {
+    let intervals = value
+        .strip_prefix("SystemTime { intervals: ")?
+        .strip_suffix(" }")?
+        .parse::<i64>()
+        .ok()?;
+    let unix_ticks = intervals.checked_sub(WINDOWS_EPOCH_TICKS)?;
+    let seconds = unix_ticks.div_euclid(TICKS_PER_SECOND);
+    let nanos = unix_ticks.rem_euclid(TICKS_PER_SECOND) as u32 * 100;
+    DateTime::<Utc>::from_timestamp(seconds, nanos)
+        .map(|timestamp| timestamp.to_rfc3339_opts(SecondsFormat::Millis, true))
 }
 
 const CREATE_WATCHED_FOLDERS: &str = r#"
@@ -137,6 +192,8 @@ INSERT OR IGNORE INTO settings (key, value) VALUES
     ('default_view', 'table'),
     ('ocr_enabled', 'false'),
     ('ocr_languages', 'eng'),
+    ('ocr_engine', 'mineru'),
+    ('windows_ocr_language', 'auto'),
     ('ocr_api_url', 'http://127.0.0.1:8000'),
     ('ocr_output_dir', ''),
     ('openai_endpoint', 'https://api.openai.com/v1'),
@@ -147,7 +204,8 @@ INSERT OR IGNORE INTO settings (key, value) VALUES
 
 // Indexes (run after table creation)
 pub fn create_indexes(conn: &Connection) -> Result<(), Box<dyn std::error::Error>> {
-    conn.execute_batch(r#"
+    conn.execute_batch(
+        r#"
         CREATE INDEX IF NOT EXISTS idx_files_folder_id       ON files(folder_id);
         CREATE INDEX IF NOT EXISTS idx_files_index_status    ON files(index_status);
         CREATE INDEX IF NOT EXISTS idx_files_file_name       ON files(file_name);
@@ -158,6 +216,29 @@ pub fn create_indexes(conn: &Connection) -> Result<(), Box<dyn std::error::Error
         CREATE INDEX IF NOT EXISTS idx_indexed_files_status      ON indexed_files(status);
         CREATE INDEX IF NOT EXISTS idx_indexed_files_index_time  ON indexed_files(index_time);
         CREATE INDEX IF NOT EXISTS idx_indexed_files_md5         ON indexed_files(md5);
-    "#)?;
+    "#,
+    )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn converts_windows_system_time_to_rfc3339() {
+        assert_eq!(
+            parse_legacy_system_time("SystemTime { intervals: 116444736000000000 }"),
+            Some("1970-01-01T00:00:00.000Z".to_string())
+        );
+    }
+
+    #[test]
+    fn leaves_non_legacy_timestamps_unchanged() {
+        assert_eq!(parse_legacy_system_time("2026-07-22T12:30:00Z"), None);
+        assert_eq!(
+            parse_legacy_system_time("SystemTime { intervals: invalid }"),
+            None
+        );
+    }
 }

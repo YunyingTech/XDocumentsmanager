@@ -5,11 +5,15 @@ import { MainPanel } from './components/layout/MainPanel';
 import { StatusBar } from './components/layout/StatusBar';
 import { useFolderStore } from './stores/folderStore';
 import { useUIStore } from './stores/uiStore';
-import type { IndexProgress } from './types';
+import { useSearchStore } from './stores/searchStore';
+import { useOcrStore } from './stores/ocrStore';
+import type { IndexProgress, SearchProgress, WindowsOcrProgress } from './types';
 
 export default function App() {
   const loadFolders = useFolderStore((s) => s.loadFolders);
   const setIndexProgress = useFolderStore((s) => s.setIndexProgress);
+  const updateSearchProgress = useSearchStore((s) => s.updateProgress);
+  const updateWindowsOcrProgress = useOcrStore((s) => s.updateWindowsProgress);
   const sidebarOpen = useUIStore((s) => s.sidebarOpen);
   const theme = useUIStore((s) => s.theme);
   const language = useUIStore((s) => s.language);
@@ -21,11 +25,19 @@ export default function App() {
     const unlisten = listen<IndexProgress>('indexing:progress', (event) => {
       setIndexProgress(event.payload);
     });
+    const unlistenSearch = listen<SearchProgress>('search:progress', (event) => {
+      updateSearchProgress(event.payload);
+    });
+    const unlistenOcr = listen<WindowsOcrProgress>('ocr:progress', (event) => {
+      updateWindowsOcrProgress(event.payload);
+    });
 
     return () => {
       unlisten.then((fn) => fn());
+      unlistenSearch.then((fn) => fn());
+      unlistenOcr.then((fn) => fn());
     };
-  }, []);
+  }, [loadFolders, setIndexProgress, updateSearchProgress, updateWindowsOcrProgress]);
 
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)');

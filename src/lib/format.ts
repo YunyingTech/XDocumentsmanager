@@ -7,8 +7,9 @@ export function formatFileSize(bytes: number): string {
 }
 
 export function formatDate(dateStr: string | null, locale?: string): string {
-  if (!dateStr) return '—';
+  if (!dateStr) return '-';
   const date = new Date(dateStr);
+  if (Number.isNaN(date.getTime())) return '-';
   return date.toLocaleDateString(locale, {
     year: 'numeric',
     month: 'short',
@@ -17,8 +18,9 @@ export function formatDate(dateStr: string | null, locale?: string): string {
 }
 
 export function formatDateTime(dateStr: string | null, locale?: string): string {
-  if (!dateStr) return '—';
+  if (!dateStr) return '-';
   const date = new Date(dateStr);
+  if (Number.isNaN(date.getTime())) return '-';
   return date.toLocaleString(locale, {
     year: 'numeric',
     month: 'short',

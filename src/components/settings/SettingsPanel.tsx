@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Wifi, Loader2, CheckCircle, XCircle, Save, Trash2 } from 'lucide-react';
-import { getSetting, setSetting, checkOcrHealth, vacuumDatabase, getOpenAiConfig, setOpenAiConfig, testOpenAiConnection, getSearchBackendStatus } from '../../lib/tauri';
+import { Wifi, Loader2, CheckCircle, XCircle, Save, Trash2, Monitor, Server } from 'lucide-react';
+import { getSetting, setSetting, checkOcrHealth, getWindowsOcrStatus, vacuumDatabase, getOpenAiConfig, setOpenAiConfig, testOpenAiConnection, getSearchBackendStatus } from '../../lib/tauri';
 import { useUIStore } from '../../stores/uiStore';
-import type { MinerUHealthInfo, SearchBackendStatus } from '../../types';
+import type { MinerUHealthInfo, OcrEngine, SearchBackendStatus, WindowsOcrStatus } from '../../types';
 import { useI18n } from '../../lib/i18n';
 import type { Language } from '../../stores/uiStore';
 
@@ -15,6 +15,9 @@ export function SettingsPanel() {
   const [pollIntervalSecs, setPollIntervalSecs] = useState('300');
   const [ocrApiUrl, setOcrApiUrl] = useState('http://127.0.0.1:8000');
   const [ocrOutputDir, setOcrOutputDir] = useState('');
+  const [ocrEngine, setOcrEngine] = useState<OcrEngine>('mineru');
+  const [windowsOcrLanguage, setWindowsOcrLanguage] = useState('auto');
+  const [windowsOcrStatus, setWindowsOcrStatus] = useState<WindowsOcrStatus | null>(null);
   const [ocrHealth, setOcrHealth] = useState<MinerUHealthInfo | null>(null);
   const [ocrChecking, setOcrChecking] = useState(false);
   const [openAiEndpoint, setOpenAiEndpoint] = useState('https://api.openai.com/v1');
@@ -37,7 +40,7 @@ export function SettingsPanel() {
     (async () => {
       const keys = [
         'index_location', 'max_file_size_mb', 'indexer_threads',
-        'poll_interval_secs', 'ocr_api_url', 'ocr_output_dir'
+        'poll_interval_secs', 'ocr_api_url', 'ocr_output_dir', 'ocr_engine', 'windows_ocr_language'
       ];
       for (const key of keys) {
         const val = await getSetting(key);
@@ -49,6 +52,8 @@ export function SettingsPanel() {
             case 'poll_interval_secs': setPollIntervalSecs(val); break;
             case 'ocr_api_url': setOcrApiUrl(val); break;
             case 'ocr_output_dir': setOcrOutputDir(val); break;
+            case 'ocr_engine': setOcrEngine(val === 'windows' ? 'windows' : 'mineru'); break;
+            case 'windows_ocr_language': setWindowsOcrLanguage(val); break;
           }
         }
       }
@@ -78,6 +83,17 @@ export function SettingsPanel() {
     };
   }, []);
 
+  useEffect(() => {
+    if (ocrEngine !== 'windows' || windowsOcrStatus) return;
+    let active = true;
+    getWindowsOcrStatus()
+      .then((status) => { if (active) setWindowsOcrStatus(status); })
+      .catch((error) => {
+        if (active) setWindowsOcrStatus({ available: false, languages: [], error: String(error) });
+      });
+    return () => { active = false; };
+  }, [ocrEngine, windowsOcrStatus]);
+
   // ── Save helpers (auto-save on change) ──
   const save = useCallback(async (key: string, value: string) => {
     try {
@@ -90,6 +106,15 @@ export function SettingsPanel() {
   // ── Health check ──
   const checkHealth = async () => {
     setOcrChecking(true);
+    if (ocrEngine === 'windows') {
+      try {
+        setWindowsOcrStatus(await getWindowsOcrStatus());
+      } catch (error) {
+        setWindowsOcrStatus({ available: false, languages: [], error: String(error) });
+      }
+      setOcrChecking(false);
+      return;
+    }
     try {
       const result = await checkOcrHealth();
       setOcrHealth(result);
@@ -202,10 +227,23 @@ export function SettingsPanel() {
           {/* ── OCR (MinerU API) Settings ── */}
           <div className="card p-5">
             <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 mb-4">
-              {t('settings.ocr')}
+              {t('ocr.settings')}
             </h3>
             <div className="space-y-4">
               <div>
+                <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
+                  {t('ocr.engine')}
+                </label>
+                <div className="inline-flex rounded-md border border-surface-200 bg-surface-50 p-0.5 dark:border-surface-700 dark:bg-surface-900">
+                  <button type="button" onClick={() => { setOcrEngine('mineru'); save('ocr_engine', 'mineru'); setOcrHealth(null); }} className={`inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs font-medium ${ocrEngine === 'mineru' ? 'bg-white shadow-sm dark:bg-surface-700' : 'text-surface-500'}`}>
+                    <Server size={14} /> MinerU
+                  </button>
+                  <button type="button" onClick={() => { setOcrEngine('windows'); save('ocr_engine', 'windows'); setWindowsOcrStatus(null); }} className={`inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs font-medium ${ocrEngine === 'windows' ? 'bg-white shadow-sm dark:bg-surface-700' : 'text-surface-500'}`}>
+                    <Monitor size={14} /> {t('ocr.windowsEngine')}
+                  </button>
+                </div>
+              </div>
+              {ocrEngine === 'mineru' ? <div>
                 <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
                   {t('settings.ocrApiUrl')}
                 </label>
@@ -216,7 +254,16 @@ export function SettingsPanel() {
                   onChange={(e) => { setOcrApiUrl(e.target.value); save('ocr_api_url', e.target.value); }}
                   placeholder="http://127.0.0.1:8000"
                 />
-              </div>
+              </div> : <div>
+                <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
+                  {t('ocr.windowsLanguage')}
+                </label>
+                <select className="input" value={windowsOcrLanguage} disabled={!windowsOcrStatus?.available} onChange={(event) => { setWindowsOcrLanguage(event.target.value); save('windows_ocr_language', event.target.value); }}>
+                  <option value="auto">{t('ocr.languageAuto')}</option>
+                  {windowsOcrStatus?.languages.map((item) => <option key={item.tag} value={item.tag}>{item.native_name} ({item.tag})</option>)}
+                </select>
+                {windowsOcrStatus?.error && <p className="mt-1 text-xs text-red-500">{windowsOcrStatus.error}</p>}
+              </div>}
               <div>
                 <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
                   {t('settings.ocrOutput')}
@@ -247,7 +294,7 @@ export function SettingsPanel() {
                   )}
                   {t('settings.testConnection')}
                 </button>
-                {ocrHealth && (
+                {ocrEngine === 'mineru' && ocrHealth && (
                   <span className={`text-xs inline-flex items-center gap-1 ${ocrHealth.connected ? 'text-green-600' : 'text-red-500'}`}>
                     {ocrHealth.connected ? (
                       <>
@@ -260,6 +307,12 @@ export function SettingsPanel() {
                         {t('settings.cannotConnect')}
                       </>
                     )}
+                  </span>
+                )}
+                {ocrEngine === 'windows' && windowsOcrStatus && (
+                  <span className={`text-xs inline-flex items-center gap-1 ${windowsOcrStatus.available ? 'text-green-600' : 'text-red-500'}`}>
+                    {windowsOcrStatus.available ? <CheckCircle size={12} /> : <XCircle size={12} />}
+                    {windowsOcrStatus.available ? t('ocr.windowsReady') : t('ocr.windowsUnavailable')}
                   </span>
                 )}
               </div>

@@ -7,6 +7,8 @@ import {
   Wifi,
   WifiOff,
   FileText,
+  Monitor,
+  Server,
 } from 'lucide-react';
 import { useOcrStore } from '../../stores/ocrStore';
 import { useFolderStore } from '../../stores/folderStore';
@@ -16,6 +18,9 @@ import { useI18n } from '../../lib/i18n';
 export function OcrPage() {
   const { t } = useI18n();
   const store = useOcrStore();
+  const engineAvailable = store.engine === 'mineru'
+    ? Boolean(store.health?.connected)
+    : Boolean(store.windowsStatus?.available);
 
   // Load settings and health on mount
   useEffect(() => {
@@ -72,7 +77,7 @@ export function OcrPage() {
                     onClick={() => store.submitTasks()}
                     disabled={
                       store.selectedFileIds.size === 0 ||
-                      !store.health?.connected
+                      !engineAvailable
                     }
                     className="btn-primary px-4 py-2 rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed"
                   >
@@ -112,12 +117,30 @@ function HealthBadge() {
   const { t } = useI18n();
   const health = useOcrStore((s) => s.health);
   const healthChecking = useOcrStore((s) => s.healthChecking);
+  const engine = useOcrStore((s) => s.engine);
+  const windowsStatus = useOcrStore((s) => s.windowsStatus);
 
   if (healthChecking) {
     return (
       <span className="inline-flex items-center gap-1.5 text-xs text-surface-400">
         <Loader2 size={12} className="animate-spin" />
         {t('ocr.checking')}
+      </span>
+    );
+  }
+  if (engine === 'windows') {
+    if (windowsStatus?.available) {
+      return (
+        <span className="inline-flex items-center gap-1.5 text-xs text-green-600">
+          <Monitor size={12} />
+          {t('ocr.windowsReady')}
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs text-red-500" title={windowsStatus?.error || undefined}>
+        <WifiOff size={12} />
+        {t('ocr.windowsUnavailable')}
       </span>
     );
   }
@@ -151,14 +174,41 @@ function SettingsCard() {
   const outputDir = useOcrStore((s) => s.outputDir);
   const saveApiUrl = useOcrStore((s) => s.saveApiUrl);
   const saveOutputDir = useOcrStore((s) => s.saveOutputDir);
+  const engine = useOcrStore((s) => s.engine);
+  const windowsStatus = useOcrStore((s) => s.windowsStatus);
+  const windowsLanguage = useOcrStore((s) => s.windowsLanguage);
+  const saveEngine = useOcrStore((s) => s.saveEngine);
+  const saveWindowsLanguage = useOcrStore((s) => s.saveWindowsLanguage);
 
   return (
     <div className="card p-5">
       <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 mb-4">
         {t('ocr.settings')}
       </h3>
-      <div className="grid grid-cols-2 gap-4">
+      <div className="space-y-4">
         <div>
+          <label className="block text-xs text-surface-500 mb-1.5">
+            {t('ocr.engine')}
+          </label>
+          <div className="inline-flex rounded-md border border-surface-200 bg-surface-50 p-0.5 dark:border-surface-700 dark:bg-surface-900">
+            <button
+              type="button"
+              onClick={() => saveEngine('mineru')}
+              className={`inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs font-medium transition-colors ${engine === 'mineru' ? 'bg-white text-surface-900 shadow-sm dark:bg-surface-700 dark:text-surface-100' : 'text-surface-500 hover:text-surface-800 dark:hover:text-surface-200'}`}
+            >
+              <Server size={14} /> MinerU
+            </button>
+            <button
+              type="button"
+              onClick={() => saveEngine('windows')}
+              className={`inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs font-medium transition-colors ${engine === 'windows' ? 'bg-white text-surface-900 shadow-sm dark:bg-surface-700 dark:text-surface-100' : 'text-surface-500 hover:text-surface-800 dark:hover:text-surface-200'}`}
+            >
+              <Monitor size={14} /> {t('ocr.windowsEngine')}
+            </button>
+          </div>
+        </div>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        {engine === 'mineru' ? <div>
           <label className="block text-xs text-surface-500 mb-1">
             {t('ocr.apiUrl')}
           </label>
@@ -169,7 +219,25 @@ function SettingsCard() {
             onChange={(e) => saveApiUrl(e.target.value)}
             placeholder="http://127.0.0.1:8000"
           />
-        </div>
+        </div> : <div>
+          <label className="block text-xs text-surface-500 mb-1">
+            {t('ocr.windowsLanguage')}
+          </label>
+          <select
+            className="input text-sm"
+            value={windowsLanguage}
+            onChange={(event) => saveWindowsLanguage(event.target.value)}
+            disabled={!windowsStatus?.available}
+          >
+            <option value="auto">{t('ocr.languageAuto')}</option>
+            {windowsStatus?.languages.map((language) => (
+              <option key={language.tag} value={language.tag}>
+                {language.native_name} ({language.tag})
+              </option>
+            ))}
+          </select>
+          {windowsStatus?.error && <p className="mt-1 text-xs text-red-500">{windowsStatus.error}</p>}
+        </div>}
         <div>
           <label className="block text-xs text-surface-500 mb-1">
             {t('ocr.outputDirectory')}
@@ -181,6 +249,7 @@ function SettingsCard() {
             onChange={(e) => saveOutputDir(e.target.value)}
             placeholder={t('ocr.outputPlaceholder', { project: '{project}' })}
           />
+        </div>
         </div>
       </div>
     </div>

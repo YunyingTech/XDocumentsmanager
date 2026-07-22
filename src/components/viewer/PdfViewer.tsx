@@ -1,43 +1,50 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { X, ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from 'lucide-react';
 import { readFileBytes } from '../../lib/tauri';
 import { useI18n } from '../../lib/i18n';
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import type { PDFDocumentProxy, RenderTask } from 'pdfjs-dist';
 
 interface PdfViewerProps {
   filePath: string;
   fileName: string;
   onClose: () => void;
+  mode?: 'modal' | 'embedded';
 }
 
-export function PdfViewer({ filePath, fileName, onClose }: PdfViewerProps) {
-  const { locale, t } = useI18n();
-  const [pdfData, setPdfData] = useState<Uint8Array | null>(null);
+export function PdfViewer({ filePath, fileName, onClose, mode = 'modal' }: PdfViewerProps) {
+  const { t } = useI18n();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pageNum, setPageNum] = useState(1);
   const [totalPages, setTotalPages] = useState(0);
   const [scale, setScale] = useState(1.2);
-  const [pdfDoc, setPdfDoc] = useState<any>(null);
+  const [pdfDoc, setPdfDoc] = useState<PDFDocumentProxy | null>(null);
 
   useEffect(() => {
     let cancelled = false;
 
+    let loadedDoc: PDFDocumentProxy | null = null;
+
     async function loadPdf() {
       setLoading(true);
       setError(null);
+      setPdfDoc(null);
+      setTotalPages(0);
       try {
         const bytes = await readFileBytes(filePath);
         if (cancelled) return;
 
         const data = new Uint8Array(bytes);
-        setPdfData(data);
-
-        // Dynamic import PDF.js
         const pdfjsLib = await import('pdfjs-dist');
-        pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
+        pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
         const doc = await pdfjsLib.getDocument({ data }).promise;
-        if (cancelled) return;
+        loadedDoc = doc;
+        if (cancelled) {
+          await doc.destroy();
+          return;
+        }
 
         setPdfDoc(doc);
         setTotalPages(doc.numPages);
@@ -52,11 +59,14 @@ export function PdfViewer({ filePath, fileName, onClose }: PdfViewerProps) {
     }
 
     loadPdf();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      if (loadedDoc) void loadedDoc.destroy();
+    };
   }, [filePath, t]);
 
   return (
-    <div className="fixed inset-0 z-50 bg-surface-950/90 flex flex-col">
+    <div className={`${mode === 'modal' ? 'fixed inset-0 z-50' : 'h-full min-h-0'} flex flex-col bg-surface-950`}>
       {/* Toolbar */}
       <div className="flex items-center gap-3 px-4 h-12 bg-surface-900/80 backdrop-blur text-surface-300">
         <span className="text-sm font-medium truncate flex-1">{fileName}</span>
@@ -92,7 +102,7 @@ export function PdfViewer({ filePath, fileName, onClose }: PdfViewerProps) {
             <ChevronLeft size={16} />
           </button>
           <span className="text-xs w-20 text-center">
-            {pageNum} / {totalPages || '—'}
+            {pageNum} / {totalPages || '-'}
           </span>
           <button
             onClick={() => setPageNum((p) => Math.min(totalPages, p + 1))}
@@ -111,21 +121,12 @@ export function PdfViewer({ filePath, fileName, onClose }: PdfViewerProps) {
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-auto flex items-start justify-center p-4">
+      <div className="flex min-h-0 flex-1 items-start justify-center overflow-auto p-4">
         {loading && (
           <div className="text-surface-400 text-sm py-16">{t('viewer.loading')}</div>
         )}
         {error && (
           <div className="text-red-400 text-sm py-16">{error}</div>
-        )}
-        {pdfData && !pdfDoc && !loading && !error && (
-          <div className="text-surface-400 text-sm py-16">
-            {t('viewer.loadedFallback')}
-            <br />
-            <span className="text-xs mt-2 block">
-              {t('viewer.fileSize', { size: pdfData.byteLength.toLocaleString(locale) })}
-            </span>
-          </div>
         )}
         {pdfDoc && (
           <PdfPage doc={pdfDoc} pageNum={pageNum} scale={scale} />
@@ -135,25 +136,37 @@ export function PdfViewer({ filePath, fileName, onClose }: PdfViewerProps) {
   );
 }
 
-function PdfPage({ doc, pageNum, scale }: { doc: any; pageNum: number; scale: number }) {
-  const canvasRef = (el: HTMLCanvasElement | null) => {
-    if (!el || !doc) return;
+function PdfPage({ doc, pageNum, scale }: { doc: PDFDocumentProxy; pageNum: number; scale: number }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
 
-    doc.getPage(pageNum).then((page: any) => {
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    let cancelled = false;
+    let renderTask: RenderTask | null = null;
+
+    void doc.getPage(pageNum).then((page) => {
+      if (cancelled) return;
       const viewport = page.getViewport({ scale });
-      const canvas = el;
       canvas.height = viewport.height;
       canvas.width = viewport.width;
 
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-
-      page.render({
-        canvasContext: ctx,
-        viewport,
-      });
+      const context = canvas.getContext('2d');
+      if (!context) return;
+      renderTask = page.render({ canvasContext: context, viewport });
+      return renderTask.promise;
+    }).catch((error: unknown) => {
+      if (!cancelled && (error as { name?: string }).name !== 'RenderingCancelledException') {
+        console.error('PDF page rendering failed:', error);
+      }
     });
-  };
+
+    return () => {
+      cancelled = true;
+      renderTask?.cancel();
+    };
+  }, [doc, pageNum, scale]);
 
   return (
     <canvas

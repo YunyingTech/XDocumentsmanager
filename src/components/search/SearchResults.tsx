@@ -1,5 +1,4 @@
 import { useSearchStore } from '../../stores/searchStore';
-import { useFileStore } from '../../stores/fileStore';
 import { formatFileSize, formatDate } from '../../lib/format';
 import { FileText, FolderOpen } from 'lucide-react';
 import { showInFolder } from '../../lib/tauri';
@@ -8,15 +7,29 @@ import { useI18n } from '../../lib/i18n';
 export function SearchResults() {
   const { locale, t } = useI18n();
   const results = useSearchStore((s) => s.results);
-  const selectFile = useFileStore((s) => s.selectFile);
+  const selectedResultId = useSearchStore((s) => s.selectedResultId);
+  const selectResult = useSearchStore((s) => s.selectResult);
 
   return (
     <div className="p-4 space-y-2">
       {results.map((result) => (
         <div
           key={result.file.id}
-          onClick={() => selectFile(result.file.id)}
-          className="card p-4 cursor-pointer hover:border-accent-300 dark:hover:border-accent-600 transition-colors"
+          role="button"
+          tabIndex={0}
+          aria-pressed={selectedResultId === result.file.id}
+          onClick={() => selectResult(result.file.id)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault();
+              selectResult(result.file.id);
+            }
+          }}
+          className={`card cursor-pointer p-4 transition-colors hover:border-accent-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 dark:hover:border-accent-600 ${
+            selectedResultId === result.file.id
+              ? 'border-accent-400 bg-accent-50/60 dark:border-accent-600 dark:bg-accent-950/20'
+              : ''
+          }`}
         >
           <div className="flex items-start gap-3">
             <div className="w-8 h-8 rounded-lg bg-accent-100 dark:bg-accent-900/30 flex items-center justify-center shrink-0 mt-0.5">
