@@ -104,7 +104,7 @@ pub async fn test_connection(db: &Database) -> Result<OpenAiConnectionInfo, Stri
             message: "API key is not configured".to_string(),
         });
     }
-    match request_terms(db, &config, "quarterly compliance report").await {
+    match request_connection_probe(db, &config).await {
         Ok(_) => Ok(OpenAiConnectionInfo {
             connected: true,
             message: format!("Connected to {}", config.model),
@@ -116,23 +116,32 @@ pub async fn test_connection(db: &Database) -> Result<OpenAiConnectionInfo, Stri
     }
 }
 
+async fn request_connection_probe(db: &Database, config: &OpenAiConfig) -> Result<(), String> {
+    let payload = json!({
+        "model": config.model,
+        "max_tokens": 64,
+        "stream": false,
+        "messages": [
+            { "role": "user", "content": "Reply with OK." }
+        ]
+    });
+    let value = send_chat_completion(db, config, payload).await?;
+    if value.pointer("/choices/0").is_none() {
+        return Err("Response has no choices[0]".to_string());
+    }
+    Ok(())
+}
+
 async fn request_terms(
     db: &Database,
     config: &OpenAiConfig,
     query: &str,
 ) -> Result<QueryTerms, String> {
-    let protected = setting(db, "openai_api_key_protected", "");
-    let api_key = decrypt_credential(&protected)?;
-    let endpoint = chat_completions_url(&config.endpoint);
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(45))
-        .build()
-        .map_err(|e| e.to_string())?;
     let payload = json!({
         "model": config.model,
         "temperature": 0,
-        "max_tokens": 250,
+        "max_tokens": 1024,
+        "stream": false,
         "response_format": { "type": "json_object" },
         "messages": [
             {
@@ -142,33 +151,130 @@ async fn request_terms(
             { "role": "user", "content": query }
         ]
     });
+    let value = send_chat_completion(db, config, payload).await?;
+    parse_query_terms(&value)
+}
+
+async fn send_chat_completion(
+    db: &Database,
+    config: &OpenAiConfig,
+    payload: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let protected = setting(db, "openai_api_key_protected", "");
+    let api_key = decrypt_credential(&protected)?;
+    let endpoint = chat_completions_url(&config.endpoint);
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(45))
+        .build()
+        .map_err(|e| e.to_string())?;
     let response = client
-        .post(endpoint)
+        .post(&endpoint)
         .bearer_auth(api_key)
         .json(&payload)
         .send()
         .await
         .map_err(|e| e.to_string())?;
     let status = response.status();
-    let value: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
-    if !status.is_success() {
-        let message = value
-            .pointer("/error/message")
-            .and_then(|v| v.as_str())
-            .unwrap_or("OpenAI-compatible endpoint rejected the request");
-        return Err(format!("{}: {}", status, message));
+    let body = response.text().await.map_err(|e| e.to_string())?;
+    if body.trim().is_empty() {
+        return Err(format!("{} returned an empty response", endpoint));
     }
-    let content = value
-        .pointer("/choices/0/message/content")
-        .and_then(|value| value.as_str())
+    if !status.is_success() {
+        let message = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .pointer("/error/message")
+                    .and_then(|message| message.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| truncate(&body, 2_000));
+        return Err(format!("{status}: {message}"));
+    }
+    serde_json::from_str(&body).map_err(|error| {
+        format!(
+            "{} returned invalid JSON: {}. Response: {}",
+            endpoint,
+            error,
+            truncate(&body, 500)
+        )
+    })
+}
+
+fn parse_query_terms(value: &serde_json::Value) -> Result<QueryTerms, String> {
+    let finish_reason = value
+        .pointer("/choices/0/finish_reason")
+        .and_then(|reason| reason.as_str())
+        .unwrap_or("unknown");
+    let content = message_content(value)
         .ok_or_else(|| "Response has no choices[0].message.content".to_string())?;
-    let cleaned = content
-        .trim()
-        .trim_start_matches("```json")
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim();
-    serde_json::from_str(cleaned).map_err(|e| format!("Invalid structured query response: {}", e))
+    let cleaned = content.trim();
+    if cleaned.is_empty() {
+        return Err(format!(
+            "The model returned an empty message (finish_reason: {finish_reason}). It may have exhausted its output tokens; retry or choose a non-reasoning model."
+        ));
+    }
+
+    let unfenced = cleaned
+        .strip_prefix("```json")
+        .or_else(|| cleaned.strip_prefix("```JSON"))
+        .or_else(|| cleaned.strip_prefix("```"))
+        .unwrap_or(cleaned);
+    let unfenced = unfenced.strip_suffix("```").unwrap_or(unfenced).trim();
+    if let Ok(terms) = serde_json::from_str(unfenced) {
+        return Ok(terms);
+    }
+    if let (Some(start), Some(end)) = (unfenced.find('{'), unfenced.rfind('}')) {
+        if start < end {
+            if let Ok(terms) = serde_json::from_str(&unfenced[start..=end]) {
+                return Ok(terms);
+            }
+        }
+    }
+    serde_json::from_str(unfenced).map_err(|error| {
+        format!(
+            "Invalid structured query response: {}. Response: {}",
+            error,
+            truncate(unfenced, 500)
+        )
+    })
+}
+
+fn message_content(value: &serde_json::Value) -> Option<String> {
+    if let Some(content) = value.pointer("/choices/0/message/content") {
+        if let Some(text) = content.as_str() {
+            return Some(text.to_string());
+        }
+        if let Some(parts) = content.as_array() {
+            return Some(
+                parts
+                    .iter()
+                    .filter_map(|part| {
+                        part.as_str().or_else(|| {
+                            part.get("text").and_then(|text| text.as_str()).or_else(|| {
+                                part.pointer("/text/value").and_then(|text| text.as_str())
+                            })
+                        })
+                    })
+                    .collect::<Vec<_>>()
+                    .join(""),
+            );
+        }
+    }
+    value
+        .pointer("/choices/0/message/tool_calls/0/function/arguments")
+        .and_then(|arguments| arguments.as_str())
+        .or_else(|| {
+            value
+                .pointer("/choices/0/text")
+                .and_then(|text| text.as_str())
+        })
+        .map(str::to_string)
+}
+
+fn truncate(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
 }
 
 fn chat_completions_url(endpoint: &str) -> String {
@@ -201,7 +307,7 @@ fn set_setting(db: &Database, key: &str, value: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{chat_completions_url, normalize_terms};
+    use super::{chat_completions_url, message_content, normalize_terms, parse_query_terms};
 
     #[test]
     fn normalizes_compatible_endpoints() {
@@ -231,5 +337,39 @@ mod tests {
             ]),
             vec!["中科院", "中国科学院", "网络安全"]
         );
+    }
+
+    #[test]
+    fn parses_fenced_and_part_based_query_responses() {
+        let value = serde_json::json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": [
+                        { "type": "text", "text": "```json\n" },
+                        { "type": "text", "text": "{\"keywords\":[\"网络安全\"],\"phrases\":[]}" },
+                        { "type": "text", "text": "\n```" }
+                    ]
+                }
+            }]
+        });
+        assert!(message_content(&value).unwrap().contains("网络安全"));
+        assert_eq!(
+            parse_query_terms(&value).unwrap().keywords,
+            vec!["网络安全"]
+        );
+    }
+
+    #[test]
+    fn explains_empty_model_messages() {
+        let value = serde_json::json!({
+            "choices": [{
+                "finish_reason": "length",
+                "message": { "content": "" }
+            }]
+        });
+        let error = parse_query_terms(&value).unwrap_err();
+        assert!(error.contains("empty message"));
+        assert!(error.contains("length"));
     }
 }
