@@ -71,6 +71,7 @@ export interface IndexProgress {
   job_id: number;
   folder_id: number | null;
   status: string;
+  ocr_after_index: boolean;
   files_total: number;
   files_processed: number;
   files_indexed: number;
@@ -86,6 +87,13 @@ export interface SearchResult {
   snippet: string;
   folder_path: string;
   absolute_path: string;
+  matched_terms: string[];
+  match_model: string | null;
+}
+
+export interface OcrCandidateRef {
+  id: number;
+  file_name: string;
 }
 
 export interface SearchResponse {

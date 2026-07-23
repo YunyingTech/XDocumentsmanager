@@ -8,9 +8,11 @@ use crate::indexer::pipeline::{self, PipelineConfig};
 pub async fn start_indexing(
     app_handle: AppHandle,
     folder_id: Option<i64>,
+    ocr_after_index: Option<bool>,
     db: State<'_, Database>,
 ) -> Result<i64, String> {
     let folder_id = folder_id.ok_or("folder_id is required")?;
+    let ocr_after_index = ocr_after_index.unwrap_or(false);
 
     // Get folder path from DB
     let folder_path: String = {
@@ -47,6 +49,7 @@ pub async fn start_indexing(
     let config = PipelineConfig {
         root_path,
         folder_id,
+        ocr_after_index,
         num_workers: 4,
         max_file_size_bytes: 500 * 1024 * 1024, // 500MB
     };

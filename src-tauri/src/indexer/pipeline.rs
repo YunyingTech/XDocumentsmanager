@@ -14,6 +14,7 @@ use crate::models::IndexProgress;
 pub struct PipelineConfig {
     pub root_path: PathBuf,
     pub folder_id: i64,
+    pub ocr_after_index: bool,
     pub num_workers: usize,
     pub max_file_size_bytes: i64,
 }
@@ -172,6 +173,7 @@ pub fn run_full_index(
             job_id,
             folder_id: Some(config.folder_id),
             status: "running".to_string(),
+            ocr_after_index: config.ocr_after_index,
             files_total: total as i64,
             files_processed: processed as i64,
             files_indexed: indexed as i64,
@@ -207,6 +209,7 @@ pub fn run_full_index(
         job_id,
         folder_id: Some(config.folder_id),
         status: "completed".to_string(),
+        ocr_after_index: config.ocr_after_index,
         files_total: total as i64,
         files_processed: processed as i64,
         files_indexed: indexed as i64,
@@ -257,4 +260,16 @@ fn days_to_date(days: i64) -> (i64, i64, i64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m as i64, d as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{days_to_date, format_unix_timestamp};
+
+    #[test]
+    fn formats_epoch_and_leap_day_timestamps() {
+        assert_eq!(format_unix_timestamp(0), "1970-01-01T00:00:00");
+        assert_eq!(format_unix_timestamp(951_827_696), "2000-02-29T12:34:56");
+        assert_eq!(days_to_date(19_782), (2024, 2, 29));
+    }
 }

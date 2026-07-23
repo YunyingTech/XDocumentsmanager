@@ -20,7 +20,7 @@ interface SearchStore {
 
   setQuery: (q: string) => void;
   setFilters: (f: SearchFilters) => void;
-  doSearch: (terms?: string[]) => Promise<void>;
+  doSearch: (terms?: string[], queryModel?: string) => Promise<void>;
   analyzeQuery: () => Promise<void>;
   toggleTerm: (term: string) => void;
   selectAllTerms: (selected: boolean) => void;
@@ -57,7 +57,7 @@ export const useSearchStore = create<SearchStore>((set, get) => ({
 
   setFilters: (filters) => set({ filters }),
 
-  doSearch: async (terms) => {
+  doSearch: async (terms, queryModel) => {
     const requestId = ++latestSearchRequest;
     const { query, filters } = get();
     if (!query.trim()) {
@@ -73,7 +73,7 @@ export const useSearchStore = create<SearchStore>((set, get) => ({
       searchStartedAt: Date.now(),
     });
     try {
-      const response = await search(query, filters, 100, requestId, terms);
+      const response = await search(query, filters, 100, requestId, terms, queryModel);
       if (requestId === latestSearchRequest) {
         set({
           results: response.results,
@@ -124,8 +124,8 @@ export const useSearchStore = create<SearchStore>((set, get) => ({
   })),
 
   searchSelectedTerms: async () => {
-    const terms = get().selectedTerms;
-    if (terms.length > 0) await get().doSearch(terms);
+    const { selectedTerms, analysis } = get();
+    if (selectedTerms.length > 0) await get().doSearch(selectedTerms, analysis?.model);
   },
 
   updateProgress: (progress) => {

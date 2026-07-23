@@ -531,6 +531,12 @@ pub async fn run_windows_ocr(
     Ok(output_path.to_string_lossy().to_string())
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct OcrCandidateRef {
+    pub id: i64,
+    pub file_name: String,
+}
+
 #[tauri::command]
 pub fn cancel_ocr_task(
     task_id: String,
@@ -539,6 +545,15 @@ pub fn cancel_ocr_task(
     let cancelled = tasks.cancel(&task_id);
     if cancelled {
         log::info!("OCR task [{}] cancellation requested", task_id);
+    }
+    Ok(cancelled)
+}
+
+#[tauri::command]
+pub fn cancel_all_ocr_tasks(tasks: State<'_, OcrTaskManager>) -> Result<usize, String> {
+    let cancelled = tasks.cancel_all();
+    if cancelled > 0 {
+        log::info!("Cancellation requested for {} active OCR tasks", cancelled);
     }
     Ok(cancelled)
 }
@@ -838,6 +853,26 @@ mod tests {
     }
 
     #[test]
+    fn rejects_invalid_zip_results_and_archives_without_markdown() {
+        assert!(markdown_from_zip(b"not a zip")
+            .unwrap_err()
+            .contains("Invalid OCR ZIP"));
+
+        let mut output = Cursor::new(Vec::new());
+        {
+            let mut archive = zip::ZipWriter::new(&mut output);
+            archive
+                .start_file("result.txt", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            archive.write_all(b"plain text").unwrap();
+            archive.finish().unwrap();
+        }
+        assert!(markdown_from_zip(output.get_ref())
+            .unwrap_err()
+            .contains("no Markdown file"));
+    }
+
+    #[test]
     fn default_ocr_output_is_stored_beside_the_application_database() {
         let root = std::env::temp_dir().join(format!(
             "xdocuments-ocr-output-{}",
@@ -848,6 +883,60 @@ mod tests {
             PathBuf::from(resolve_output_dir(&database).unwrap()),
             root.join("OCR_result")
         );
+        drop(database);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn persisted_ocr_text_updates_the_database_and_embedded_search() {
+        let root = std::env::temp_dir().join(format!(
+            "xdocuments-ocr-persist-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = Database::new(&root).unwrap();
+        {
+            let conn = database.get_connection();
+            conn.execute(
+                "INSERT INTO watched_folders (id, path, display_name) VALUES (1, 'C:/documents', 'Test')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO files (id, folder_id, relative_path, file_name, file_size_bytes, content_hash, file_modified_at, index_status) VALUES (7, 1, 'source.pdf', 'source.pdf', 100, 'hash', '2026-01-01T00:00:00', 'indexed')",
+                [],
+            )
+            .unwrap();
+        }
+        let engine = SearchEngine::open(&root.join("tantivy")).unwrap();
+
+        persist_ocr_text(
+            &database,
+            &engine,
+            7,
+            b"# OCR\nunique-embedded-ocr-token",
+            false,
+        )
+        .unwrap();
+
+        let (applied, text): (i64, String) = database
+            .get_connection()
+            .query_row(
+                "SELECT ocr_applied, text_preview FROM files WHERE id = 7",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(applied, 1);
+        assert!(text.contains("unique-embedded-ocr-token"));
+        assert_eq!(
+            engine
+                .search("unique-embedded-ocr-token", None, 10)
+                .unwrap()[0]
+                .file_id,
+            7
+        );
+
+        drop(engine);
         drop(database);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1057,4 +1146,29 @@ pub fn list_ocr_candidates(
         page_size,
         total_pages,
     })
+}
+
+#[tauri::command]
+pub fn list_ocr_candidate_refs(
+    folder_id: i64,
+    db: State<'_, Database>,
+) -> Result<Vec<OcrCandidateRef>, String> {
+    let conn = db.get_connection();
+    let mut statement = conn
+        .prepare(
+            "SELECT id, file_name FROM files \
+             WHERE folder_id = ?1 AND index_status = 'indexed' \
+             ORDER BY file_name",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([folder_id], |row| {
+            Ok(OcrCandidateRef {
+                id: row.get(0)?,
+                file_name: row.get(1)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
 }

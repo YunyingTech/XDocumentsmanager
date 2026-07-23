@@ -244,4 +244,92 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn migrations_create_defaults_indexes_and_foreign_keys() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        create_indexes(&conn).unwrap();
+
+        let foreign_keys: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .unwrap();
+        let engine: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'ocr_engine'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let composite_index: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_files_folder_status'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(foreign_keys, 1);
+        assert_eq!(engine, "mineru");
+        assert_eq!(composite_index, 1);
+    }
+
+    #[test]
+    fn rerunning_migrations_normalizes_legacy_timestamps() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO watched_folders (id, path) VALUES (1, 'C:/documents')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO files (folder_id, relative_path, file_name, file_size_bytes, content_hash, file_created_at, file_modified_at) VALUES (1, 'a.pdf', 'a.pdf', 10, 'hash', 'SystemTime { intervals: 116444736000000000 }', 'SystemTime { intervals: 116444736010000000 }')",
+            [],
+        )
+        .unwrap();
+
+        run_migrations(&conn).unwrap();
+        let timestamps: (String, String) = conn
+            .query_row(
+                "SELECT file_created_at, file_modified_at FROM files WHERE relative_path = 'a.pdf'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(timestamps.0, "1970-01-01T00:00:00.000Z");
+        assert_eq!(timestamps.1, "1970-01-01T00:00:01.000Z");
+    }
+
+    #[test]
+    fn deleting_a_folder_cascades_files_and_preserves_job_history() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO watched_folders (id, path) VALUES (1, 'C:/documents')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO files (folder_id, relative_path, file_name, file_size_bytes, content_hash, file_modified_at) VALUES (1, 'a.pdf', 'a.pdf', 10, 'hash', '2026-01-01')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO index_jobs (folder_id, job_type) VALUES (1, 'full_scan')",
+            [],
+        )
+        .unwrap();
+
+        conn.execute("DELETE FROM watched_folders WHERE id = 1", [])
+            .unwrap();
+        let files: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+            .unwrap();
+        let job_folder: Option<i64> = conn
+            .query_row("SELECT folder_id FROM index_jobs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(files, 0);
+        assert_eq!(job_folder, None);
+    }
 }

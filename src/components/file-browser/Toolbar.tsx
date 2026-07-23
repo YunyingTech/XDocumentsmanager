@@ -2,7 +2,7 @@ import { useFolderStore } from '../../stores/folderStore';
 import { useFileStore } from '../../stores/fileStore';
 import { useSearchStore } from '../../stores/searchStore';
 import { useUIStore } from '../../stores/uiStore';
-import { Search, RefreshCw, FolderOpen } from 'lucide-react';
+import { Search, RefreshCw, FolderOpen, ScanText } from 'lucide-react';
 import { startIndexing } from '../../lib/tauri';
 import { useI18n } from '../../lib/i18n';
 
@@ -28,6 +28,12 @@ export function Toolbar() {
   const handleReindex = async () => {
     if (selectedFolderId !== null) {
       await startIndexing(selectedFolderId);
+    }
+  };
+
+  const handleIndexAndOcr = async () => {
+    if (selectedFolderId !== null) {
+      await startIndexing(selectedFolderId, true);
     }
   };
 
@@ -77,6 +83,10 @@ export function Toolbar() {
       </button>
       <button onClick={handleReindex} className="btn-secondary text-xs py-1.5" title={t('files.reindexFolder')}>
         {t('files.reindex')}
+      </button>
+      <button onClick={handleIndexAndOcr} className="btn-secondary flex items-center gap-1.5 py-1.5 text-xs" title={t('files.indexAndOcr')}>
+        <ScanText size={14} />
+        {t('files.indexAndOcr')}
       </button>
       <button onClick={handleSearch} className="btn-ghost p-1.5 rounded-lg" title={t('common.search')} aria-label={t('common.search')}>
         <Search size={16} />

@@ -40,6 +40,20 @@ impl OcrTaskManager {
         }
     }
 
+    pub fn cancel_all(&self) -> usize {
+        let flags = self
+            .tasks
+            .lock()
+            .expect("OCR task registry lock poisoned")
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for flag in &flags {
+            flag.store(true, Ordering::Release);
+        }
+        flags.len()
+    }
+
     fn finish(&self, task_id: &str) {
         self.tasks
             .lock()
@@ -81,5 +95,16 @@ mod tests {
             assert!(registration.cancellation_flag().load(Ordering::Acquire));
         }
         assert!(!manager.cancel("task-1"));
+    }
+
+    #[test]
+    fn cancellation_reaches_all_registered_tasks() {
+        let manager = OcrTaskManager::default();
+        let first = manager.register("task-1").unwrap();
+        let second = manager.register("task-2").unwrap();
+
+        assert_eq!(manager.cancel_all(), 2);
+        assert!(first.cancellation_flag().load(Ordering::Acquire));
+        assert!(second.cancellation_flag().load(Ordering::Acquire));
     }
 }

@@ -133,11 +133,13 @@ pub fn run() {
             commands::ocr::get_windows_ocr_status,
             commands::ocr::run_windows_ocr,
             commands::ocr::cancel_ocr_task,
+            commands::ocr::cancel_all_ocr_tasks,
             commands::paddle_ocr::get_paddle_ocr_status,
             commands::paddle_ocr::install_paddle_ocr,
             commands::paddle_ocr::run_paddle_ocr,
             commands::ocr::get_ocr_output_dir,
             commands::ocr::list_ocr_candidates,
+            commands::ocr::list_ocr_candidate_refs,
             // Settings
             commands::settings::get_setting,
             commands::settings::set_setting,

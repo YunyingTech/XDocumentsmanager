@@ -1,7 +1,7 @@
 import { useFolderStore } from '../../stores/folderStore';
 import { FolderStatusBadge } from './FolderStatusBadge';
 import { formatFileSize } from '../../lib/format';
-import { HardDrive, Network, MoreVertical, RefreshCw, Trash2, Pause, Play } from 'lucide-react';
+import { HardDrive, Network, MoreVertical, RefreshCw, ScanText, Trash2, Pause, Play } from 'lucide-react';
 import { useState } from 'react';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 import { removeFolder, startIndexing } from '../../lib/tauri';
@@ -28,9 +28,9 @@ export function FolderList({ onAddFolder: _onAddFolder }: FolderListProps) {
     }
   };
 
-  const handleReindex = async (folderId: number) => {
+  const handleReindex = async (folderId: number, ocrAfterIndex = false) => {
     setMenuOpen(null);
-    await startIndexing(folderId);
+    await startIndexing(folderId, ocrAfterIndex);
   };
 
   return (
@@ -86,6 +86,12 @@ export function FolderList({ onAddFolder: _onAddFolder }: FolderListProps) {
                     className="w-full flex items-center gap-2 px-3 py-2 text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-800"
                   >
                     <RefreshCw size={14} /> {t('folders.reindex')}
+                  </button>
+                  <button
+                    onClick={() => handleReindex(folder.id, true)}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-800"
+                  >
+                    <ScanText size={14} /> {t('folders.indexAndOcr')}
                   </button>
                   {folder.is_active ? (
                     <button className="w-full flex items-center gap-2 px-3 py-2 text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-800">

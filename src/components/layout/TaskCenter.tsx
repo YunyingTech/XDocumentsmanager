@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   AlertCircle, CheckCircle2, ChevronDown, ChevronUp, Clipboard,
-  Download, Loader2, ListChecks, Trash2,
+  CircleStop, Download, Loader2, ListChecks, Trash2,
   X,
 } from 'lucide-react';
 import { useFolderStore } from '../../stores/folderStore';
@@ -28,6 +28,7 @@ export function TaskCenter() {
   const clearTasks = useOcrStore((s) => s.clearTasks);
   const downloadResult = useOcrStore((s) => s.downloadResult);
   const cancelTask = useOcrStore((s) => s.cancelTask);
+  const cancelAllTasks = useOcrStore((s) => s.cancelAllTasks);
 
   const indexActive = indexProgress?.status === 'running' || indexProgress?.status === 'queued';
   const indexFailed = indexProgress?.status === 'error';
@@ -76,7 +77,11 @@ export function TaskCenter() {
                 </span>
               )}
             </div>
-            {tasks.length > 0 && activeOcr === 0 && (
+            {activeOcr > 0 ? (
+              <button type="button" onClick={() => void cancelAllTasks()} className="icon-button text-surface-400 hover:text-red-600" title={t('tasks.cancelAllOcr')} aria-label={t('tasks.cancelAllOcr')}>
+                <CircleStop size={15} />
+              </button>
+            ) : tasks.length > 0 && (
               <button type="button" onClick={clearTasks} className="icon-button text-surface-400 hover:text-red-600" title={t('tasks.clearOcr')} aria-label={t('tasks.clearOcr')}>
                 <Trash2 size={15} />
               </button>
@@ -137,7 +142,10 @@ function IndexTask({ progress, folderName }: { progress: IndexProgress; folderNa
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
               <p className="truncate text-xs font-semibold text-surface-800 dark:text-surface-200">{t('tasks.indexing')}</p>
-              <p className="truncate text-[11px] text-surface-500">{folderName || t('tasks.documentLibrary')}</p>
+              <p className="truncate text-[11px] text-surface-500">
+                {folderName || t('tasks.documentLibrary')}
+                {progress.ocr_after_index ? ` / ${t('tasks.ocrAfterIndex')}` : ''}
+              </p>
             </div>
             <span className="shrink-0 text-[11px] font-medium tabular-nums text-surface-500">{active ? `${percentage}%` : failed ? t('tasks.failedStatus') : t('tasks.completedStatus')}</span>
           </div>

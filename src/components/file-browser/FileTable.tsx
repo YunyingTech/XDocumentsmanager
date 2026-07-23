@@ -43,6 +43,7 @@ export function FileTable() {
     estimateSize: () => ROW_HEIGHT,
     overscan: 10,
   });
+  const virtualItems = rowVirtualizer.getVirtualItems();
 
   useEffect(() => {
     parentRef.current?.scrollTo({ top: 0 });
@@ -51,9 +52,8 @@ export function FileTable() {
   // Load page when virtual scroll moves to a new page range
   useEffect(() => {
     if (isManualPageChange.current) return;
-    const items = rowVirtualizer.getVirtualItems();
-    if (items.length === 0) return;
-    const firstIdx = items[0].index;
+    if (virtualItems.length === 0) return;
+    const firstIdx = virtualItems[0].index;
     const newPage = Math.floor(firstIdx / pageSize);
     if (newPage !== page) {
       setPage(newPage);
@@ -61,7 +61,7 @@ export function FileTable() {
         loadFiles(selectedFolderId);
       }
     }
-  }, [rowVirtualizer.getVirtualItems(), page, pageSize, selectedFolderId]);
+  }, [virtualItems, page, pageSize, selectedFolderId, setPage, loadFiles]);
 
   const handlePageJump = useCallback((newPage: number) => {
     if (newPage < 0 || newPage >= totalPages) return;
@@ -140,7 +140,7 @@ export function FileTable() {
           position: 'relative',
         }}
       >
-        {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+        {virtualItems.map((virtualRow) => {
           const file = files[virtualRow.index % pageSize];
           if (!file) return null;
 

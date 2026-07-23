@@ -59,6 +59,10 @@ def collect_text(value):
 def create_engine(language, model):
     from paddleocr import PaddleOCR
 
+    # PaddleOCR 3.x enables oneDNN by default on CPU. Some Windows Paddle
+    # builds fail in PIR conversion before inference, so use the stable CPU
+    # execution path here.
+    runtime_options = {"enable_mkldnn": False}
     preset = {
         "PP-OCRv5_mobile": ("PP-OCRv5_mobile_det", "PP-OCRv5_mobile_rec"),
         "PP-OCRv5_server": ("PP-OCRv5_server_det", "PP-OCRv5_server_rec"),
@@ -72,8 +76,9 @@ def create_engine(language, model):
                 use_doc_orientation_classify=False,
                 use_doc_unwarping=False,
                 use_textline_orientation=True,
+                **runtime_options,
             )
-        except TypeError:
+        except (TypeError, ValueError):
             pass
     try:
         return PaddleOCR(
@@ -81,9 +86,15 @@ def create_engine(language, model):
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
             use_textline_orientation=True,
+            **runtime_options,
         )
-    except TypeError:
-        return PaddleOCR(lang=language, use_angle_cls=True, show_log=False)
+    except (TypeError, ValueError):
+        return PaddleOCR(
+            lang=language,
+            use_angle_cls=True,
+            show_log=False,
+            use_mkldnn=False,
+        )
 
 
 def recognize_page(engine, image_path):

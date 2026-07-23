@@ -76,6 +76,7 @@ pub struct IndexProgress {
     pub job_id: i64,
     pub folder_id: Option<i64>,
     pub status: String,
+    pub ocr_after_index: bool,
     pub files_total: i64,
     pub files_processed: i64,
     pub files_indexed: i64,
@@ -92,6 +93,8 @@ pub struct SearchResult {
     pub snippet: String,
     pub folder_path: String,
     pub absolute_path: String,
+    pub matched_terms: Vec<String>,
+    pub match_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

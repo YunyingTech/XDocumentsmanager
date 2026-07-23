@@ -4,8 +4,9 @@ import { SearchBar } from './SearchBar';
 import { SearchResults } from './SearchResults';
 import { PdfViewer } from '../viewer/PdfViewer';
 import { EmptyState } from '../common/EmptyState';
-import { AlertCircle, Check, DatabaseZap, FileSearch, LoaderCircle, Search, Sparkles } from 'lucide-react';
+import { AlertCircle, Check, DatabaseZap, FileSearch, ListFilter, LoaderCircle, Search, Sparkles } from 'lucide-react';
 import { useI18n, type TranslationKey } from '../../lib/i18n';
+import type { SearchQueryAnalysis } from '../../types';
 
 const stages = [
   { id: 'searching', label: 'search.stageSearching', icon: DatabaseZap, threshold: 50 },
@@ -31,8 +32,10 @@ export function SearchView() {
   const searchElapsedMs = useSearchStore((s) => s.searchElapsedMs);
   const searchStartedAt = useSearchStore((s) => s.searchStartedAt);
   const [clock, setClock] = useState(Date.now());
+  const [expandedAnalysis, setExpandedAnalysis] = useState<SearchQueryAnalysis | null>(null);
   const selectedResult = results.find((result) => result.file.id === selectedResultId);
   const elapsedMs = isSearching && searchStartedAt ? clock - searchStartedAt : searchElapsedMs;
+  const termsExpanded = analysis !== null && expandedAnalysis === analysis;
 
   useEffect(() => {
     if (!isSearching) return;
@@ -70,31 +73,48 @@ export function SearchView() {
               <span className="truncate" title={analysisError}>{t('search.analysisFailed', { error: analysisError })}</span>
             </div>
           ) : analysis && (
-            <div className="flex flex-wrap items-center gap-2">
-              <div className="mr-1 flex min-w-0 items-center gap-2 text-xs text-surface-500">
-                <Sparkles size={15} className="shrink-0 text-accent-500" />
-                <span className="font-medium text-surface-700 dark:text-surface-300">{t('search.suggestedTerms')}</span>
-                <span className="max-w-36 truncate font-mono text-[11px] text-surface-400" title={analysis.model}>{analysis.model}</span>
-                <span className="font-mono text-[11px] tabular-nums text-surface-400">{formatDuration(analysis.elapsed_ms)}</span>
+            <div>
+              <div className="flex min-h-8 flex-wrap items-center gap-2">
+                <div className="mr-1 flex min-w-0 items-center gap-2 text-xs text-surface-500">
+                  <Sparkles size={15} className="shrink-0 text-accent-500" />
+                  <span className="font-medium text-surface-700 dark:text-surface-300">{t('search.suggestedTerms')}</span>
+                  <span className="max-w-36 truncate font-mono text-[11px] text-surface-400" title={analysis.model}>{analysis.model}</span>
+                  <span className="font-mono text-[11px] tabular-nums text-surface-400">{formatDuration(analysis.elapsed_ms)}</span>
+                  <span className="text-[11px] tabular-nums text-surface-400">{t('search.termCount', { count: analysis.terms.length })}</span>
+                </div>
+                <button
+                  type="button"
+                  className="btn-ghost ml-auto flex h-7 items-center gap-1.5 px-2 text-xs"
+                  aria-expanded={termsExpanded}
+                  aria-controls="ai-search-term-filters"
+                  onClick={() => setExpandedAnalysis(termsExpanded ? null : analysis)}
+                >
+                  <ListFilter size={13} />
+                  <span>{termsExpanded ? t('search.collapseTerms') : t('search.filterTerms')}</span>
+                </button>
               </div>
-              {analysis.terms.map((term) => (
-                <label key={term} className={`flex h-7 cursor-pointer items-center gap-1.5 rounded border px-2 text-xs transition-colors ${selectedTerms.includes(term) ? 'border-accent-400 bg-accent-50 text-accent-800 dark:border-accent-600 dark:bg-accent-950/30 dark:text-accent-200' : 'border-surface-200 text-surface-500 dark:border-surface-700'}`}>
-                  <input
-                    type="checkbox"
-                    className="h-3.5 w-3.5 accent-accent-600"
-                    checked={selectedTerms.includes(term)}
-                    onChange={() => toggleTerm(term)}
-                  />
-                  <span>{term}</span>
-                </label>
-              ))}
-              <button type="button" className="btn-ghost h-7 px-2 text-xs" onClick={() => selectAllTerms(selectedTerms.length !== analysis.terms.length)}>
-                {selectedTerms.length === analysis.terms.length ? t('search.clearTerms') : t('search.selectAllTerms')}
-              </button>
-              <button type="button" className="btn-primary flex h-7 items-center gap-1.5 px-2.5 text-xs disabled:opacity-50" disabled={selectedTerms.length === 0 || isSearching} onClick={() => void searchSelectedTerms()}>
-                <Search size={13} />
-                <span>{t('search.searchSelected', { count: selectedTerms.length })}</span>
-              </button>
+              {termsExpanded && (
+                <div id="ai-search-term-filters" className="mt-2 flex flex-wrap items-center gap-2 border-t border-surface-100 pt-2 dark:border-surface-800">
+                  {analysis.terms.map((term) => (
+                    <label key={term} className={`flex h-7 cursor-pointer items-center gap-1.5 rounded border px-2 text-xs transition-colors ${selectedTerms.includes(term) ? 'border-accent-400 bg-accent-50 text-accent-800 dark:border-accent-600 dark:bg-accent-950/30 dark:text-accent-200' : 'border-surface-200 text-surface-500 dark:border-surface-700'}`}>
+                      <input
+                        type="checkbox"
+                        className="h-3.5 w-3.5 accent-accent-600"
+                        checked={selectedTerms.includes(term)}
+                        onChange={() => toggleTerm(term)}
+                      />
+                      <span>{term}</span>
+                    </label>
+                  ))}
+                  <button type="button" className="btn-ghost h-7 px-2 text-xs" onClick={() => selectAllTerms(selectedTerms.length !== analysis.terms.length)}>
+                    {selectedTerms.length === analysis.terms.length ? t('search.clearTerms') : t('search.selectAllTerms')}
+                  </button>
+                  <button type="button" className="btn-primary flex h-7 items-center gap-1.5 px-2.5 text-xs disabled:opacity-50" disabled={selectedTerms.length === 0 || isSearching} onClick={() => void searchSelectedTerms()}>
+                    <Search size={13} />
+                    <span>{t('search.searchSelected', { count: selectedTerms.length })}</span>
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>

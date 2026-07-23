@@ -372,4 +372,47 @@ mod tests {
         assert!(error.contains("empty message"));
         assert!(error.contains("length"));
     }
+
+    #[test]
+    fn parses_tool_call_arguments_and_embedded_json() {
+        let tool_call = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "function": {
+                            "arguments": "{\"keywords\":[\"audit\"],\"phrases\":[\"risk report\"]}"
+                        }
+                    }]
+                }
+            }]
+        });
+        assert_eq!(
+            parse_query_terms(&tool_call).unwrap().phrases,
+            vec!["risk report"]
+        );
+
+        let wrapped = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "Here is the result: {\"keywords\":[\"security\"],\"phrases\":[]} done"
+                }
+            }]
+        });
+        assert_eq!(
+            parse_query_terms(&wrapped).unwrap().keywords,
+            vec!["security"]
+        );
+    }
+
+    #[test]
+    fn invalid_structured_responses_include_a_bounded_preview() {
+        let value = serde_json::json!({
+            "choices": [{
+                "message": { "content": "x".repeat(800) }
+            }]
+        });
+        let error = parse_query_terms(&value).unwrap_err();
+        assert!(error.contains("Invalid structured query response"));
+        assert!(error.chars().count() < 700);
+    }
 }

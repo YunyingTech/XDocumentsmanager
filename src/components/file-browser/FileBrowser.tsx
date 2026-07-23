@@ -24,7 +24,7 @@ export function FileBrowser() {
     if (selectedFolderId !== null) {
       loadFiles(selectedFolderId);
     }
-  }, [selectedFolderId]);
+  }, [selectedFolderId, loadFiles]);
 
   if (folders.length === 0) {
     return (

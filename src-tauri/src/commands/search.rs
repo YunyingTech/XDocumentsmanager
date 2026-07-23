@@ -31,6 +31,7 @@ fn emit_progress(app: &AppHandle, request_id: u64, stage: &'static str, progress
 pub async fn search(
     query: String,
     terms: Option<Vec<String>>,
+    query_model: Option<String>,
     filters: Option<SearchFilters>,
     limit: Option<i64>,
     request_id: Option<u64>,
@@ -40,7 +41,15 @@ pub async fn search(
     let started = Instant::now();
     let request_id = request_id.unwrap_or(0);
     let limit = limit.unwrap_or(100).clamp(1, 500) as usize;
-    let engine_query = selected_terms_query(terms.as_deref()).unwrap_or_else(|| query.clone());
+    let selected_terms = normalize_selected_terms(terms.as_deref());
+    let engine_query = selected_terms_query(&selected_terms).unwrap_or_else(|| query.clone());
+    let match_model = if selected_terms.is_empty() {
+        None
+    } else {
+        query_model
+            .map(|model| model.trim().chars().take(128).collect::<String>())
+            .filter(|model| !model.is_empty())
+    };
     emit_progress(&app, request_id, "searching", 50);
     log::info!("Search {}: querying full-text index", request_id);
     let search_app = app.clone();
@@ -84,12 +93,20 @@ pub async fn search(
             .to_string();
         let searchable_preview =
             normalize_cjk_ocr_spacing(file.text_preview.as_deref().unwrap_or_default());
+        let matched_terms = matched_ai_terms(&file, &selected_terms);
+        let snippet_query = if matched_terms.is_empty() {
+            query.clone()
+        } else {
+            matched_terms.join(" ")
+        };
         results.push(SearchResult {
-            snippet: make_snippet(&searchable_preview, &query),
+            snippet: make_snippet(&searchable_preview, &snippet_query),
             file,
             score: hit.score as f64,
             folder_path,
             absolute_path,
+            matched_terms,
+            match_model: match_model.clone(),
         });
         if results.len() == limit {
             break;
@@ -125,15 +142,65 @@ pub async fn analyze_search_query(
     crate::search::query::analyze_query(&db, query).await
 }
 
-fn selected_terms_query(terms: Option<&[String]>) -> Option<String> {
-    let terms = terms?
+fn normalize_selected_terms(terms: Option<&[String]>) -> Vec<String> {
+    terms
+        .unwrap_or_default()
         .iter()
         .map(|term| term.trim().replace(['\"', '\\'], ""))
         .filter(|term| !term.is_empty())
         .take(16)
-        .map(|term| format!("\"{term}\""))
-        .collect::<Vec<_>>();
-    (!terms.is_empty()).then(|| terms.join(" | "))
+        .collect()
+}
+
+fn selected_terms_query(terms: &[String]) -> Option<String> {
+    (!terms.is_empty()).then(|| {
+        terms
+            .iter()
+            .map(|term| format!("({})", escape_search_term(term)))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    })
+}
+
+fn escape_search_term(term: &str) -> String {
+    let mut escaped = String::with_capacity(term.len());
+    for character in term.chars() {
+        if matches!(character, '+' | '|' | '-' | '(' | ')' | '"' | '*' | '~' | '\\' | ':') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
+fn matched_ai_terms(file: &FileInfo, terms: &[String]) -> Vec<String> {
+    if terms.is_empty() {
+        return Vec::new();
+    }
+    let searchable = [
+        Some(file.file_name.as_str()),
+        file.text_preview.as_deref(),
+        file.pdf_title.as_deref(),
+        file.pdf_author.as_deref(),
+        file.pdf_keywords.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("\n");
+    matching_ai_terms(&searchable, terms)
+}
+
+fn matching_ai_terms(searchable: &str, terms: &[String]) -> Vec<String> {
+    let searchable = normalize_cjk_ocr_spacing(searchable).to_lowercase();
+    terms
+        .iter()
+        .filter(|term| {
+            let term = normalize_cjk_ocr_spacing(term).to_lowercase();
+            !term.is_empty() && searchable.contains(&term)
+        })
+        .cloned()
+        .collect()
 }
 
 fn make_snippet(content: &str, query: &str) -> String {
@@ -212,18 +279,112 @@ fn matches_filters(file: &FileInfo, filters: Option<&SearchFilters>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::selected_terms_query;
+    use super::{
+        make_snippet, matches_filters, matching_ai_terms, normalize_selected_terms,
+        selected_terms_query,
+    };
+    use crate::models::{FileInfo, SearchFilters};
+
+    fn file_fixture() -> FileInfo {
+        FileInfo {
+            id: 1,
+            folder_id: 2,
+            relative_path: "report.pdf".to_string(),
+            file_name: "report.pdf".to_string(),
+            file_extension: "pdf".to_string(),
+            file_size_bytes: 1_024,
+            content_hash: "hash".to_string(),
+            page_count: Some(1),
+            text_length: Some(20),
+            file_created_at: None,
+            file_modified_at: "2026-07-20T00:00:00".to_string(),
+            indexed_at: None,
+            index_status: "indexed".to_string(),
+            index_error: None,
+            text_preview: Some("Compliance report".to_string()),
+            ocr_applied: false,
+            pdf_title: None,
+            pdf_author: None,
+            pdf_subject: None,
+            pdf_keywords: None,
+        }
+    }
 
     #[test]
     fn builds_safe_or_query_from_selected_terms() {
         let terms = vec![
-            "中科院".to_string(),
-            " 中国科学院 ".to_string(),
-            "\\\"网络安全\\\"".to_string(),
+            "SSL certificate".to_string(),
+            " TLS certificate ".to_string(),
+            "\\\"security | audit\\\"".to_string(),
         ];
         assert_eq!(
-            selected_terms_query(Some(&terms)),
-            Some("\"中科院\" | \"中国科学院\" | \"网络安全\"".to_string())
+            selected_terms_query(&normalize_selected_terms(Some(&terms))),
+            Some(
+                "(SSL certificate) | (TLS certificate) | (security \\| audit)".to_string()
+            )
         );
+    }
+
+    #[test]
+    fn identifies_case_insensitive_and_cjk_ocr_term_matches() {
+        let terms = vec![
+            "Network Security".to_string(),
+            "网络安全".to_string(),
+            "合规报告".to_string(),
+        ];
+        assert_eq!(
+            matching_ai_terms("NETWORK SECURITY / 网 络 安 全 管理办法", &terms),
+            vec!["Network Security", "网络安全"]
+        );
+    }
+
+    #[test]
+    fn applies_all_search_filter_boundaries() {
+        let file = file_fixture();
+        assert!(matches_filters(
+            &file,
+            Some(&SearchFilters {
+                folder_id: Some(2),
+                date_from: Some("2026-07-01".to_string()),
+                date_to: Some("2026-07-31".to_string()),
+                size_min: Some(1_024),
+                size_max: Some(1_024),
+                file_extension: Some("PDF".to_string()),
+            })
+        ));
+        assert!(!matches_filters(
+            &file,
+            Some(&SearchFilters {
+                folder_id: Some(3),
+                date_from: None,
+                date_to: None,
+                size_min: None,
+                size_max: None,
+                file_extension: None,
+            })
+        ));
+        assert!(!matches_filters(
+            &file,
+            Some(&SearchFilters {
+                folder_id: None,
+                date_from: None,
+                date_to: None,
+                size_min: Some(1_025),
+                size_max: None,
+                file_extension: None,
+            })
+        ));
+    }
+
+    #[test]
+    fn builds_unicode_snippets_on_character_boundaries() {
+        let prefix = "context ".repeat(100);
+        let content = format!("{prefix}security review and compliance evidence");
+        let snippet = make_snippet(&content, "security");
+        assert!(snippet.contains("security review"));
+        assert!(snippet.chars().count() <= 320);
+
+        let cjk = format!("{}中国科学院网络安全报告", "前置内容".repeat(100));
+        assert!(make_snippet(&cjk, "网络安全").contains("网络安全报告"));
     }
 }

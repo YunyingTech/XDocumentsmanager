@@ -11,11 +11,13 @@ import {
   installPaddleOcr,
   runPaddleOcr,
   cancelOcrTask,
+  cancelAllOcrTasks,
   listOcrCandidates,
+  listOcrCandidateRefs,
   getSetting,
   setSetting,
 } from '../lib/tauri';
-import type { FileInfo, MinerUHealthInfo, OcrEngine, OcrTaskStatus, PaddleOcrStatus, PaginatedResult, WindowsOcrProgress, WindowsOcrStatus } from '../types';
+import type { FileInfo, MinerUHealthInfo, OcrCandidateRef, OcrEngine, OcrTaskStatus, PaddleOcrStatus, PaginatedResult, WindowsOcrProgress, WindowsOcrStatus } from '../types';
 import { translate } from '../lib/i18n';
 import { useUIStore } from './uiStore';
 
@@ -82,6 +84,8 @@ interface OcrStore {
   selectAll: () => void;
   deselectAll: () => void;
   submitTasks: () => Promise<void>;
+  submitFileBatch: (files: OcrCandidateRef[]) => Promise<void>;
+  queueFolderOcr: (folderId: number) => Promise<number>;
   submitSyncParse: (fileId: number) => Promise<string>;
   pollAllTasks: () => Promise<void>;
   startPolling: () => void;
@@ -97,6 +101,7 @@ interface OcrStore {
   savePaddleModel: (model: string) => Promise<void>;
   installPaddle: () => Promise<void>;
   cancelTask: (taskId: string) => Promise<void>;
+  cancelAllTasks: () => Promise<void>;
   updateWindowsProgress: (progress: WindowsOcrProgress) => void;
   clearTasks: () => void;
 }
@@ -213,14 +218,25 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
   // ── Submit async tasks ──
   submitTasks: async () => {
     if (get().isSubmitting) return;
-    const { selectedFileIds, candidates, engine, windowsLanguage, paddleLanguage, paddleModel } = get();
+    const { selectedFileIds, candidates } = get();
     const fileIds = [...selectedFileIds];
     if (fileIds.length === 0) return;
+    const files = fileIds.map((fileId) => ({
+      id: fileId,
+      file_name: candidates.find((file) => file.id === fileId)?.file_name || `file_${fileId}`,
+    }));
+    set({ selectedFileIds: new Set() });
+    await get().submitFileBatch(files);
+  },
+
+  submitFileBatch: async (files) => {
+    if (get().isSubmitting || files.length === 0) return;
+    const { engine, windowsLanguage, paddleLanguage, paddleModel } = get();
     const submittedAt = Date.now();
-    const batch = fileIds.map((fileId, index): OcrTask => ({
+    const batch = files.map((file, index): OcrTask => ({
       taskId: crypto.randomUUID(),
-      fileId,
-      fileName: candidates.find((file) => file.id === fileId)?.file_name || `file_${fileId}`,
+      fileId: file.id,
+      fileName: file.file_name,
       status: engine === 'mineru' ? 'submitting' : 'queued',
       queuedAhead: engine === 'mineru' ? null : index,
       progress: engine === 'mineru' ? null : 0,
@@ -230,7 +246,6 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
     const batchTaskIds = new Set(batch.map((task) => task.taskId));
     set((state) => ({
       tasks: [...state.tasks, ...batch],
-      selectedFileIds: new Set(),
       isSubmitting: true,
     }));
 
@@ -286,6 +301,9 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
     }
 
     for (const task of batch) {
+      if (get().tasks.find((item) => item.taskId === task.taskId)?.status === 'cancelled') {
+        continue;
+      }
       try {
         const resp = await submitOcrTask(task.fileId, true);
         set((s) => ({
@@ -307,11 +325,24 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
     }
 
     // Start polling after submissions
-    const { polling } = get();
-    if (engine === 'mineru' && !polling) {
+    const { polling, tasks } = get();
+    const hasActiveMineruTasks = tasks.some(
+      (task) => task.engine === 'mineru' && (task.status === 'queued' || task.status === 'running')
+    );
+    if (hasActiveMineruTasks && !polling) {
       get().startPolling();
     }
     set({ isSubmitting: false });
+  },
+
+  queueFolderOcr: async (folderId) => {
+    await get().loadSettings();
+    const files = await listOcrCandidateRefs(folderId);
+    while (get().isSubmitting) {
+      await new Promise((resolve) => window.setTimeout(resolve, 250));
+    }
+    await get().submitFileBatch(files);
+    return files.length;
   },
 
   // ── Synchronous parse for single file ──
@@ -543,6 +574,27 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
       } catch (error) {
         console.error(`Failed to cancel OCR task ${taskId}:`, error);
       }
+    }
+  },
+
+  cancelAllTasks: async () => {
+    const activeTasks = get().tasks.filter((task) =>
+      ['submitting', 'queued', 'running'].includes(task.status)
+    );
+    if (activeTasks.length === 0) return;
+    set((state) => ({
+      tasks: state.tasks.map((task) =>
+        ['submitting', 'queued', 'running'].includes(task.status)
+          ? { ...task, status: 'cancelled' as const, queuedAhead: null, error: undefined }
+          : task
+      ),
+    }));
+    get().stopPolling();
+    pendingWindowsProgress.clear();
+    try {
+      await cancelAllOcrTasks();
+    } catch (error) {
+      console.error('Failed to cancel all OCR tasks:', error);
     }
   },
 

@@ -48,8 +48,8 @@ export async function updateFolder(folderId: number, config: Partial<FolderConfi
 
 // ── Indexing ──
 
-export async function startIndexing(folderId?: number): Promise<number> {
-  return invoke('start_indexing', { folderId });
+export async function startIndexing(folderId?: number, ocrAfterIndex: boolean = false): Promise<number> {
+  return invoke('start_indexing', { folderId, ocrAfterIndex });
 }
 
 export async function pauseIndexing(jobId: number): Promise<void> {
@@ -72,8 +72,9 @@ export async function search(
   limit: number = 100,
   requestId?: number,
   terms?: string[],
+  queryModel?: string,
 ): Promise<SearchResponse> {
-  return invoke('search', { query, terms, filters, limit, requestId });
+  return invoke('search', { query, terms, queryModel, filters, limit, requestId });
 }
 
 export async function analyzeSearchQuery(query: string): Promise<SearchQueryAnalysis> {
@@ -164,6 +165,10 @@ export async function cancelOcrTask(taskId: string): Promise<boolean> {
   return invoke('cancel_ocr_task', { taskId });
 }
 
+export async function cancelAllOcrTasks(): Promise<number> {
+  return invoke('cancel_all_ocr_tasks');
+}
+
 export async function getOcrOutputDir(): Promise<string> {
   return invoke('get_ocr_output_dir');
 }
@@ -174,6 +179,10 @@ export async function listOcrCandidates(
   pageSize: number = 50
 ): Promise<import('../types').PaginatedResult<import('../types').FileInfo>> {
   return invoke('list_ocr_candidates', { folderId, page, pageSize });
+}
+
+export async function listOcrCandidateRefs(folderId: number): Promise<import('../types').OcrCandidateRef[]> {
+  return invoke('list_ocr_candidate_refs', { folderId });
 }
 
 // ── Settings ──

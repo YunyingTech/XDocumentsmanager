@@ -35,12 +35,13 @@ pub fn walk_pdf_files(root: &PathBuf) -> Vec<PathBuf> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::io::Write;
 
     #[test]
     fn test_walk_pdf_files() {
-        let tmp = std::env::temp_dir().join("xdocuments_test_walk");
-        let _ = fs::remove_dir_all(&tmp);
+        let tmp = std::env::temp_dir().join(format!(
+            "xdocuments-test-walk-{}",
+            uuid::Uuid::new_v4()
+        ));
         fs::create_dir_all(&tmp).unwrap();
 
         // Create a PDF file
@@ -49,11 +50,16 @@ mod tests {
         fs::write(tmp.join("readme.txt"), b"hello").unwrap();
         // Create nested directory
         fs::create_dir_all(tmp.join("sub")).unwrap();
-        fs::write(tmp.join("sub/doc.pdf"), b"%PDF-1.4 fake").unwrap();
+        fs::write(tmp.join("sub/doc.PDF"), b"%PDF-1.4 fake").unwrap();
+        fs::create_dir_all(tmp.join(".hidden")).unwrap();
+        fs::write(tmp.join(".hidden/secret.pdf"), b"%PDF-1.4 fake").unwrap();
+        fs::create_dir_all(tmp.join("$system")).unwrap();
+        fs::write(tmp.join("$system/cache.pdf"), b"%PDF-1.4 fake").unwrap();
 
         let files = walk_pdf_files(&tmp);
         assert_eq!(files.len(), 2);
+        assert!(files.iter().any(|path| path.ends_with("doc.PDF")));
 
-        let _ = fs::remove_dir_all(&tmp);
+        fs::remove_dir_all(&tmp).unwrap();
     }
 }
