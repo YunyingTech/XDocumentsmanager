@@ -11,6 +11,9 @@ pub fn run_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error
     conn.execute_batch("PRAGMA cache_size = -524288;")?; // 512MB page cache
     conn.execute_batch("PRAGMA page_size = 4096;")?;
     conn.execute_batch("PRAGMA synchronous = NORMAL;")?;
+    conn.execute_batch("PRAGMA busy_timeout = 10000;")?;
+    conn.execute_batch("PRAGMA temp_store = FILE;")?;
+    conn.execute_batch("PRAGMA wal_autocheckpoint = 1000;")?;
 
     // Create tables
     conn.execute_batch(CREATE_WATCHED_FOLDERS)?;
@@ -21,6 +24,8 @@ pub fn run_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error
     conn.execute_batch(CREATE_INDEXED_FILES)?;
 
     normalize_legacy_file_timestamps(conn)?;
+    recover_interrupted_index_jobs(conn)?;
+    resolve_duplicate_active_index_jobs(conn)?;
 
     // Search is persisted by the embedded Tantivy engine.
     conn.execute_batch("DROP TABLE IF EXISTS files_fts;")?;
@@ -32,6 +37,42 @@ pub fn run_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error
     conn.execute_batch("DROP TABLE IF EXISTS file_tags;")?;
     conn.execute_batch("DROP TABLE IF EXISTS tags;")?;
 
+    Ok(())
+}
+
+fn recover_interrupted_index_jobs(conn: &Connection) -> Result<(), Box<dyn std::error::Error>> {
+    conn.execute(
+        "UPDATE index_jobs
+         SET status = 'error', completed_at = datetime('now'),
+             error_message = COALESCE(error_message, 'Indexing was interrupted before completion')
+         WHERE status IN ('queued', 'running')",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE watched_folders SET last_scan_status = 'error', updated_at = datetime('now')
+         WHERE last_scan_status = 'running'",
+        [],
+    )?;
+    Ok(())
+}
+
+fn resolve_duplicate_active_index_jobs(
+    conn: &Connection,
+) -> Result<(), Box<dyn std::error::Error>> {
+    conn.execute(
+        "UPDATE index_jobs
+         SET status = 'error', completed_at = datetime('now'),
+             error_message = COALESCE(error_message, 'Superseded by a newer active index job')
+         WHERE folder_id IS NOT NULL
+           AND status IN ('queued', 'running', 'paused')
+           AND EXISTS (
+               SELECT 1 FROM index_jobs AS newer
+               WHERE newer.folder_id = index_jobs.folder_id
+                 AND newer.status IN ('queued', 'running', 'paused')
+                 AND newer.id > index_jobs.id
+           )",
+        [],
+    )?;
     Ok(())
 }
 
@@ -216,9 +257,14 @@ pub fn create_indexes(conn: &Connection) -> Result<(), Box<dyn std::error::Error
         CREATE INDEX IF NOT EXISTS idx_files_size            ON files(file_size_bytes);
         CREATE INDEX IF NOT EXISTS idx_files_content_hash    ON files(content_hash);
         CREATE INDEX IF NOT EXISTS idx_files_folder_status   ON files(folder_id, index_status);
+        CREATE INDEX IF NOT EXISTS idx_files_pending_ocr     ON files(folder_id, ocr_applied, index_status, id);
         CREATE INDEX IF NOT EXISTS idx_indexed_files_status      ON indexed_files(status);
         CREATE INDEX IF NOT EXISTS idx_indexed_files_index_time  ON indexed_files(index_time);
         CREATE INDEX IF NOT EXISTS idx_indexed_files_md5         ON indexed_files(md5);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_index_jobs_one_active_per_folder
+            ON index_jobs(folder_id)
+            WHERE folder_id IS NOT NULL
+              AND status IN ('queued', 'running', 'paused');
     "#,
     )?;
     Ok(())
@@ -268,10 +314,18 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        let pending_ocr_index: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_files_pending_ocr'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
 
         assert_eq!(foreign_keys, 1);
         assert_eq!(engine, "mineru");
         assert_eq!(composite_index, 1);
+        assert_eq!(pending_ocr_index, 1);
     }
 
     #[test]
@@ -331,5 +385,100 @@ mod tests {
             .unwrap();
         assert_eq!(files, 0);
         assert_eq!(job_folder, None);
+    }
+
+    #[test]
+    fn migrations_recover_jobs_interrupted_by_an_application_exit() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO watched_folders (id, path, last_scan_status) VALUES (1, 'C:/documents', 'running')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO index_jobs (folder_id, job_type, status) VALUES (1, 'incremental', 'running')",
+            [],
+        )
+        .unwrap();
+
+        run_migrations(&conn).unwrap();
+        let job_status: String = conn
+            .query_row("SELECT status FROM index_jobs", [], |row| row.get(0))
+            .unwrap();
+        let folder_status: String = conn
+            .query_row("SELECT last_scan_status FROM watched_folders", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(job_status, "error");
+        assert_eq!(folder_status, "error");
+    }
+
+    #[test]
+    fn active_index_job_constraint_allows_only_one_job_per_folder() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        create_indexes(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO watched_folders (id, path) VALUES (1, 'C:/documents')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO index_jobs (folder_id, job_type, status) VALUES (1, 'incremental', 'running')",
+            [],
+        )
+        .unwrap();
+
+        let duplicate = conn.execute(
+            "INSERT INTO index_jobs (folder_id, job_type, status) VALUES (1, 'full_scan', 'queued')",
+            [],
+        );
+        assert!(duplicate.is_err());
+
+        conn.execute(
+            "UPDATE index_jobs SET status = 'completed', completed_at = datetime('now') WHERE folder_id = 1",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO index_jobs (folder_id, job_type, status) VALUES (1, 'full_scan', 'running')",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn migrations_resolve_legacy_duplicate_paused_jobs_before_creating_constraint() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO watched_folders (id, path) VALUES (1, 'C:/documents')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO index_jobs (folder_id, job_type, status) VALUES (1, 'incremental', 'paused')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO index_jobs (folder_id, job_type, status) VALUES (1, 'full_scan', 'paused')",
+            [],
+        )
+        .unwrap();
+
+        run_migrations(&conn).unwrap();
+        create_indexes(&conn).unwrap();
+
+        let active_jobs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM index_jobs WHERE folder_id = 1 AND status IN ('queued', 'running', 'paused')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(active_jobs, 1);
     }
 }

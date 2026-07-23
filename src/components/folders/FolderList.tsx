@@ -1,8 +1,8 @@
 import { useFolderStore } from '../../stores/folderStore';
 import { FolderStatusBadge } from './FolderStatusBadge';
 import { formatFileSize } from '../../lib/format';
-import { HardDrive, Network, MoreVertical, RefreshCw, ScanText, Trash2, Pause, Play } from 'lucide-react';
-import { useState } from 'react';
+import { HardDrive, Network, MoreVertical, RefreshCw, RotateCcw, ScanText, Trash2 } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 import { removeFolder, startIndexing } from '../../lib/tauri';
 import { useI18n } from '../../lib/i18n';
@@ -17,8 +17,36 @@ export function FolderList({ onAddFolder: _onAddFolder }: FolderListProps) {
   const loadFolders = useFolderStore((s) => s.loadFolders);
   const [menuOpen, setMenuOpen] = useState<number | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
+  const [fullReindexTarget, setFullReindexTarget] = useState<number | null>(null);
   const folderTypeLabel = { local: t('folders.typeLocal'), smb: t('folders.typeSmb') };
   const watchModeLabel = { auto: t('folders.modeAuto'), polling: t('folders.modePolling'), manual: t('folders.modeManual') };
+
+  useEffect(() => {
+    if (menuOpen === null) return;
+    const triggerId = `folder-actions-trigger-${menuOpen}`;
+    const menu = document.getElementById(`folder-actions-${menuOpen}`);
+    const items = Array.from(menu?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? []);
+    requestAnimationFrame(() => items[0]?.focus());
+
+    const handleMenuKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setMenuOpen(null);
+        requestAnimationFrame(() => document.getElementById(triggerId)?.focus());
+        return;
+      }
+      if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key) || items.length === 0) return;
+      event.preventDefault();
+      const current = Math.max(0, items.indexOf(document.activeElement as HTMLElement));
+      const next = event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? items.length - 1
+          : (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+      items[next].focus();
+    };
+    document.addEventListener('keydown', handleMenuKey);
+    return () => document.removeEventListener('keydown', handleMenuKey);
+  }, [menuOpen]);
 
   const handleRemove = async () => {
     if (deleteTarget !== null) {
@@ -28,9 +56,16 @@ export function FolderList({ onAddFolder: _onAddFolder }: FolderListProps) {
     }
   };
 
-  const handleReindex = async (folderId: number, ocrAfterIndex = false) => {
+  const handleIncrementalIndex = async (folderId: number, ocrAfterIndex = false) => {
     setMenuOpen(null);
     await startIndexing(folderId, ocrAfterIndex);
+  };
+
+  const handleFullReindex = async () => {
+    if (fullReindexTarget === null) return;
+    const folderId = fullReindexTarget;
+    setFullReindexTarget(null);
+    await startIndexing(folderId, false, 'full');
   };
 
   return (
@@ -71,39 +106,49 @@ export function FolderList({ onAddFolder: _onAddFolder }: FolderListProps) {
           {/* Actions */}
           <div className="relative">
             <button
+              id={`folder-actions-trigger-${folder.id}`}
+              type="button"
               onClick={() => setMenuOpen(menuOpen === folder.id ? null : folder.id)}
               className="btn-ghost p-1.5 rounded-lg"
+              aria-label={`${t('folders.management')}: ${folder.display_name || folder.path}`}
+              aria-expanded={menuOpen === folder.id}
+              aria-controls={`folder-actions-${folder.id}`}
             >
-              <MoreVertical size={16} />
+              <MoreVertical size={16} aria-hidden="true" />
             </button>
 
             {menuOpen === folder.id && (
               <>
-                <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(null)} />
-                <div className="absolute right-0 top-full mt-1 w-44 bg-white dark:bg-surface-900 border border-surface-200 dark:border-surface-800 rounded-xl shadow-lg z-20 py-1">
+                <button type="button" className="fixed inset-0 z-10 cursor-default" onClick={() => setMenuOpen(null)} aria-label={t('common.close')} />
+                <div id={`folder-actions-${folder.id}`} role="menu" className="absolute right-0 top-full z-20 mt-1 w-44 rounded-lg border border-surface-200 bg-white py-1 shadow-lg dark:border-surface-800 dark:bg-surface-900">
                   <button
-                    onClick={() => handleReindex(folder.id)}
+                    type="button"
+                    role="menuitem"
+                    onClick={() => handleIncrementalIndex(folder.id)}
                     className="w-full flex items-center gap-2 px-3 py-2 text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-800"
                   >
-                    <RefreshCw size={14} /> {t('folders.reindex')}
+                    <RefreshCw size={14} /> {t('files.incrementalIndex')}
                   </button>
                   <button
-                    onClick={() => handleReindex(folder.id, true)}
+                    type="button"
+                    role="menuitem"
+                    onClick={() => handleIncrementalIndex(folder.id, true)}
                     className="w-full flex items-center gap-2 px-3 py-2 text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-800"
                   >
                     <ScanText size={14} /> {t('folders.indexAndOcr')}
                   </button>
-                  {folder.is_active ? (
-                    <button className="w-full flex items-center gap-2 px-3 py-2 text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-800">
-                      <Pause size={14} /> {t('folders.pause')}
-                    </button>
-                  ) : (
-                    <button className="w-full flex items-center gap-2 px-3 py-2 text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-800">
-                      <Play size={14} /> {t('folders.resume')}
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => { setMenuOpen(null); setFullReindexTarget(folder.id); }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-sm text-surface-700 dark:text-surface-300 hover:bg-surface-100 dark:hover:bg-surface-800"
+                  >
+                    <RotateCcw size={14} /> {t('files.fullReindex')}
+                  </button>
                   <hr className="my-1 border-surface-200 dark:border-surface-800" />
                   <button
+                    type="button"
+                    role="menuitem"
                     onClick={() => { setMenuOpen(null); setDeleteTarget(folder.id); }}
                     className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-950"
                   >
@@ -127,6 +172,14 @@ export function FolderList({ onAddFolder: _onAddFolder }: FolderListProps) {
           danger
         />
       )}
+      <ConfirmDialog
+        open={fullReindexTarget !== null}
+        title={t('files.fullReindexTitle')}
+        message={t('files.fullReindexMessage')}
+        confirmLabel={t('files.fullReindex')}
+        onConfirm={() => void handleFullReindex()}
+        onCancel={() => setFullReindexTarget(null)}
+      />
     </div>
   );
 }

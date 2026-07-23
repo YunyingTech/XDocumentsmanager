@@ -3,6 +3,7 @@ import type {
   FileInfo, FolderInfo, FolderConfig, IndexJob,
   SearchResponse, SearchFilters, PaginatedResult, SortConfig, SearchQueryAnalysis,
   RuntimeLogSnapshot, RuntimeLogSource,
+  IndexMode,
 } from '../types';
 
 // ── Files ──
@@ -48,8 +49,12 @@ export async function updateFolder(folderId: number, config: Partial<FolderConfi
 
 // ── Indexing ──
 
-export async function startIndexing(folderId?: number, ocrAfterIndex: boolean = false): Promise<number> {
-  return invoke('start_indexing', { folderId, ocrAfterIndex });
+export async function startIndexing(
+  folderId?: number,
+  ocrAfterIndex: boolean = false,
+  mode: IndexMode = 'incremental',
+): Promise<number> {
+  return invoke('start_indexing', { folderId, ocrAfterIndex, mode });
 }
 
 export async function pauseIndexing(jobId: number): Promise<void> {
@@ -176,13 +181,18 @@ export async function getOcrOutputDir(): Promise<string> {
 export async function listOcrCandidates(
   folderId?: number,
   page: number = 0,
-  pageSize: number = 50
+  pageSize: number = 50,
+  pendingOnly: boolean = true,
 ): Promise<import('../types').PaginatedResult<import('../types').FileInfo>> {
-  return invoke('list_ocr_candidates', { folderId, page, pageSize });
+  return invoke('list_ocr_candidates', { folderId, page, pageSize, pendingOnly });
 }
 
-export async function listOcrCandidateRefs(folderId: number): Promise<import('../types').OcrCandidateRef[]> {
-  return invoke('list_ocr_candidate_refs', { folderId });
+export async function listOcrCandidateRefs(
+  folderId: number,
+  afterId: number = 0,
+  limit: number = 500,
+): Promise<import('../types').OcrCandidateRef[]> {
+  return invoke('list_ocr_candidate_refs', { folderId, afterId, limit });
 }
 
 // ── Settings ──

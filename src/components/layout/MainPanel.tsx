@@ -14,7 +14,7 @@ export function MainPanel() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <ViewToolbar />
-      <main className="min-h-0 flex-1 overflow-hidden">
+      <main id="main-content" tabIndex={-1} className="min-h-0 flex-1 overflow-hidden">
         {surfaceView === 'logs' ? <RuntimeLogs /> : (
           <>
             {activeView === 'files' && <FileBrowser />}

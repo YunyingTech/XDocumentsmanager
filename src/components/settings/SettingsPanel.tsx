@@ -9,10 +9,7 @@ import type { Language } from '../../stores/uiStore';
 export function SettingsPanel() {
   const { t } = useI18n();
   // ── State ──
-  const [indexLocation, setIndexLocation] = useState('');
   const [maxFileSizeMb, setMaxFileSizeMb] = useState('500');
-  const [indexerThreads, setIndexerThreads] = useState('4');
-  const [pollIntervalSecs, setPollIntervalSecs] = useState('300');
   const [ocrApiUrl, setOcrApiUrl] = useState('http://127.0.0.1:8000');
   const [ocrOutputDir, setOcrOutputDir] = useState('');
   const [ocrEngine, setOcrEngine] = useState<OcrEngine>('mineru');
@@ -34,6 +31,7 @@ export function SettingsPanel() {
   const [searchBackend, setSearchBackend] = useState<SearchBackendStatus | null>(null);
   const [vacuumResult, setVacuumResult] = useState('');
   const [vacuuming, setVacuuming] = useState(false);
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const theme = useUIStore((s) => s.theme);
   const setTheme = useUIStore((s) => s.setTheme);
   const language = useUIStore((s) => s.language);
@@ -43,18 +41,14 @@ export function SettingsPanel() {
   useEffect(() => {
     (async () => {
       const keys = [
-        'index_location', 'max_file_size_mb', 'indexer_threads',
-        'poll_interval_secs', 'ocr_api_url', 'ocr_output_dir', 'ocr_engine', 'windows_ocr_language',
+        'max_file_size_mb', 'ocr_api_url', 'ocr_output_dir', 'ocr_engine', 'windows_ocr_language',
         'paddle_python_path', 'paddle_ocr_language', 'paddle_ocr_model'
       ];
       for (const key of keys) {
         const val = await getSetting(key);
         if (val != null) {
           switch (key) {
-            case 'index_location': setIndexLocation(val); break;
             case 'max_file_size_mb': setMaxFileSizeMb(val); break;
-            case 'indexer_threads': setIndexerThreads(val); break;
-            case 'poll_interval_secs': setPollIntervalSecs(val); break;
             case 'ocr_api_url': setOcrApiUrl(val); break;
             case 'ocr_output_dir': setOcrOutputDir(val); break;
             case 'ocr_engine': setOcrEngine(val === 'windows' || val === 'paddle' ? val : 'mineru'); break;
@@ -121,12 +115,15 @@ export function SettingsPanel() {
     return () => { active = false; };
   }, [ocrEngine]);
 
-  // ── Save helpers (auto-save on change) ──
+  // ── Save helpers ──
   const save = useCallback(async (key: string, value: string) => {
+    setSaveState('saving');
     try {
       await setSetting(key, value);
+      setSaveState('saved');
     } catch (e) {
       console.error(`Failed to save ${key}:`, e);
+      setSaveState('error');
     }
   }, []);
 
@@ -192,10 +189,17 @@ export function SettingsPanel() {
   };
 
   const saveOpenAi = async (apiKey: string | undefined = openAiApiKey || undefined) => {
-    const config = await setOpenAiConfig(openAiEndpoint, openAiModel, apiKey, smartSearchEnabled);
-    setOpenAiKeyConfigured(config.api_key_configured);
-    setOpenAiApiKey('');
-    return config;
+    setSaveState('saving');
+    try {
+      const config = await setOpenAiConfig(openAiEndpoint, openAiModel, apiKey, smartSearchEnabled);
+      setOpenAiKeyConfigured(config.api_key_configured);
+      setOpenAiApiKey('');
+      setSaveState('saved');
+      return config;
+    } catch (error) {
+      setSaveState('error');
+      throw error;
+    }
   };
 
   const checkOpenAi = async () => {
@@ -234,6 +238,9 @@ export function SettingsPanel() {
         <h2 className="text-sm font-semibold text-surface-700 dark:text-surface-300">
           {t('settings.title')}
         </h2>
+        <span className={`ml-auto text-xs ${saveState === 'error' ? 'text-red-500' : 'text-surface-400'}`} role="status" aria-live="polite">
+          {saveState === 'saving' ? t('settings.saving') : saveState === 'saved' ? t('settings.saved') : saveState === 'error' ? t('settings.saveFailed') : ''}
+        </span>
       </div>
 
       {/* Body */}
@@ -246,40 +253,19 @@ export function SettingsPanel() {
             </h3>
             <div className="space-y-4">
               <div>
-                <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
-                  {t('settings.indexLocation')}
-                </label>
-                <input
-                  type="text"
-                  className="input"
-                  value={indexLocation}
-                  onChange={(e) => { setIndexLocation(e.target.value); save('index_location', e.target.value); }}
-                  placeholder={t('settings.indexLocationPlaceholder')}
-                />
-              </div>
-              <div>
-                <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
+                <label htmlFor="setting-max-file-size" className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
                   {t('settings.maxFileSize')}
                 </label>
                 <input
+                  id="setting-max-file-size"
+                  name="max_file_size_mb"
                   type="number"
+                  inputMode="numeric"
                   className="input w-32"
                   value={maxFileSizeMb}
                   min={1}
-                  onChange={(e) => { setMaxFileSizeMb(e.target.value); save('max_file_size_mb', e.target.value); }}
-                />
-              </div>
-              <div>
-                <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
-                  {t('settings.indexerThreads')}
-                </label>
-                <input
-                  type="number"
-                  className="input w-32"
-                  value={indexerThreads}
-                  min={1}
-                  max={32}
-                  onChange={(e) => { setIndexerThreads(e.target.value); save('indexer_threads', e.target.value); }}
+                  onChange={(e) => setMaxFileSizeMb(e.target.value)}
+                  onBlur={() => void save('max_file_size_mb', maxFileSizeMb)}
                 />
               </div>
             </div>
@@ -292,52 +278,58 @@ export function SettingsPanel() {
             </h3>
             <div className="space-y-4">
               <div>
-                <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
+                <span className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
                   {t('ocr.engine')}
-                </label>
+                </span>
                 <div className="inline-flex rounded-md border border-surface-200 bg-surface-50 p-0.5 dark:border-surface-700 dark:bg-surface-900">
-                  <button type="button" onClick={() => { setOcrEngine('mineru'); save('ocr_engine', 'mineru'); setOcrHealth(null); }} className={`inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs font-medium ${ocrEngine === 'mineru' ? 'bg-white shadow-sm dark:bg-surface-700' : 'text-surface-500'}`}>
+                  <button type="button" aria-pressed={ocrEngine === 'mineru'} onClick={() => { setOcrEngine('mineru'); save('ocr_engine', 'mineru'); setOcrHealth(null); }} className={`inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs font-medium ${ocrEngine === 'mineru' ? 'bg-white shadow-sm dark:bg-surface-700' : 'text-surface-500'}`}>
                     <Server size={14} /> MinerU
                   </button>
-                  <button type="button" onClick={() => { setOcrEngine('windows'); save('ocr_engine', 'windows'); setWindowsOcrStatus(null); }} className={`inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs font-medium ${ocrEngine === 'windows' ? 'bg-white shadow-sm dark:bg-surface-700' : 'text-surface-500'}`}>
+                  <button type="button" aria-pressed={ocrEngine === 'windows'} onClick={() => { setOcrEngine('windows'); save('ocr_engine', 'windows'); setWindowsOcrStatus(null); }} className={`inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs font-medium ${ocrEngine === 'windows' ? 'bg-white shadow-sm dark:bg-surface-700' : 'text-surface-500'}`}>
                     <Monitor size={14} /> {t('ocr.windowsEngine')}
                   </button>
-                  <button type="button" onClick={() => { setOcrEngine('paddle'); save('ocr_engine', 'paddle'); setPaddleStatus(null); }} className={`inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs font-medium ${ocrEngine === 'paddle' ? 'bg-white shadow-sm dark:bg-surface-700' : 'text-surface-500'}`}>
+                  <button type="button" aria-pressed={ocrEngine === 'paddle'} onClick={() => { setOcrEngine('paddle'); save('ocr_engine', 'paddle'); setPaddleStatus(null); }} className={`inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs font-medium ${ocrEngine === 'paddle' ? 'bg-white shadow-sm dark:bg-surface-700' : 'text-surface-500'}`}>
                     <Boxes size={14} /> PaddleOCR
                   </button>
                 </div>
               </div>
               {ocrEngine === 'mineru' ? <div>
-                <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
+                <label htmlFor="setting-ocr-api-url" className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
                   {t('settings.ocrApiUrl')}
                 </label>
                 <input
-                  type="text"
+                  id="setting-ocr-api-url"
+                  name="ocr_api_url"
+                  type="url"
+                  inputMode="url"
+                  autoComplete="off"
+                  spellCheck={false}
                   className="input"
                   value={ocrApiUrl}
-                  onChange={(e) => { setOcrApiUrl(e.target.value); save('ocr_api_url', e.target.value); }}
-                  placeholder="http://127.0.0.1:8000"
+                  onChange={(e) => setOcrApiUrl(e.target.value)}
+                  onBlur={() => void save('ocr_api_url', ocrApiUrl)}
+                  placeholder="http://127.0.0.1:8000…"
                 />
               </div> : ocrEngine === 'windows' ? <div>
-                <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
+                <label htmlFor="setting-windows-ocr-language" className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
                   {t('ocr.windowsLanguage')}
                 </label>
-                <select className="input" value={windowsOcrLanguage} disabled={!windowsOcrStatus?.available} onChange={(event) => { setWindowsOcrLanguage(event.target.value); save('windows_ocr_language', event.target.value); }}>
+                <select id="setting-windows-ocr-language" name="windows_ocr_language" className="input" value={windowsOcrLanguage} disabled={!windowsOcrStatus?.available} onChange={(event) => { setWindowsOcrLanguage(event.target.value); save('windows_ocr_language', event.target.value); }}>
                   <option value="auto">{t('ocr.languageAuto')}</option>
                   {windowsOcrStatus?.languages.map((item) => <option key={item.tag} value={item.tag}>{item.native_name} ({item.tag})</option>)}
                 </select>
                 {windowsOcrStatus?.error && <p className="mt-1 text-xs text-red-500">{windowsOcrStatus.error}</p>}
               </div> : <div className="space-y-3">
                 <div>
-                  <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
+                  <label htmlFor="setting-paddle-python" className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
                     {t('ocr.paddlePython')}
                   </label>
-                  <input className="input" value={paddlePythonPath} onChange={(event) => { setPaddlePythonPath(event.target.value); save('paddle_python_path', event.target.value); setPaddleStatus(null); }} placeholder="python" />
+                  <input id="setting-paddle-python" name="paddle_python_path" autoComplete="off" spellCheck={false} className="input" value={paddlePythonPath} onChange={(event) => { setPaddlePythonPath(event.target.value); setPaddleStatus(null); }} onBlur={() => void save('paddle_python_path', paddlePythonPath)} placeholder="python…" />
                 </div>
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div>
-                    <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">{t('ocr.paddleLanguage')}</label>
-                    <select className="input" value={paddleLanguage} onChange={(event) => { setPaddleLanguage(event.target.value); save('paddle_ocr_language', event.target.value); }}>
+                    <label htmlFor="setting-paddle-language" className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">{t('ocr.paddleLanguage')}</label>
+                    <select id="setting-paddle-language" name="paddle_ocr_language" className="input" value={paddleLanguage} onChange={(event) => { setPaddleLanguage(event.target.value); save('paddle_ocr_language', event.target.value); }}>
                       <option value="ch">中文</option>
                       <option value="en">English</option>
                       <option value="japan">日本語</option>
@@ -345,8 +337,8 @@ export function SettingsPanel() {
                     </select>
                   </div>
                   <div>
-                    <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">{t('ocr.paddleModel')}</label>
-                    <select className="input" value={paddleModel} onChange={(event) => { setPaddleModel(event.target.value); save('paddle_ocr_model', event.target.value); }}>
+                    <label htmlFor="setting-paddle-model" className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">{t('ocr.paddleModel')}</label>
+                    <select id="setting-paddle-model" name="paddle_ocr_model" className="input" value={paddleModel} onChange={(event) => { setPaddleModel(event.target.value); save('paddle_ocr_model', event.target.value); }}>
                       <option value="PP-OCRv5_mobile">PP-OCRv5 Mobile</option>
                       <option value="PP-OCRv5_server">PP-OCRv5 Server</option>
                     </select>
@@ -361,15 +353,20 @@ export function SettingsPanel() {
                 </div>
               </div>}
               <div>
-                <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
+                <label htmlFor="setting-ocr-output" className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
                   {t('settings.ocrOutput')}
                 </label>
                 <input
+                  id="setting-ocr-output"
+                  name="ocr_output_directory"
                   type="text"
+                  autoComplete="off"
+                  spellCheck={false}
                   className="input"
                   value={ocrOutputDir}
-                  onChange={(e) => { setOcrOutputDir(e.target.value); save('ocr_output_dir', e.target.value); }}
-                  placeholder={t('ocr.outputPlaceholder', { project: '{project}' })}
+                  onChange={(e) => setOcrOutputDir(e.target.value)}
+                  onBlur={() => void save('ocr_output_dir', ocrOutputDir)}
+                  placeholder={`${t('ocr.outputPlaceholder', { project: '{project}' })}…`}
                 />
                 <p className="text-xs text-surface-400 mt-1">
                   {t('settings.ocrOutputHint')}
@@ -379,6 +376,7 @@ export function SettingsPanel() {
               {/* Health check */}
               <div className="flex items-center gap-3 pt-1">
                 <button
+                  type="button"
                   onClick={checkHealth}
                   disabled={ocrChecking}
                   className="btn-secondary px-3 py-1.5 rounded-lg text-sm disabled:opacity-50"
@@ -391,7 +389,7 @@ export function SettingsPanel() {
                   {t('settings.testConnection')}
                 </button>
                 {ocrEngine === 'mineru' && ocrHealth && (
-                  <span className={`text-xs inline-flex items-center gap-1 ${ocrHealth.connected ? 'text-green-600' : 'text-red-500'}`}>
+                  <span role="status" aria-live="polite" className={`text-xs inline-flex items-center gap-1 ${ocrHealth.connected ? 'text-green-600' : 'text-red-500'}`}>
                     {ocrHealth.connected ? (
                       <>
                         <CheckCircle size={12} />
@@ -406,13 +404,13 @@ export function SettingsPanel() {
                   </span>
                 )}
                 {ocrEngine === 'windows' && windowsOcrStatus && (
-                  <span className={`text-xs inline-flex items-center gap-1 ${windowsOcrStatus.available ? 'text-green-600' : 'text-red-500'}`}>
+                  <span role="status" aria-live="polite" className={`text-xs inline-flex items-center gap-1 ${windowsOcrStatus.available ? 'text-green-600' : 'text-red-500'}`}>
                     {windowsOcrStatus.available ? <CheckCircle size={12} /> : <XCircle size={12} />}
                     {windowsOcrStatus.available ? t('ocr.windowsReady') : t('ocr.windowsUnavailable')}
                   </span>
                 )}
                 {ocrEngine === 'paddle' && paddleStatus && (
-                  <span className={`text-xs inline-flex min-w-0 items-center gap-1 ${paddleStatus.available ? 'text-green-600' : 'text-red-500'}`} title={paddleStatus.error ?? undefined}>
+                  <span role="status" aria-live="polite" className={`text-xs inline-flex min-w-0 items-center gap-1 ${paddleStatus.available ? 'text-green-600' : 'text-red-500'}`} title={paddleStatus.error ?? undefined}>
                     {paddleStatus.available ? <CheckCircle size={12} /> : <XCircle size={12} />}
                     <span className="truncate">{paddleStatus.available ? t('ocr.paddleReady') : t('ocr.paddleUnavailable')}</span>
                   </span>
@@ -426,7 +424,7 @@ export function SettingsPanel() {
               {t('settings.smartSearch')}
             </h3>
             <div className="space-y-4">
-              <div className="flex items-center justify-between gap-4 text-sm">
+              <div className="flex items-center justify-between gap-4 text-sm" role="status" aria-live="polite">
                 <span className="text-surface-600 dark:text-surface-400">{t('settings.searchBackend')}</span>
                 {searchBackend?.connected ? (
                   <span className="inline-flex items-center gap-1.5 text-green-600" title={searchBackend.endpoint ?? undefined}>
@@ -448,6 +446,7 @@ export function SettingsPanel() {
               <label className="flex items-center justify-between gap-4 text-sm text-surface-600 dark:text-surface-400">
                 <span>{t('settings.smartSearchEnabled')}</span>
                 <input
+                  name="smart_search_enabled"
                   type="checkbox"
                   checked={smartSearchEnabled}
                   onChange={(event) => setSmartSearchEnabled(event.target.checked)}
@@ -455,28 +454,30 @@ export function SettingsPanel() {
                 />
               </label>
               <div>
-                <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
+                <label htmlFor="setting-openai-endpoint" className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
                   {t('settings.openAiEndpoint')}
                 </label>
-                <input className="input" value={openAiEndpoint} onChange={(event) => setOpenAiEndpoint(event.target.value)} placeholder="https://api.openai.com/v1" />
+                <input id="setting-openai-endpoint" name="openai_endpoint" type="url" inputMode="url" autoComplete="off" spellCheck={false} className="input" value={openAiEndpoint} onChange={(event) => setOpenAiEndpoint(event.target.value)} placeholder="https://api.openai.com/v1…" />
               </div>
               <div>
-                <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
+                <label htmlFor="setting-openai-model" className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
                   {t('settings.openAiModel')}
                 </label>
-                <input className="input" value={openAiModel} onChange={(event) => setOpenAiModel(event.target.value)} placeholder="gpt-4.1-mini" />
+                <input id="setting-openai-model" name="openai_model" autoComplete="off" spellCheck={false} className="input" value={openAiModel} onChange={(event) => setOpenAiModel(event.target.value)} placeholder="gpt-4.1-mini…" />
               </div>
               <div>
-                <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
+                <label htmlFor="setting-openai-key" className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
                   {t('settings.openAiApiKey')}
                 </label>
                 <div className="flex items-center gap-2">
                   <input
+                    id="setting-openai-key"
+                    name="openai_api_key"
                     type="password"
                     className="input flex-1"
                     value={openAiApiKey}
                     onChange={(event) => setOpenAiApiKey(event.target.value)}
-                    placeholder={openAiKeyConfigured ? t('settings.apiKeySaved') : 'sk-...'}
+                    placeholder={openAiKeyConfigured ? `${t('settings.apiKeySaved')}…` : 'sk-…'}
                     autoComplete="off"
                   />
                   {openAiKeyConfigured && (
@@ -502,34 +503,12 @@ export function SettingsPanel() {
                   {t('settings.testConnection')}
                 </button>
                 {openAiConnection && (
-                  <span className={`text-xs inline-flex items-center gap-1 min-w-0 ${openAiConnection.connected ? 'text-green-600' : 'text-red-500'}`} title={openAiConnection.message}>
+                  <span role="status" aria-live="polite" className={`text-xs inline-flex items-center gap-1 min-w-0 ${openAiConnection.connected ? 'text-green-600' : 'text-red-500'}`} title={openAiConnection.message}>
                     {openAiConnection.connected ? <CheckCircle size={12} /> : <XCircle size={12} />}
                     <span className="truncate">{openAiConnection.message}</span>
                   </span>
                 )}
               </div>
-            </div>
-          </div>
-
-          {/* ── Network (SMB) Settings ── */}
-          <div className="card p-5">
-            <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 mb-4">
-              {t('settings.network')}
-            </h3>
-            <div>
-              <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
-                {t('settings.pollInterval')}
-              </label>
-              <input
-                type="number"
-                className="input w-32"
-                value={pollIntervalSecs}
-                min={30}
-                onChange={(e) => { setPollIntervalSecs(e.target.value); save('poll_interval_secs', e.target.value); }}
-              />
-              <p className="text-xs text-surface-400 mt-1">
-                {t('settings.pollIntervalHint')}
-              </p>
             </div>
           </div>
 
@@ -540,10 +519,12 @@ export function SettingsPanel() {
             </h3>
             <div className="space-y-4">
               <div>
-                <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
+                <label htmlFor="setting-language" className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
                   {t('settings.language')}
                 </label>
                 <select
+                  id="setting-language"
+                  name="interface_language"
                   className="input w-48"
                   value={language}
                   onChange={(e) => setLanguage(e.target.value as Language)}
@@ -553,10 +534,12 @@ export function SettingsPanel() {
                 </select>
               </div>
               <div>
-                <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
+                <label htmlFor="setting-theme" className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
                   {t('settings.theme')}
                 </label>
                 <select
+                  id="setting-theme"
+                  name="interface_theme"
                   className="input w-40"
                   value={theme}
                   onChange={(e) => setTheme(e.target.value as 'light' | 'dark' | 'system')}
@@ -564,15 +547,6 @@ export function SettingsPanel() {
                   <option value="system">{t('settings.themeSystem')}</option>
                   <option value="light">{t('settings.themeLight')}</option>
                   <option value="dark">{t('settings.themeDark')}</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
-                  {t('settings.defaultView')}
-                </label>
-                <select className="input w-40">
-                  <option value="table">{t('settings.viewTable')}</option>
-                  <option value="grid">{t('settings.viewGrid')}</option>
                 </select>
               </div>
             </div>
@@ -585,6 +559,7 @@ export function SettingsPanel() {
             </h3>
             <div className="flex items-center gap-3">
               <button
+                type="button"
                 onClick={runVacuum}
                 disabled={vacuuming}
                 className="btn-secondary px-3 py-1.5 rounded-lg text-sm disabled:opacity-50"
@@ -593,7 +568,7 @@ export function SettingsPanel() {
                 {t('settings.vacuum')}
               </button>
               {vacuumResult && (
-                <span className="text-xs text-surface-500">{vacuumResult}</span>
+                <span className="text-xs text-surface-500" role="status" aria-live="polite">{vacuumResult}</span>
               )}
             </div>
           </div>

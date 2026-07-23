@@ -141,7 +141,9 @@ function IndexTask({ progress, folderName }: { progress: IndexProgress; folderNa
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
-              <p className="truncate text-xs font-semibold text-surface-800 dark:text-surface-200">{t('tasks.indexing')}</p>
+              <p className="truncate text-xs font-semibold text-surface-800 dark:text-surface-200">
+                {t(progress.index_mode === 'full' ? 'tasks.fullIndexing' : 'tasks.incrementalIndexing')}
+              </p>
               <p className="truncate text-[11px] text-surface-500">
                 {folderName || t('tasks.documentLibrary')}
                 {progress.ocr_after_index ? ` / ${t('tasks.ocrAfterIndex')}` : ''}

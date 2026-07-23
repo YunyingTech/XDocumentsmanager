@@ -35,18 +35,18 @@ export function SearchBar() {
   }, []);
 
   return (
-    <div className="relative">
-      <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-surface-400" />
+    <form className="relative" role="search" onSubmit={(event) => { event.preventDefault(); runSearch(); }}>
+      <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-surface-400" aria-hidden="true" />
       <input
         ref={inputRef}
         type="text"
+        name="pdf_search"
+        autoComplete="off"
+        aria-label={t('common.search')}
         className="input pl-9 pr-16"
         placeholder={t('search.placeholder')}
         value={query}
         onChange={(e) => setQuery(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') runSearch();
-        }}
       />
       {query && (
         <div className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5">
@@ -58,7 +58,7 @@ export function SearchBar() {
             title={t('search.analyze')}
             aria-label={t('search.analyze')}
           >
-            <Sparkles size={14} className={isAnalyzing ? 'animate-pulse' : ''} />
+            <Sparkles size={14} className={isAnalyzing ? 'animate-pulse' : ''} aria-hidden="true" />
           </button>
           <button
             type="button"
@@ -67,10 +67,10 @@ export function SearchBar() {
             title={t('search.clear')}
             aria-label={t('search.clear')}
           >
-            <X size={14} />
+            <X size={14} aria-hidden="true" />
           </button>
         </div>
       )}
-    </div>
+    </form>
   );
 }

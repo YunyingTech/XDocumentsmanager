@@ -52,7 +52,7 @@ describe('search result workflow', () => {
     const user = userEvent.setup();
     render(<SearchView />);
 
-    await user.click(screen.getByText('audit.pdf'));
+    await user.click(screen.getByRole('button', { name: 'Preview: audit.pdf' }));
     expect(useSearchStore.getState().selectedResultId).toBe(7);
     expect(screen.getByTestId('pdf-preview')).toHaveTextContent(result.absolute_path);
 

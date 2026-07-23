@@ -12,13 +12,19 @@ describe('Tauri command bindings', () => {
   it('forwards the index-and-OCR flag with the expected camelCase argument', async () => {
     invoke.mockResolvedValue(42);
     await expect(api.startIndexing(7, true)).resolves.toBe(42);
-    expect(invoke).toHaveBeenCalledWith('start_indexing', { folderId: 7, ocrAfterIndex: true });
+    expect(invoke).toHaveBeenCalledWith('start_indexing', { folderId: 7, ocrAfterIndex: true, mode: 'incremental' });
   });
 
   it('keeps normal indexing backward compatible', async () => {
     invoke.mockResolvedValue(43);
     await api.startIndexing(7);
-    expect(invoke).toHaveBeenCalledWith('start_indexing', { folderId: 7, ocrAfterIndex: false });
+    expect(invoke).toHaveBeenCalledWith('start_indexing', { folderId: 7, ocrAfterIndex: false, mode: 'incremental' });
+  });
+
+  it('forwards explicit full re-indexing mode', async () => {
+    invoke.mockResolvedValue(44);
+    await api.startIndexing(7, false, 'full');
+    expect(invoke).toHaveBeenCalledWith('start_indexing', { folderId: 7, ocrAfterIndex: false, mode: 'full' });
   });
 
   it('forwards AI terms and the model used to generate them', async () => {
@@ -37,11 +43,11 @@ describe('Tauri command bindings', () => {
   it('binds OCR cancellation, candidate listing, and byte ranges', async () => {
     invoke.mockResolvedValueOnce(2).mockResolvedValueOnce([]).mockResolvedValueOnce([1, 2]);
     await expect(api.cancelAllOcrTasks()).resolves.toBe(2);
-    await api.listOcrCandidateRefs(11);
+    await api.listOcrCandidateRefs(11, 100, 250);
     await api.readFileBytesRange('C:\\docs\\a.pdf', 10, 12);
     expect(invoke.mock.calls).toEqual([
       ['cancel_all_ocr_tasks'],
-      ['list_ocr_candidate_refs', { folderId: 11 }],
+      ['list_ocr_candidate_refs', { folderId: 11, afterId: 100, limit: 250 }],
       ['read_file_bytes_range', { path: 'C:\\docs\\a.pdf', start: 10, end: 12 }],
     ]);
   });

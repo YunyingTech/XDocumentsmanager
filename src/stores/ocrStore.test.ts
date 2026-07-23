@@ -169,7 +169,7 @@ describe('OCR store', () => {
     });
   });
 
-  it('loads saved settings before queueing every indexed file in a folder', async () => {
+  it('loads saved settings before queueing pending OCR files in a folder', async () => {
     const settings: Record<string, string> = {
       ocr_engine: 'windows',
       windows_ocr_language: 'zh-Hans-CN',
@@ -183,10 +183,24 @@ describe('OCR store', () => {
 
     await expect(useOcrStore.getState().queueFolderOcr(12)).resolves.toBe(2);
 
-    expect(mocks.listOcrCandidateRefs).toHaveBeenCalledWith(12);
+    expect(mocks.listOcrCandidateRefs).toHaveBeenCalledWith(12, 0, 100);
     expect(mocks.runWindowsOcr).toHaveBeenCalledTimes(2);
     expect(mocks.runWindowsOcr).toHaveBeenCalledWith(expect.any(Number), expect.any(String), 'zh-Hans-CN');
     expect(useOcrStore.getState().tasks.every((task) => task.status === 'completed')).toBe(true);
+  });
+
+  it('does not start a duplicate automatic OCR pass for the same folder', async () => {
+    const running = deferred<string>();
+    mocks.getSetting.mockImplementation((key: string) => Promise.resolve(key === 'ocr_engine' ? 'windows' : null));
+    mocks.listOcrCandidateRefs.mockResolvedValue([{ id: 8, file_name: 'eight.pdf' }]);
+    mocks.runWindowsOcr.mockReturnValue(running.promise);
+
+    const firstPass = useOcrStore.getState().queueFolderOcr(21);
+    await vi.waitFor(() => expect(mocks.runWindowsOcr).toHaveBeenCalledOnce());
+    await expect(useOcrStore.getState().queueFolderOcr(21)).resolves.toBe(0);
+    running.resolve('eight.md');
+    await expect(firstPass).resolves.toBe(1);
+    expect(mocks.listOcrCandidateRefs).toHaveBeenCalledOnce();
   });
 
   it('routes health checks to the selected engine and reports backend failures', async () => {
@@ -220,7 +234,7 @@ describe('OCR store', () => {
     useOcrStore.getState().setPage(1);
     await useOcrStore.getState().loadCandidates(3);
 
-    expect(mocks.listOcrCandidates).toHaveBeenCalledWith(3, 1, 2);
+    expect(mocks.listOcrCandidates).toHaveBeenCalledWith(3, 1, 2, true);
     expect(useOcrStore.getState()).toMatchObject({ totalCandidates: 12, totalPages: 6 });
     useOcrStore.getState().selectAll();
     expect([...useOcrStore.getState().selectedFileIds]).toEqual([1, 2]);

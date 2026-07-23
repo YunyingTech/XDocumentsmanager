@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 
 use crate::models::{SearchBackendStatus, SearchFilters};
 
-use super::engine::{documents_from_connection, SearchDocument, SearchHit};
+use super::engine::{for_each_document, SearchDocument, SearchHit};
 
 const INDEX_NAME: &str = "xdocuments-v1";
 
@@ -195,45 +195,61 @@ impl ElasticRuntime {
         }
     }
 
-    pub fn upsert(&self, document: &SearchDocument) -> Result<bool, String> {
+    pub fn apply_changes(
+        &self,
+        documents: &[SearchDocument],
+        deleted_file_ids: &[i64],
+    ) -> Result<bool, String> {
         let Some(endpoint) = self.endpoint()? else {
             return Ok(false);
         };
-        let response = self
-            .client
-            .put(format!(
-                "{}/{}/_doc/{}?refresh=wait_for",
-                endpoint, INDEX_NAME, document.file_id
-            ))
-            .json(document)
-            .send()
-            .map_err(|e| e.to_string())?;
-        ensure_success(response, "upsert Elasticsearch document")?;
+        if let Err(error) = self.apply_changes_inner(&endpoint, documents, deleted_file_ids) {
+            return self.disable(format!(
+                "Elasticsearch incremental update failed; embedded search is active: {error}"
+            ));
+        }
         Ok(true)
     }
 
-    pub fn delete_file(&self, file_id: i64) -> Result<bool, String> {
-        let Some(endpoint) = self.endpoint()? else {
-            return Ok(false);
-        };
-        let response = self
-            .client
-            .delete(format!(
-                "{}/{}/_doc/{}?refresh=wait_for",
-                endpoint, INDEX_NAME, file_id
-            ))
-            .send()
-            .map_err(|e| e.to_string())?;
-        if response.status().as_u16() != 404 {
-            ensure_success(response, "delete Elasticsearch document")?;
+    fn apply_changes_inner(
+        &self,
+        endpoint: &str,
+        documents: &[SearchDocument],
+        deleted_file_ids: &[i64],
+    ) -> Result<(), String> {
+        let mut body = String::new();
+        for file_id in deleted_file_ids {
+            append_bulk_line(
+                &mut body,
+                &json!({ "delete": { "_index": INDEX_NAME, "_id": file_id } }),
+            )?;
         }
-        Ok(true)
+        for document in documents {
+            append_bulk_line(
+                &mut body,
+                &json!({ "index": { "_index": INDEX_NAME, "_id": document.file_id } }),
+            )?;
+            append_bulk_line(&mut body, document)?;
+        }
+        if !body.is_empty() {
+            self.send_bulk(endpoint, body)?;
+        }
+        Ok(())
     }
 
     pub fn delete_folder(&self, folder_id: i64) -> Result<bool, String> {
         let Some(endpoint) = self.endpoint()? else {
             return Ok(false);
         };
+        if let Err(error) = self.delete_folder_inner(&endpoint, folder_id) {
+            return self.disable(format!(
+                "Elasticsearch folder deletion failed; embedded search is active: {error}"
+            ));
+        }
+        Ok(true)
+    }
+
+    fn delete_folder_inner(&self, endpoint: &str, folder_id: i64) -> Result<(), String> {
         let response = self
             .client
             .post(format!(
@@ -244,13 +260,22 @@ impl ElasticRuntime {
             .send()
             .map_err(|e| e.to_string())?;
         ensure_success(response, "delete Elasticsearch folder documents")?;
-        Ok(true)
+        Ok(())
     }
 
     pub fn rebuild(&self, conn: &rusqlite::Connection) -> Result<bool, String> {
         let Some(endpoint) = self.endpoint()? else {
             return Ok(false);
         };
+        if let Err(error) = self.rebuild_inner(conn, &endpoint) {
+            return self.disable(format!(
+                "Elasticsearch rebuild failed; embedded search is active: {error}"
+            ));
+        }
+        Ok(true)
+    }
+
+    fn rebuild_inner(&self, conn: &rusqlite::Connection, endpoint: &str) -> Result<(), String> {
         let delete = self
             .client
             .delete(format!("{}/{}", endpoint, INDEX_NAME))
@@ -259,26 +284,26 @@ impl ElasticRuntime {
         if delete.status().as_u16() != 404 {
             ensure_success(delete, "replace Elasticsearch index")?;
         }
-        self.ensure_index(&endpoint)?;
+        self.ensure_index(endpoint)?;
 
-        let documents = documents_from_connection(conn)?;
         let mut body = String::new();
-        for document in documents {
+        for_each_document(conn, |document| {
             let action = serde_json::to_string(
                 &json!({ "index": { "_index": INDEX_NAME, "_id": document.file_id } }),
             )
             .map_err(|e| e.to_string())?;
             let source = serde_json::to_string(&document).map_err(|e| e.to_string())?;
             if !body.is_empty() && body.len() + action.len() + source.len() + 2 > 8 * 1024 * 1024 {
-                self.send_bulk(&endpoint, std::mem::take(&mut body))?;
+                self.send_bulk(endpoint, std::mem::take(&mut body))?;
             }
             body.push_str(&action);
             body.push('\n');
             body.push_str(&source);
             body.push('\n');
-        }
+            Ok(())
+        })?;
         if !body.is_empty() {
-            self.send_bulk(&endpoint, body)?;
+            self.send_bulk(endpoint, body)?;
         }
         let refresh = self
             .client
@@ -286,7 +311,7 @@ impl ElasticRuntime {
             .send()
             .map_err(|e| e.to_string())?;
         ensure_success(refresh, "refresh Elasticsearch index")?;
-        Ok(true)
+        Ok(())
     }
 
     pub fn search(
@@ -432,7 +457,7 @@ impl ElasticRuntime {
             .send()
             .map_err(|e| e.to_string())?;
         let value = ensure_success_json(response, "bulk index Elasticsearch documents")?;
-        if value.get("errors").and_then(Value::as_bool) == Some(true) {
+        if bulk_has_fatal_errors(&value) {
             return Err("Elasticsearch bulk indexing returned document errors".to_string());
         }
         Ok(())
@@ -444,6 +469,41 @@ impl ElasticRuntime {
         }
         Err(message)
     }
+
+    fn disable<T>(&self, message: String) -> Result<T, String> {
+        if let Ok(mut endpoint) = self.endpoint.write() {
+            *endpoint = None;
+        }
+        if let Ok(mut version) = self.version.write() {
+            *version = None;
+        }
+        self.fail(message)
+    }
+}
+
+fn bulk_has_fatal_errors(value: &Value) -> bool {
+    if value.get("errors").and_then(Value::as_bool) != Some(true) {
+        return false;
+    }
+    value
+        .get("items")
+        .and_then(Value::as_array)
+        .map_or(true, |items| {
+            items.iter().any(|item| {
+                item.as_object().map_or(true, |actions| {
+                    actions.iter().any(|(action, result)| {
+                        let status = result.get("status").and_then(Value::as_u64).unwrap_or(500);
+                        status >= 300 && !(action == "delete" && status == 404)
+                    })
+                })
+            })
+        })
+}
+
+fn append_bulk_line(body: &mut String, value: &impl serde::Serialize) -> Result<(), String> {
+    body.push_str(&serde_json::to_string(value).map_err(|error| error.to_string())?);
+    body.push('\n');
+    Ok(())
 }
 
 impl Drop for ElasticRuntime {
@@ -582,7 +642,8 @@ fn copy_directory(source: &Path, destination: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::prepare_runtime_config;
+    use super::{bulk_has_fatal_errors, prepare_runtime_config, ElasticRuntime};
+    use serde_json::json;
 
     #[test]
     fn runtime_config_keeps_jvm_writes_out_of_the_distribution() {
@@ -613,6 +674,35 @@ mod tests {
         )));
         assert!(destination.join("elasticsearch.yml").is_file());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bulk_delete_ignores_missing_documents_but_keeps_real_errors() {
+        assert!(!bulk_has_fatal_errors(&json!({
+            "errors": true,
+            "items": [{ "delete": { "status": 404 } }, { "index": { "status": 201 } }]
+        })));
+        assert!(bulk_has_fatal_errors(&json!({
+            "errors": true,
+            "items": [{ "index": { "status": 400 } }]
+        })));
+    }
+
+    #[test]
+    fn failed_incremental_update_disables_elasticsearch_and_records_the_error() {
+        let runtime = ElasticRuntime::new().unwrap();
+        *runtime.endpoint.write().unwrap() = Some("not a valid endpoint".to_string());
+        *runtime.version.write().unwrap() = Some("8.17.0".to_string());
+
+        let error = runtime.apply_changes(&[], &[42]).unwrap_err();
+
+        assert!(error.starts_with("Elasticsearch incremental update failed"));
+        let status = runtime.status();
+        assert_eq!(status.backend, "tantivy-fallback");
+        assert!(!status.connected);
+        assert_eq!(status.endpoint, None);
+        assert_eq!(status.version, None);
+        assert_eq!(status.error.as_deref(), Some(error.as_str()));
     }
 }
 

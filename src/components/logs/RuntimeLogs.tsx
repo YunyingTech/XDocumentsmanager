@@ -89,10 +89,10 @@ export function RuntimeLogs() {
           <SourceButton active={source === 'elasticsearch'} onClick={() => setSource('elasticsearch')} icon={Server} label={t('logs.elasticsearch')} />
         </div>
         <div className="relative min-w-40 flex-1 sm:max-w-xs">
-          <Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-surface-400" />
-          <input value={filter} onChange={(event) => setFilter(event.target.value)} className="h-8 w-full rounded-md border border-surface-200 bg-surface-50 pl-8 pr-2 text-xs text-surface-800 outline-none focus:border-accent-400 dark:border-surface-700 dark:bg-surface-900 dark:text-surface-200" placeholder={t('logs.filter')} />
+          <Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-surface-400" aria-hidden="true" />
+          <input name="log_filter" autoComplete="off" aria-label={t('logs.filter')} value={filter} onChange={(event) => setFilter(event.target.value)} className="h-8 w-full rounded-md border border-surface-200 bg-surface-50 pl-8 pr-2 text-xs text-surface-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400 dark:border-surface-700 dark:bg-surface-900 dark:text-surface-200" placeholder={`${t('logs.filter')}…`} />
         </div>
-        <select value={level} onChange={(event) => setLevel(event.target.value as LogLevel)} className="h-8 rounded-md border border-surface-200 bg-surface-50 px-2 text-xs text-surface-600 outline-none focus:border-accent-400 dark:border-surface-700 dark:bg-surface-900 dark:text-surface-300" aria-label={t('logs.level')}>
+        <select name="log_level" value={level} onChange={(event) => setLevel(event.target.value as LogLevel)} className="h-8 rounded-md border border-surface-200 bg-surface-50 px-2 text-xs text-surface-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400 dark:border-surface-700 dark:bg-surface-900 dark:text-surface-300" aria-label={t('logs.level')}>
           <option value="all">{t('logs.levelAll')}</option>
           <option value="error">{t('logs.levelError')}</option>
           <option value="warn">{t('logs.levelWarn')}</option>
@@ -117,9 +117,9 @@ export function RuntimeLogs() {
         {snapshot?.updated_at && <span className="hidden shrink-0 tabular-nums md:inline">{new Date(snapshot.updated_at).toLocaleTimeString(locale)}</span>}
       </div>
 
-      <div ref={viewportRef} className="min-h-0 flex-1 overflow-auto bg-[#fbfbfb] dark:bg-[#101010]" aria-live="polite">
+      <div ref={viewportRef} className="min-h-0 flex-1 overflow-auto bg-[#fbfbfb] dark:bg-[#101010]">
         {error ? (
-          <div className="flex h-full items-center justify-center gap-2 p-6 text-sm text-red-600"><AlertTriangle size={16} />{t('logs.loadFailed', { error })}</div>
+          <div className="flex h-full items-center justify-center gap-2 p-6 text-sm text-red-600" role="alert"><AlertTriangle size={16} aria-hidden="true" />{t('logs.loadFailed', { error })}</div>
         ) : loading && !snapshot ? (
           <div className="space-y-px p-3">{Array.from({ length: 12 }, (_, index) => <div key={index} className="h-5 animate-pulse bg-surface-100 dark:bg-surface-900" style={{ width: `${62 + (index % 4) * 9}%` }} />)}</div>
         ) : visibleLines.length === 0 ? (
@@ -133,7 +133,11 @@ export function RuntimeLogs() {
             {visibleLines.map((line, index) => {
               const detectedLevel = lineLevel(line);
               return (
-                <div key={`${index}-${line}`} className={`grid min-w-max grid-cols-[3.5rem_minmax(0,1fr)] border-l-2 pr-4 hover:bg-surface-100 dark:hover:bg-surface-900 ${levelStyles[detectedLevel]}`}>
+                <div
+                  key={`${index}-${line}`}
+                  style={{ contentVisibility: 'auto', containIntrinsicSize: '0 20px' }}
+                  className={`grid min-w-max grid-cols-[3.5rem_minmax(0,1fr)] border-l-2 pr-4 hover:bg-surface-100 dark:hover:bg-surface-900 ${levelStyles[detectedLevel]}`}
+                >
                   <span className="select-none border-r border-surface-200 px-2 text-right tabular-nums text-surface-300 dark:border-surface-800 dark:text-surface-700">{index + 1}</span>
                   <span className="whitespace-pre-wrap break-all px-3">{line}</span>
                 </div>

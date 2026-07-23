@@ -45,6 +45,7 @@ describe('folder store', () => {
     useFolderStore.getState().setIndexProgress({
       job_id: 8,
       folder_id: 1,
+      index_mode: 'incremental',
       status: 'completed',
       ocr_after_index: true,
       files_total: 12,

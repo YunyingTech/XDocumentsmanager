@@ -2,17 +2,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use rusqlite::Connection;
+use serde::Serialize;
 use tantivy::collector::TopDocs;
 use tantivy::directory::MmapDirectory;
 use tantivy::query::QueryParser;
 use tantivy::schema::{TantivyDocument, Value};
 use tantivy::tokenizer::{LowerCaser, NgramTokenizer, TextAnalyzer};
 use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy, Term};
-use serde::Serialize;
 
-use crate::models::{SearchBackendStatus, SearchFilters};
 use super::elastic::ElasticRuntime;
 use super::schema::{build_schema, SearchFields};
+use crate::models::{SearchBackendStatus, SearchFilters};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchDocument {
@@ -58,11 +58,10 @@ impl SearchEngine {
             }
             Err(error) => return Err(error.to_string()),
         };
-        let analyzer = TextAnalyzer::builder(
-            NgramTokenizer::new(1, 3, false).map_err(|e| e.to_string())?,
-        )
-        .filter(LowerCaser)
-        .build();
+        let analyzer =
+            TextAnalyzer::builder(NgramTokenizer::new(1, 3, false).map_err(|e| e.to_string())?)
+                .filter(LowerCaser)
+                .build();
         index.tokenizers().register("xd_text", analyzer);
         let reader = index
             .reader_builder()
@@ -70,10 +69,21 @@ impl SearchEngine {
             .try_into()
             .map_err(|e| e.to_string())?;
         let writer = index.writer(50_000_000).map_err(|e| e.to_string())?;
-        Ok(Self { index, reader, writer: Mutex::new(writer), fields, elastic: ElasticRuntime::new()? })
+        Ok(Self {
+            index,
+            reader,
+            writer: Mutex::new(writer),
+            fields,
+            elastic: ElasticRuntime::new()?,
+        })
     }
 
-    pub fn configure_elasticsearch(&self, distribution_dir: PathBuf, data_dir: PathBuf, logs_dir: PathBuf) {
+    pub fn configure_elasticsearch(
+        &self,
+        distribution_dir: PathBuf,
+        data_dir: PathBuf,
+        logs_dir: PathBuf,
+    ) {
         self.elastic.configure(distribution_dir, data_dir, logs_dir);
     }
 
@@ -91,22 +101,38 @@ impl SearchEngine {
 
     pub fn upsert(&self, mut document: SearchDocument) -> Result<(), String> {
         document.content = normalize_cjk_ocr_spacing(&document.content);
+        self.apply_changes(&[document], &[])
+    }
+
+    pub fn apply_changes(
+        &self,
+        documents: &[SearchDocument],
+        deleted_file_ids: &[i64],
+    ) -> Result<(), String> {
+        if documents.is_empty() && deleted_file_ids.is_empty() {
+            return Ok(());
+        }
         {
             let mut writer = self.writer.lock().map_err(|e| e.to_string())?;
-            writer.delete_term(Term::from_field_i64(self.fields.file_id, document.file_id));
-            writer.add_document(self.to_document(document.clone())).map_err(|e| e.to_string())?;
+            for file_id in deleted_file_ids {
+                writer.delete_term(Term::from_field_i64(self.fields.file_id, *file_id));
+            }
+            for document in documents {
+                writer.delete_term(Term::from_field_i64(self.fields.file_id, document.file_id));
+                writer
+                    .add_document(self.to_document(document.clone()))
+                    .map_err(|e| e.to_string())?;
+            }
             writer.commit().map_err(|e| e.to_string())?;
             self.reader.reload().map_err(|e| e.to_string())?;
         }
-        self.elastic.upsert(&document).map(|_| ())
+        self.elastic
+            .apply_changes(documents, deleted_file_ids)
+            .map(|_| ())
     }
 
     pub fn delete_file(&self, file_id: i64) -> Result<(), String> {
-        let mut writer = self.writer.lock().map_err(|e| e.to_string())?;
-        writer.delete_term(Term::from_field_i64(self.fields.file_id, file_id));
-        writer.commit().map_err(|e| e.to_string())?;
-        self.reader.reload().map_err(|e| e.to_string())?;
-        self.elastic.delete_file(file_id).map(|_| ())
+        self.apply_changes(&[], &[file_id])
     }
 
     pub fn delete_folder(&self, folder_id: i64) -> Result<(), String> {
@@ -118,24 +144,34 @@ impl SearchEngine {
     }
 
     pub fn rebuild(&self, conn: &Connection) -> Result<(), String> {
-        let documents = documents_from_connection(conn)?;
         {
             let mut writer = self.writer.lock().map_err(|e| e.to_string())?;
             writer.delete_all_documents().map_err(|e| e.to_string())?;
-            for document in documents {
-                writer.add_document(self.to_document(document)).map_err(|e| e.to_string())?;
-            }
+            for_each_document(conn, |document| {
+                writer
+                    .add_document(self.to_document(document))
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })?;
             writer.commit().map_err(|e| e.to_string())?;
             self.reader.reload().map_err(|e| e.to_string())?;
         }
         self.elastic.rebuild(conn).map(|_| ())
     }
 
-    pub fn search(&self, query_text: &str, filters: Option<&SearchFilters>, limit: usize) -> Result<Vec<SearchHit>, String> {
+    pub fn search(
+        &self,
+        query_text: &str,
+        filters: Option<&SearchFilters>,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>, String> {
         match self.elastic.search(query_text, filters, limit) {
             Ok(Some(hits)) => return Ok(hits),
             Ok(None) => {}
-            Err(error) => log::error!("Elasticsearch query failed; using embedded fallback: {}", error),
+            Err(error) => log::error!(
+                "Elasticsearch query failed; using embedded fallback: {}",
+                error
+            ),
         }
         self.search_embedded(query_text, limit)
     }
@@ -144,7 +180,13 @@ impl SearchEngine {
         let searcher = self.reader.searcher();
         let mut parser = QueryParser::for_index(
             &self.index,
-            vec![self.fields.file_name, self.fields.content, self.fields.title, self.fields.author, self.fields.keywords],
+            vec![
+                self.fields.file_name,
+                self.fields.content,
+                self.fields.title,
+                self.fields.author,
+                self.fields.keywords,
+            ],
         );
         parser.set_conjunction_by_default();
         let embedded_query = query_text.replace(" | ", " OR ");
@@ -194,12 +236,20 @@ pub fn document_for_file(conn: &Connection, file_id: i64) -> Result<SearchDocume
     .map_err(|e| e.to_string())
 }
 
-pub fn documents_from_connection(conn: &Connection) -> Result<Vec<SearchDocument>, String> {
+pub(super) fn for_each_document(
+    conn: &Connection,
+    mut visitor: impl FnMut(SearchDocument) -> Result<(), String>,
+) -> Result<(), String> {
     let mut statement = conn
         .prepare("SELECT id, folder_id, file_name, COALESCE(text_preview, ''), COALESCE(pdf_title, ''), COALESCE(pdf_author, ''), COALESCE(pdf_keywords, ''), file_extension, file_modified_at, file_size_bytes FROM files WHERE index_status = 'indexed'")
         .map_err(|e| e.to_string())?;
-    let rows = statement.query_map([], row_to_document).map_err(|e| e.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    let rows = statement
+        .query_map([], row_to_document)
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        visitor(row.map_err(|e| e.to_string())?)?;
+    }
+    Ok(())
 }
 
 fn row_to_document(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchDocument> {
@@ -267,21 +317,30 @@ mod tests {
     fn indexes_and_finds_english_and_chinese_text() {
         let path = std::env::temp_dir().join(format!("xdocuments-search-{}", uuid::Uuid::new_v4()));
         let engine = SearchEngine::open(&path).unwrap();
-        engine.upsert(SearchDocument {
-            file_id: 7,
-            folder_id: 2,
-            file_name: "audit.pdf".to_string(),
-            content: "Quarterly compliance report. 供 应 商 风 险 评 估。中 国 科 学 院。".to_string(),
-            title: String::new(),
-            author: String::new(),
-            keywords: "audit risk".to_string(),
-            extension: "pdf".to_string(),
-            modified_at: "2026-01-01".to_string(),
-            size_bytes: 100,
-        }).unwrap();
+        engine
+            .upsert(SearchDocument {
+                file_id: 7,
+                folder_id: 2,
+                file_name: "audit.pdf".to_string(),
+                content: "Quarterly compliance report. 供 应 商 风 险 评 估。中 国 科 学 院。"
+                    .to_string(),
+                title: String::new(),
+                author: String::new(),
+                keywords: "audit risk".to_string(),
+                extension: "pdf".to_string(),
+                modified_at: "2026-01-01".to_string(),
+                size_bytes: 100,
+            })
+            .unwrap();
 
         assert_eq!(engine.search("compliance", None, 10).unwrap()[0].file_id, 7);
-        assert_eq!(engine.search("\"compliance\" | \"missingterm\"", None, 10).unwrap()[0].file_id, 7);
+        assert_eq!(
+            engine
+                .search("\"compliance\" | \"missingterm\"", None, 10)
+                .unwrap()[0]
+                .file_id,
+            7
+        );
         assert_eq!(engine.search("供应商风险", None, 10).unwrap()[0].file_id, 7);
         assert_eq!(engine.search("中国", None, 10).unwrap()[0].file_id, 7);
 

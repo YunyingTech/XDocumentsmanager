@@ -56,4 +56,17 @@ describe('PDF viewer', () => {
     expect(await screen.findByText('File no longer exists')).toBeInTheDocument();
     expect(screen.queryByRole('canvas')).not.toBeInTheDocument();
   });
+
+  it('closes a modal viewer with Escape and supports arrow-key page navigation', async () => {
+    mocks.readFileBytes.mockResolvedValue([37, 80, 68, 70]);
+    const onClose = vi.fn();
+    const user = userEvent.setup();
+    render(<PdfViewer filePath="C:\\docs\\keyboard.pdf" fileName="keyboard.pdf" onClose={onClose} />);
+
+    expect(await screen.findByText('1 / 2')).toBeInTheDocument();
+    await user.keyboard('{ArrowRight}');
+    expect(screen.getByText('2 / 2')).toBeInTheDocument();
+    await user.keyboard('{Escape}');
+    expect(onClose).toHaveBeenCalledOnce();
+  });
 });

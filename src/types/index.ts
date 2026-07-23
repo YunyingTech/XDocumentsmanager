@@ -70,6 +70,7 @@ export interface IndexJob {
 export interface IndexProgress {
   job_id: number;
   folder_id: number | null;
+  index_mode: IndexMode;
   status: string;
   ocr_after_index: boolean;
   files_total: number;
@@ -90,6 +91,8 @@ export interface SearchResult {
   matched_terms: string[];
   match_model: string | null;
 }
+
+export type IndexMode = 'incremental' | 'full';
 
 export interface OcrCandidateRef {
   id: number;

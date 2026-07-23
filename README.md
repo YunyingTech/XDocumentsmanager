@@ -13,6 +13,14 @@ Files stay in place. The app indexes metadata and extracted text for browsing, s
 - 🌓 **Dark mode** — System-aware cozy gray theme
 - ⚡ **Memory efficient** — Tauri 2.0 (Rust backend) uses 30–50MB idle vs Electron's 150–300MB
 
+## Incremental processing model
+
+Indexing is incremental by default. Each scan streams directory entries instead of collecting the full tree in memory, compares file size and nanosecond modification time, and hashes only new or changed PDFs. Search documents are updated or deleted in bounded batches. The **Full re-index** command is a separate, confirmed action that re-hashes every PDF and rebuilds both search backends.
+
+OCR is incremental by default as well. Automatic and manual candidate lists include only indexed PDFs whose current content has not completed OCR. When a PDF's content hash changes, its previous OCR text is invalidated and the file becomes eligible again. Automatic OCR reads candidates with an ID cursor in batches of 100 and prevents duplicate passes for the same folder.
+
+These choices keep memory proportional to directory depth and fixed batch sizes rather than total collection size. A scan still visits directory metadata to discover additions and removals when no reliable filesystem change journal is available; it does not reread unchanged PDF contents. If traversal reports an error, deletion reconciliation is skipped so a temporarily unavailable SMB subtree cannot erase valid index records.
+
 ## Tech Stack
 
 | Layer | Technology |

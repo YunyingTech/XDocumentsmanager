@@ -33,6 +33,11 @@
     font: inherit;
   }
 
+  button, a, [role="button"] {
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+
   button:focus-visible,
   input:focus-visible,
   select:focus-visible {
@@ -72,8 +77,8 @@
 
   .btn {
     @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg
-           text-sm font-medium transition-all duration-150 cursor-pointer
-           focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-400
+           text-sm font-medium transition-[color,background-color,border-color,box-shadow,transform,opacity] duration-150 cursor-pointer
+           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400
            disabled:opacity-50 disabled:cursor-not-allowed select-none active:translate-y-px;
   }
   .btn-primary {
@@ -95,8 +100,8 @@
   .input {
     @apply w-full px-3.5 py-2.5 rounded-lg bg-surface-100 border border-surface-200
            text-surface-900 text-sm placeholder:text-surface-400
-           focus:outline-none focus:ring-2 focus:ring-accent-400 focus:border-transparent
-           transition-all duration-150;
+           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400 focus-visible:border-transparent
+           transition-[color,background-color,border-color,box-shadow] duration-150;
   }
   .dark .input {
     @apply bg-surface-900 border-surface-700 text-surface-100 placeholder:text-surface-500;
@@ -112,14 +117,14 @@
   .icon-button {
     @apply inline-flex h-8 w-8 items-center justify-center rounded-md text-surface-500
            transition-colors duration-150 hover:bg-surface-100 hover:text-surface-800
-           focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-400
+           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-400
            dark:hover:bg-surface-800 dark:hover:text-surface-100;
   }
 
   .task-trigger {
     @apply flex h-full min-w-[11rem] items-center justify-end gap-1.5 border-l border-surface-200
            px-3 text-xs font-medium text-surface-600 transition-colors duration-150
-           hover:bg-surface-100 hover:text-surface-900 focus:outline-none focus-visible:ring-2
+           hover:bg-surface-100 hover:text-surface-900 focus-visible:outline-none focus-visible:ring-2
            focus-visible:ring-inset focus-visible:ring-accent-400 dark:border-surface-800
            dark:text-surface-400 dark:hover:bg-surface-900 dark:hover:text-surface-100;
   }

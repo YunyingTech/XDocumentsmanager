@@ -75,6 +75,7 @@ pub struct IndexJob {
 pub struct IndexProgress {
     pub job_id: i64,
     pub folder_id: Option<i64>,
+    pub index_mode: String,
     pub status: String,
     pub ocr_after_index: bool,
     pub files_total: i64,

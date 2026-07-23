@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import {
   ScanText,
   CheckCircle,
@@ -57,7 +57,9 @@ export function OcrPage() {
             {t('nav.ocr')}
           </h2>
           {/* Health indicator */}
-          <HealthBadge />
+          <div role="status" aria-live="polite">
+            <HealthBadge />
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -81,17 +83,18 @@ export function OcrPage() {
           <div className="card p-5">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100">
-                {t('ocr.selectFiles')}
+                {t('ocr.pendingFiles')}
               </h3>
               <div className="flex items-center gap-2">
-                <button onClick={selectAll} className="btn-ghost text-xs px-2 py-1 rounded">
+                <button type="button" onClick={selectAll} className="btn-ghost text-xs px-2 py-1 rounded">
                   {t('ocr.selectAll')}
                 </button>
-                <button onClick={deselectAll} className="btn-ghost text-xs px-2 py-1 rounded">
+                <button type="button" onClick={deselectAll} className="btn-ghost text-xs px-2 py-1 rounded">
                   {t('ocr.deselectAll')}
                 </button>
                 {candidates.length > 0 && (
                   <button
+                    type="button"
                     onClick={() => void submitTasks()}
                     disabled={
                       selectedFileIds.size === 0 ||
@@ -115,8 +118,8 @@ export function OcrPage() {
             ) : candidates.length === 0 ? (
               <div className="text-center py-8 text-surface-400">
                 <FileText size={32} className="mx-auto mb-2 opacity-50" />
-                <p className="text-sm">{t('ocr.noFiles')}</p>
-                <p className="text-xs mt-1">{t('ocr.noFilesHint')}</p>
+                <p className="text-sm">{t('ocr.noPendingFiles')}</p>
+                <p className="text-xs mt-1">{t('ocr.noPendingFilesHint')}</p>
               </div>
             ) : (
               <FileTable />
@@ -224,21 +227,46 @@ function SettingsCard() {
   const savePaddleModel = useOcrStore((s) => s.savePaddleModel);
   const installPaddle = useOcrStore((s) => s.installPaddle);
   const healthChecking = useOcrStore((s) => s.healthChecking);
+  const [apiUrlDraft, setApiUrlDraft] = useState(apiUrl);
+  const [outputDirDraft, setOutputDirDraft] = useState(outputDir);
+  const [paddlePythonDraft, setPaddlePythonDraft] = useState(paddlePythonPath);
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+
+  useEffect(() => setApiUrlDraft(apiUrl), [apiUrl]);
+  useEffect(() => setOutputDirDraft(outputDir), [outputDir]);
+  useEffect(() => setPaddlePythonDraft(paddlePythonPath), [paddlePythonPath]);
+
+  const saveDraft = async (save: (value: string) => Promise<void>, value: string) => {
+    setSaveState('saving');
+    try {
+      await save(value);
+      setSaveState('saved');
+    } catch (error) {
+      console.error('Failed to save OCR setting:', error);
+      setSaveState('error');
+    }
+  };
 
   return (
     <div className="card p-5">
-      <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 mb-4">
-        {t('ocr.settings')}
-      </h3>
+      <div className="mb-4 flex items-center gap-3">
+        <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100">
+          {t('ocr.settings')}
+        </h3>
+        <span className={`ml-auto text-xs ${saveState === 'error' ? 'text-red-500' : 'text-surface-400'}`} role="status" aria-live="polite">
+          {saveState === 'saving' ? t('settings.saving') : saveState === 'saved' ? t('settings.saved') : saveState === 'error' ? t('settings.saveFailed') : ''}
+        </span>
+      </div>
       <div className="space-y-4">
         <div>
-          <label className="block text-xs text-surface-500 mb-1.5">
+          <span className="block text-xs text-surface-500 mb-1.5">
             {t('ocr.engine')}
-          </label>
+          </span>
           <div className="inline-flex rounded-md border border-surface-200 bg-surface-50 p-0.5 dark:border-surface-700 dark:bg-surface-900">
             <button
               type="button"
               onClick={() => saveEngine('mineru')}
+              aria-pressed={engine === 'mineru'}
               className={`inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs font-medium transition-colors ${engine === 'mineru' ? 'bg-white text-surface-900 shadow-sm dark:bg-surface-700 dark:text-surface-100' : 'text-surface-500 hover:text-surface-800 dark:hover:text-surface-200'}`}
             >
               <Server size={14} /> MinerU
@@ -246,6 +274,7 @@ function SettingsCard() {
             <button
               type="button"
               onClick={() => saveEngine('windows')}
+              aria-pressed={engine === 'windows'}
               className={`inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs font-medium transition-colors ${engine === 'windows' ? 'bg-white text-surface-900 shadow-sm dark:bg-surface-700 dark:text-surface-100' : 'text-surface-500 hover:text-surface-800 dark:hover:text-surface-200'}`}
             >
               <Monitor size={14} /> {t('ocr.windowsEngine')}
@@ -253,6 +282,7 @@ function SettingsCard() {
             <button
               type="button"
               onClick={() => saveEngine('paddle')}
+              aria-pressed={engine === 'paddle'}
               className={`inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs font-medium transition-colors ${engine === 'paddle' ? 'bg-white text-surface-900 shadow-sm dark:bg-surface-700 dark:text-surface-100' : 'text-surface-500 hover:text-surface-800 dark:hover:text-surface-200'}`}
             >
               <Boxes size={14} /> PaddleOCR
@@ -261,21 +291,29 @@ function SettingsCard() {
         </div>
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         {engine === 'mineru' ? <div>
-          <label className="block text-xs text-surface-500 mb-1">
+          <label htmlFor="ocr-api-url" className="block text-xs text-surface-500 mb-1">
             {t('ocr.apiUrl')}
           </label>
           <input
-            type="text"
+            id="ocr-api-url"
+            name="ocr_api_url"
+            type="url"
+            inputMode="url"
+            autoComplete="off"
+            spellCheck={false}
             className="input text-sm"
-            value={apiUrl}
-            onChange={(e) => saveApiUrl(e.target.value)}
-            placeholder="http://127.0.0.1:8000"
+            value={apiUrlDraft}
+            onChange={(e) => setApiUrlDraft(e.target.value)}
+            onBlur={() => { if (apiUrlDraft !== apiUrl) void saveDraft(saveApiUrl, apiUrlDraft); }}
+            placeholder="http://127.0.0.1:8000…"
           />
         </div> : engine === 'windows' ? <div>
-          <label className="block text-xs text-surface-500 mb-1">
+          <label htmlFor="ocr-windows-language" className="block text-xs text-surface-500 mb-1">
             {t('ocr.windowsLanguage')}
           </label>
           <select
+            id="ocr-windows-language"
+            name="windows_ocr_language"
             className="input text-sm"
             value={windowsLanguage}
             onChange={(event) => saveWindowsLanguage(event.target.value)}
@@ -291,19 +329,24 @@ function SettingsCard() {
           {windowsStatus?.error && <p className="mt-1 text-xs text-red-500">{windowsStatus.error}</p>}
         </div> : <div className="space-y-3">
           <div>
-            <label className="block text-xs text-surface-500 mb-1">{t('ocr.paddlePython')}</label>
+            <label htmlFor="ocr-paddle-python" className="block text-xs text-surface-500 mb-1">{t('ocr.paddlePython')}</label>
             <input
+              id="ocr-paddle-python"
+              name="paddle_python_path"
+              autoComplete="off"
+              spellCheck={false}
               type="text"
               className="input text-sm"
-              value={paddlePythonPath}
-              onChange={(event) => void savePaddlePythonPath(event.target.value)}
-              placeholder="python"
+              value={paddlePythonDraft}
+              onChange={(event) => setPaddlePythonDraft(event.target.value)}
+              onBlur={() => { if (paddlePythonDraft !== paddlePythonPath) void saveDraft(savePaddlePythonPath, paddlePythonDraft); }}
+              placeholder="python…"
             />
           </div>
           <div className="grid grid-cols-2 gap-2">
             <div>
-              <label className="block text-xs text-surface-500 mb-1">{t('ocr.paddleLanguage')}</label>
-              <select className="input text-sm" value={paddleLanguage} onChange={(event) => void savePaddleLanguage(event.target.value)}>
+              <label htmlFor="ocr-paddle-language" className="block text-xs text-surface-500 mb-1">{t('ocr.paddleLanguage')}</label>
+              <select id="ocr-paddle-language" name="paddle_ocr_language" className="input text-sm" value={paddleLanguage} onChange={(event) => void savePaddleLanguage(event.target.value)}>
                 <option value="ch">中文</option>
                 <option value="en">English</option>
                 <option value="japan">日本語</option>
@@ -311,8 +354,8 @@ function SettingsCard() {
               </select>
             </div>
             <div>
-              <label className="block text-xs text-surface-500 mb-1">{t('ocr.paddleModel')}</label>
-              <select className="input text-sm" value={paddleModel} onChange={(event) => void savePaddleModel(event.target.value)}>
+              <label htmlFor="ocr-paddle-model" className="block text-xs text-surface-500 mb-1">{t('ocr.paddleModel')}</label>
+              <select id="ocr-paddle-model" name="paddle_ocr_model" className="input text-sm" value={paddleModel} onChange={(event) => void savePaddleModel(event.target.value)}>
                 <option value="PP-OCRv5_mobile">PP-OCRv5 Mobile</option>
                 <option value="PP-OCRv5_server">PP-OCRv5 Server</option>
               </select>
@@ -331,15 +374,20 @@ function SettingsCard() {
           </div>
         </div>}
         <div>
-          <label className="block text-xs text-surface-500 mb-1">
+          <label htmlFor="ocr-output-directory" className="block text-xs text-surface-500 mb-1">
             {t('ocr.outputDirectory')}
           </label>
           <input
+            id="ocr-output-directory"
+            name="ocr_output_directory"
             type="text"
+            autoComplete="off"
+            spellCheck={false}
             className="input text-sm"
-            value={outputDir}
-            onChange={(e) => saveOutputDir(e.target.value)}
-            placeholder={t('ocr.outputPlaceholder', { project: '{project}' })}
+            value={outputDirDraft}
+            onChange={(e) => setOutputDirDraft(e.target.value)}
+            onBlur={() => { if (outputDirDraft !== outputDir) void saveDraft(saveOutputDir, outputDirDraft); }}
+            placeholder={`${t('ocr.outputPlaceholder', { project: '{project}' })}…`}
           />
         </div>
         </div>
@@ -392,37 +440,42 @@ function FileTable() {
               return (
                 <tr
                   key={file.id}
-                  onClick={() => toggleFile(file.id)}
                   className={`border-b border-surface-100 dark:border-surface-900 cursor-pointer transition-colors hover:bg-surface-50 dark:hover:bg-surface-900 ${
                     isSelected ? 'bg-accent-50 dark:bg-accent-950/30' : ''
                   }`}
                 >
-                  <td className="py-2">
-                    <input
-                      type="checkbox"
-                      checked={isSelected}
-                      onClick={(event) => event.stopPropagation()}
-                      onChange={() => toggleFile(file.id)}
-                      className="rounded"
-                    />
+                  <td>
+                    <label className="flex cursor-pointer items-center py-2 pr-2" aria-label={`${t('common.select')}: ${file.file_name}`}>
+                      <input
+                        id={`ocr-file-${file.id}`}
+                        type="checkbox"
+                        name="ocr_file"
+                        value={file.id}
+                        checked={isSelected}
+                        onChange={() => toggleFile(file.id)}
+                        className="rounded"
+                      />
+                    </label>
                   </td>
-                  <td className="py-2 text-surface-700 dark:text-surface-300 truncate max-w-64">
-                    {file.file_name}
+                  <td className="max-w-64 text-surface-700 dark:text-surface-300">
+                    <label htmlFor={`ocr-file-${file.id}`} className="block cursor-pointer truncate py-2">{file.file_name}</label>
                   </td>
-                  <td className="py-2 text-surface-500 text-xs">
-                    {getFolderPath(file.folder_id)}
+                  <td className="text-xs text-surface-500">
+                    <label htmlFor={`ocr-file-${file.id}`} className="block cursor-pointer py-2">{getFolderPath(file.folder_id)}</label>
                   </td>
-                  <td className="py-2 text-right text-surface-500 text-xs tabular-nums">
-                    {formatFileSize(file.file_size_bytes)}
+                  <td className="text-right text-xs text-surface-500 tabular-nums">
+                    <label htmlFor={`ocr-file-${file.id}`} className="block cursor-pointer py-2">{formatFileSize(file.file_size_bytes)}</label>
                   </td>
-                  <td className="py-2 text-right">
-                    {file.ocr_applied ? (
-                      <span className="text-xs text-green-600 inline-flex items-center gap-1">
-                        <CheckCircle size={12} /> {t('ocr.done')}
-                      </span>
-                    ) : (
-                      <span className="text-xs text-surface-400">-</span>
-                    )}
+                  <td className="text-right">
+                    <label htmlFor={`ocr-file-${file.id}`} className="block cursor-pointer py-2">
+                      {file.ocr_applied ? (
+                        <span className="inline-flex items-center gap-1 text-xs text-green-600">
+                          <CheckCircle size={12} aria-hidden="true" /> {t('ocr.done')}
+                        </span>
+                      ) : (
+                        <span className="text-xs text-surface-400">-</span>
+                      )}
+                    </label>
                   </td>
                 </tr>
               );

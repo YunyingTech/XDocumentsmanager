@@ -48,9 +48,9 @@ The `TAURI_CONFIG` override prevents the running bundled Elasticsearch process f
 | --- | --- |
 | File and folder state | Pagination, sorting, stale responses, automatic selection, completion refresh |
 | Search | Blank/error states, stale responses, AI terms/model forwarding, filters, Unicode snippets, result preview |
-| OCR | Windows concurrency, full queue visibility, cancel one/all, MinerU cancellation race, polling, sync parse, settings, PaddleOCR Windows CPU compatibility |
-| Indexing | Timestamp conversion, hidden-file filtering, database totals through isolated Tauri integration |
-| Database | Migrations, defaults, indexes, legacy timestamps, cascade and job-history behavior |
+| OCR | Windows concurrency, full queue visibility, cancel one/all, incremental cursor selection, duplicate folder-pass prevention, MinerU cancellation race, polling, sync parse, settings, PaddleOCR Windows CPU compatibility |
+| Indexing | Incremental metadata decisions, full-mode override, streaming directory traversal, OCR invalidation after content changes, stale-file deletion, timestamp conversion, hidden-file filtering |
+| Database | Migrations, pending-OCR composite index, interrupted-job recovery, legacy timestamps, cascade and job-history behavior |
 | Viewer | Full/range reads, invalid ranges, PDF load errors, navigation, zoom, real canvas rendering |
 | Tauri bindings | Every exported frontend command is checked against its registered backend command name |
 | Security/quality | TypeScript build, Oxlint, Clippy, npm audit, Python worker syntax, diff whitespace |

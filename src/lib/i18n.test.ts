@@ -5,8 +5,8 @@ describe('translations', () => {
   it('translates the OCR batch actions in both languages', () => {
     expect(translate('en', 'tasks.cancelAllOcr')).toBe('Cancel all OCR tasks');
     expect(translate('zh-CN', 'tasks.cancelAllOcr')).toBe('取消所有 OCR 任务');
-    expect(translate('en', 'files.indexAndOcr')).toBe('Index and OCR');
-    expect(translate('zh-CN', 'files.indexAndOcr')).toBe('索引并 OCR');
+    expect(translate('en', 'files.indexAndOcr')).toBe('Incremental index and OCR');
+    expect(translate('zh-CN', 'files.indexAndOcr')).toBe('增量索引并 OCR');
   });
 
   it('interpolates known values and preserves missing placeholders', () => {

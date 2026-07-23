@@ -60,6 +60,7 @@ describe('task center', () => {
     state.indexProgress = {
       job_id: 4,
       folder_id: 3,
+      index_mode: 'incremental',
       status: 'running',
       ocr_after_index: true,
       files_total: 10,
@@ -74,7 +75,31 @@ describe('task center', () => {
     render(<TaskCenter />);
 
     await user.click(screen.getByTitle('Open task center'));
+    expect(screen.getByText('Incremental indexing')).toBeInTheDocument();
     expect(screen.getByText('Archive / OCR after indexing')).toBeInTheDocument();
     expect(screen.getByText('40%')).toBeInTheDocument();
+  });
+
+  it('labels explicit full re-index jobs separately', async () => {
+    state.folders = [{ id: 3, display_name: 'Archive' }];
+    state.indexProgress = {
+      job_id: 5,
+      folder_id: 3,
+      index_mode: 'full',
+      status: 'running',
+      ocr_after_index: false,
+      files_total: 10,
+      files_processed: 1,
+      files_indexed: 1,
+      files_skipped: 0,
+      files_errors: 0,
+      bytes_processed: 100,
+      current_file: 'one.pdf',
+    };
+    const user = userEvent.setup();
+    render(<TaskCenter />);
+
+    await user.click(screen.getByTitle('Open task center'));
+    expect(screen.getByText('Full re-indexing')).toBeInTheDocument();
   });
 });

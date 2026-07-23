@@ -13,25 +13,23 @@ export function SearchResults() {
   return (
     <div className="p-4 space-y-2">
       {results.map((result) => (
-        <div
+        <article
           key={result.file.id}
-          role="button"
-          tabIndex={0}
-          aria-pressed={selectedResultId === result.file.id}
-          onClick={() => selectResult(result.file.id)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' || event.key === ' ') {
-              event.preventDefault();
-              selectResult(result.file.id);
-            }
-          }}
-          className={`card cursor-pointer p-4 transition-colors hover:border-accent-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500 dark:hover:border-accent-600 ${
+          style={{ contentVisibility: 'auto', containIntrinsicSize: '0 160px' }}
+          className={`card relative p-4 transition-colors hover:border-accent-300 focus-within:ring-2 focus-within:ring-accent-500 dark:hover:border-accent-600 ${
             selectedResultId === result.file.id
               ? 'border-accent-400 bg-accent-50/60 dark:border-accent-600 dark:bg-accent-950/20'
               : ''
           }`}
         >
-          <div className="flex items-start gap-3">
+          <button
+            type="button"
+            className="absolute inset-0 z-0 rounded-lg"
+            aria-pressed={selectedResultId === result.file.id}
+            aria-label={`${t('files.preview')}: ${result.file.file_name}`}
+            onClick={() => selectResult(result.file.id)}
+          />
+          <div className="pointer-events-none relative z-10 flex items-start gap-3">
             <div className="w-8 h-8 rounded-lg bg-accent-100 dark:bg-accent-900/30 flex items-center justify-center shrink-0 mt-0.5">
               <FileText size={14} className="text-accent-500" />
             </div>
@@ -45,11 +43,10 @@ export function SearchResults() {
                 </p>
                 <button
                   type="button"
-                  className="btn-ghost p-1 rounded shrink-0"
+                  className="btn-ghost pointer-events-auto relative z-20 shrink-0 rounded p-1"
                   title={t('search.openFolder')}
                   aria-label={t('search.openFolder')}
-                  onClick={(event) => {
-                    event.stopPropagation();
+                  onClick={() => {
                     void showInFolder(result.absolute_path);
                   }}
                 >
@@ -98,7 +95,7 @@ export function SearchResults() {
               </div>
             </div>
           </div>
-        </div>
+        </article>
       ))}
     </div>
   );

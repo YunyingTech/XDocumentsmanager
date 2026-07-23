@@ -538,10 +538,7 @@ pub struct OcrCandidateRef {
 }
 
 #[tauri::command]
-pub fn cancel_ocr_task(
-    task_id: String,
-    tasks: State<'_, OcrTaskManager>,
-) -> Result<bool, String> {
+pub fn cancel_ocr_task(task_id: String, tasks: State<'_, OcrTaskManager>) -> Result<bool, String> {
     let cancelled = tasks.cancel(&task_id);
     if cancelled {
         log::info!("OCR task [{}] cancellation requested", task_id);
@@ -735,9 +732,7 @@ fn windows_file_system_path(path: &str) -> std::path::PathBuf {
     let absolute = if std::path::Path::new(path).is_absolute() {
         std::path::PathBuf::from(path)
     } else {
-        std::env::current_dir()
-            .unwrap_or_default()
-            .join(path)
+        std::env::current_dir().unwrap_or_default().join(path)
     };
     let normalized = absolute.to_string_lossy().replace('/', "\\");
     if normalized.starts_with(r"\\?\") {
@@ -874,10 +869,8 @@ mod tests {
 
     #[test]
     fn default_ocr_output_is_stored_beside_the_application_database() {
-        let root = std::env::temp_dir().join(format!(
-            "xdocuments-ocr-output-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("xdocuments-ocr-output-{}", uuid::Uuid::new_v4()));
         let database = Database::new(&root).unwrap();
         assert_eq!(
             PathBuf::from(resolve_output_dir(&database).unwrap()),
@@ -889,10 +882,8 @@ mod tests {
 
     #[test]
     fn persisted_ocr_text_updates_the_database_and_embedded_search() {
-        let root = std::env::temp_dir().join(format!(
-            "xdocuments-ocr-persist-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("xdocuments-ocr-persist-{}", uuid::Uuid::new_v4()));
         let database = Database::new(&root).unwrap();
         {
             let conn = database.get_connection();
@@ -969,16 +960,15 @@ mod tests {
     fn recognizes_a_real_pdf_with_windows_ocr() {
         let path = std::env::var("XDOCUMENTS_WINDOWS_OCR_PDF")
             .expect("XDOCUMENTS_WINDOWS_OCR_PDF must point to a real PDF");
-        let markdown =
-            super::windows_ocr_pdf(
-                &path,
-                1,
-                "windows-ocr-test",
-                Some("zh-Hans-CN"),
-                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                |_| {},
-            )
-            .unwrap();
+        let markdown = super::windows_ocr_pdf(
+            &path,
+            1,
+            "windows-ocr-test",
+            Some("zh-Hans-CN"),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            |_| {},
+        )
+        .unwrap();
         assert!(markdown.contains("## Page 1"));
         assert!(markdown.chars().count() > 20);
     }
@@ -989,20 +979,16 @@ mod tests {
     fn recognizes_a_real_pdf_from_a_long_path() {
         let source = std::env::var("XDOCUMENTS_WINDOWS_OCR_PDF")
             .expect("XDOCUMENTS_WINDOWS_OCR_PDF must point to a real PDF");
-        let root = std::env::temp_dir().join(format!(
-            "xdocuments-long-path-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("xdocuments-long-path-{}", uuid::Uuid::new_v4()));
         let long_dir = (0..6).fold(root.clone(), |path, index| {
             path.join(format!(
                 "ocr-long-path-segment-{index}-abcdefghijklmnopqrstuvwxyz0123456789"
             ))
         });
         let destination = long_dir.join("windows-ocr-long-path-test.pdf");
-        std::fs::create_dir_all(super::windows_file_system_path(
-            &long_dir.to_string_lossy(),
-        ))
-        .unwrap();
+        std::fs::create_dir_all(super::windows_file_system_path(&long_dir.to_string_lossy()))
+            .unwrap();
         std::fs::copy(
             super::windows_file_system_path(&source),
             super::windows_file_system_path(&destination.to_string_lossy()),
@@ -1022,9 +1008,7 @@ mod tests {
         assert!(markdown.contains("## Page 1"));
         assert!(markdown.chars().count() > 20);
 
-        let _ = std::fs::remove_dir_all(super::windows_file_system_path(
-            &root.to_string_lossy(),
-        ));
+        let _ = std::fs::remove_dir_all(super::windows_file_system_path(&root.to_string_lossy()));
     }
 
     #[test]
@@ -1091,21 +1075,25 @@ pub fn list_ocr_candidates(
     folder_id: Option<i64>,
     page: i64,
     page_size: i64,
+    pending_only: Option<bool>,
     db: State<'_, Database>,
 ) -> Result<PaginatedResult<crate::models::FileInfo>, String> {
     let conn = db.get_connection();
+    let page = page.max(0);
+    let page_size = page_size.clamp(1, 500);
+    let pending_only = pending_only.unwrap_or(true);
 
     // Build WHERE clause shared by COUNT and data queries
-    let where_clause = if let Some(fid) = folder_id {
-        format!("folder_id = {} AND index_status = 'indexed'", fid)
-    } else {
-        "index_status = 'indexed'".to_string()
-    };
+    let where_clause = "index_status = 'indexed' AND (?1 IS NULL OR folder_id = ?1) AND (?2 = 0 OR ocr_applied = 0)";
 
     // Get total count
     let count_sql = format!("SELECT COUNT(*) FROM files WHERE {}", where_clause);
     let total: i64 = conn
-        .query_row(&count_sql, [], |row| row.get(0))
+        .query_row(
+            &count_sql,
+            rusqlite::params![folder_id, pending_only],
+            |row| row.get(0),
+        )
         .map_err(|e| e.to_string())?;
 
     let total_pages = if total == 0 {
@@ -1125,13 +1113,16 @@ pub fn list_ocr_candidates(
          FROM files \
          WHERE {} \
          ORDER BY file_name \
-         LIMIT {} OFFSET {}",
-        where_clause, page_size, offset
+         LIMIT ?3 OFFSET ?4",
+        where_clause
     );
 
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([], |row| crate::db::row_to_file_info(row))
+        .query_map(
+            rusqlite::params![folder_id, pending_only, page_size, offset],
+            crate::db::row_to_file_info,
+        )
         .map_err(|e| e.to_string())?;
 
     let mut files = Vec::new();
@@ -1151,18 +1142,32 @@ pub fn list_ocr_candidates(
 #[tauri::command]
 pub fn list_ocr_candidate_refs(
     folder_id: i64,
+    after_id: Option<i64>,
+    limit: Option<i64>,
     db: State<'_, Database>,
 ) -> Result<Vec<OcrCandidateRef>, String> {
     let conn = db.get_connection();
+    list_ocr_candidate_refs_from_connection(&conn, folder_id, after_id, limit)
+}
+
+fn list_ocr_candidate_refs_from_connection(
+    conn: &rusqlite::Connection,
+    folder_id: i64,
+    after_id: Option<i64>,
+    limit: Option<i64>,
+) -> Result<Vec<OcrCandidateRef>, String> {
+    let after_id = after_id.unwrap_or(0).max(0);
+    let limit = limit.unwrap_or(500).clamp(1, 5_000);
     let mut statement = conn
         .prepare(
             "SELECT id, file_name FROM files \
              WHERE folder_id = ?1 AND index_status = 'indexed' \
-             ORDER BY file_name",
+               AND ocr_applied = 0 AND id > ?2 \
+             ORDER BY id LIMIT ?3",
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map([folder_id], |row| {
+        .query_map(rusqlite::params![folder_id, after_id, limit], |row| {
             Ok(OcrCandidateRef {
                 id: row.get(0)?,
                 file_name: row.get(1)?,
@@ -1171,4 +1176,43 @@ pub fn list_ocr_candidate_refs(
         .map_err(|error| error.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod incremental_ocr_tests {
+    use super::list_ocr_candidate_refs_from_connection;
+    use crate::db::schema;
+    use rusqlite::Connection;
+
+    #[test]
+    fn cursor_query_returns_only_pending_ocr_files() {
+        let conn = Connection::open_in_memory().unwrap();
+        schema::run_migrations(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO watched_folders (id, path) VALUES (1, 'C:/documents')",
+            [],
+        )
+        .unwrap();
+        for (id, applied) in [(1, 0), (2, 1), (3, 0), (4, 0)] {
+            conn.execute(
+                "INSERT INTO files (
+                    id, folder_id, relative_path, file_name, file_size_bytes,
+                    content_hash, file_modified_at, index_status, ocr_applied
+                 ) VALUES (?1, 1, ?2, ?2, 10, 'hash', '2026-01-01', 'indexed', ?3)",
+                rusqlite::params![id, format!("{id}.pdf"), applied],
+            )
+            .unwrap();
+        }
+
+        let first = list_ocr_candidate_refs_from_connection(&conn, 1, None, Some(2)).unwrap();
+        assert_eq!(
+            first.iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        let second = list_ocr_candidate_refs_from_connection(&conn, 1, Some(3), Some(2)).unwrap();
+        assert_eq!(
+            second.iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec![4]
+        );
+    }
 }

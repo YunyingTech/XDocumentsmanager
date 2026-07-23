@@ -5,7 +5,6 @@ import { useFolderStore } from '../../stores/folderStore';
 import { formatFileSize, formatDateTime } from '../../lib/format';
 import { FileText, AlertCircle, Loader2 } from 'lucide-react';
 import type { FileInfo } from '../../types';
-import { useUIStore } from '../../stores/uiStore';
 import { useI18n, type TranslationKey } from '../../lib/i18n';
 
 const ROW_HEIGHT = 40;
@@ -17,7 +16,7 @@ const fileStatusKeys: Record<FileInfo['index_status'], TranslationKey> = {
   skipped: 'files.skipped',
 };
 
-export function FileTable() {
+export function FileTable({ compact = false }: { compact?: boolean }) {
   const { locale, t } = useI18n();
   const files = useFileStore((s) => s.files);
   const total = useFileStore((s) => s.total);
@@ -30,7 +29,6 @@ export function FileTable() {
   const setPage = useFileStore((s) => s.setPage);
   const selectedFolderId = useFolderStore((s) => s.selectedFolderId);
   const loadFiles = useFileStore((s) => s.loadFiles);
-  const setView = useUIStore((s) => s.setView);
 
   const parentRef = useRef<HTMLDivElement>(null);
   const isManualPageChange = useRef(false);
@@ -56,16 +54,18 @@ export function FileTable() {
     const firstIdx = virtualItems[0].index;
     const newPage = Math.floor(firstIdx / pageSize);
     if (newPage !== page) {
+      selectFile(null);
       setPage(newPage);
       if (selectedFolderId !== null) {
         loadFiles(selectedFolderId);
       }
     }
-  }, [virtualItems, page, pageSize, selectedFolderId, setPage, loadFiles]);
+  }, [virtualItems, page, pageSize, selectedFolderId, setPage, loadFiles, selectFile]);
 
   const handlePageJump = useCallback((newPage: number) => {
     if (newPage < 0 || newPage >= totalPages) return;
     isManualPageChange.current = true;
+    selectFile(null);
     setPage(newPage);
     if (selectedFolderId !== null) {
       loadFiles(selectedFolderId);
@@ -74,7 +74,7 @@ export function FileTable() {
     requestAnimationFrame(() => {
       isManualPageChange.current = false;
     });
-  }, [totalPages, pageSize, setPage, selectedFolderId, loadFiles, rowVirtualizer]);
+  }, [totalPages, pageSize, setPage, selectedFolderId, loadFiles, rowVirtualizer, selectFile]);
 
   const handleSort = (field: string) => {
     const nextSort = sort.field === field
@@ -86,17 +86,17 @@ export function FileTable() {
   };
 
   const SortIcon = ({ field }: { field: string }) => {
-    if (sort.field !== field) return <span className="text-surface-300 dark:text-surface-600 ml-1">↕</span>;
-    return <span className="text-accent-500 ml-1">{sort.direction === 'asc' ? '↑' : '↓'}</span>;
+    if (sort.field !== field) return <span aria-hidden="true" className="ml-1 text-surface-300 dark:text-surface-600">↕</span>;
+    return <span aria-hidden="true" className="ml-1 text-accent-500">{sort.direction === 'asc' ? '↑' : '↓'}</span>;
   };
 
   const statusIcon = (status: FileInfo['index_status']) => {
     switch (status) {
-      case 'indexed': return <FileText size={14} className="text-green-500" />;
-      case 'indexing': return <Loader2 size={14} className="text-accent-500 animate-spin" />;
-      case 'error': return <AlertCircle size={14} className="text-red-500" />;
-      case 'pending': return <FileText size={14} className="text-surface-300" />;
-      case 'skipped': return <FileText size={14} className="text-surface-400" />;
+      case 'indexed': return <FileText size={14} className="text-green-500" aria-hidden="true" />;
+      case 'indexing': return <Loader2 size={14} className="text-accent-500 animate-spin" aria-hidden="true" />;
+      case 'error': return <AlertCircle size={14} className="text-red-500" aria-hidden="true" />;
+      case 'pending': return <FileText size={14} className="text-surface-300" aria-hidden="true" />;
+      case 'skipped': return <FileText size={14} className="text-surface-400" aria-hidden="true" />;
     }
   };
 
@@ -106,25 +106,31 @@ export function FileTable() {
         {/* Header */}
       <div className="sticky top-0 z-10 flex items-center h-9 bg-surface-100 dark:bg-surface-900 border-b border-surface-200 dark:border-surface-800 text-xs font-semibold text-surface-500 uppercase tracking-wider">
         <div className="w-8 shrink-0" />
-        <div
-          className="flex-1 min-w-0 px-3 cursor-pointer hover:text-surface-700 dark:hover:text-surface-300"
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center self-stretch px-3 text-left hover:text-surface-700 dark:hover:text-surface-300"
           onClick={() => handleSort('file_name')}
+          aria-label={sort.field === 'file_name' ? `${t('files.name')}, ${sort.direction}` : t('files.name')}
         >
           {t('files.name')} <SortIcon field="file_name" />
-        </div>
-        <div
-          className="w-28 shrink-0 px-2 cursor-pointer hover:text-surface-700 dark:hover:text-surface-300 hidden md:block"
+        </button>
+        <button
+          type="button"
+          className={`${compact ? 'hidden' : 'hidden md:flex'} w-28 shrink-0 items-center self-stretch px-2 text-left hover:text-surface-700 dark:hover:text-surface-300`}
           onClick={() => handleSort('file_size_bytes')}
+          aria-label={sort.field === 'file_size_bytes' ? `${t('files.size')}, ${sort.direction}` : t('files.size')}
         >
           {t('files.size')} <SortIcon field="file_size_bytes" />
-        </div>
-        <div
-          className="w-44 shrink-0 px-2 cursor-pointer hover:text-surface-700 dark:hover:text-surface-300 hidden lg:block"
+        </button>
+        <button
+          type="button"
+          className={`${compact ? 'hidden' : 'hidden lg:flex'} w-44 shrink-0 items-center self-stretch px-2 text-left hover:text-surface-700 dark:hover:text-surface-300`}
           onClick={() => handleSort('file_modified_at')}
+          aria-label={sort.field === 'file_modified_at' ? `${t('files.modified')}, ${sort.direction}` : t('files.modified')}
         >
           {t('files.modified')} <SortIcon field="file_modified_at" />
-        </div>
-        <div className="w-20 shrink-0 px-2 hidden xl:block">
+        </button>
+        <div className={`${compact ? 'hidden' : 'hidden xl:block'} w-20 shrink-0 px-2`}>
           {t('files.pages')}
         </div>
         <div className="w-24 shrink-0 px-2">
@@ -147,7 +153,8 @@ export function FileTable() {
           const isSelected = selectedFileId === file.id;
 
           return (
-            <div
+            <button
+              type="button"
               key={virtualRow.key}
               data-index={virtualRow.index}
               ref={rowVirtualizer.measureElement}
@@ -159,13 +166,14 @@ export function FileTable() {
                 height: `${virtualRow.size}px`,
                 transform: `translateY(${virtualRow.start}px)`,
               }}
-              className={`flex items-center border-b border-surface-100 dark:border-surface-900 cursor-pointer transition-colors
+              className={`flex items-center border-b border-surface-100 text-left dark:border-surface-900 cursor-pointer transition-colors focus-visible:z-[1]
                 ${isSelected
                   ? 'bg-accent-50 dark:bg-accent-500/10 border-accent-100 dark:border-accent-500/20'
                   : 'hover:bg-surface-50 dark:hover:bg-surface-900'
-                }`}
+              }`}
               onClick={() => selectFile(file.id)}
-              onDoubleClick={() => setView('search')}
+              aria-pressed={isSelected}
+              aria-label={`${file.file_name}, ${t(fileStatusKeys[file.index_status])}`}
             >
               <div className="w-8 shrink-0 flex justify-center">
                 {statusIcon(file.index_status)}
@@ -180,13 +188,13 @@ export function FileTable() {
                   </span>
                 )}
               </div>
-              <div className="w-28 shrink-0 px-2 text-sm text-surface-500 hidden md:block tabular-nums">
+              <div className={`${compact ? 'hidden' : 'hidden md:block'} w-28 shrink-0 px-2 text-sm text-surface-500 tabular-nums`}>
                 {formatFileSize(file.file_size_bytes)}
               </div>
-              <div className="w-44 shrink-0 px-2 text-sm text-surface-500 hidden lg:block">
+              <div className={`${compact ? 'hidden' : 'hidden lg:block'} w-44 shrink-0 px-2 text-sm text-surface-500`}>
                 {formatDateTime(file.file_modified_at, locale)}
               </div>
-              <div className="w-20 shrink-0 px-2 text-sm text-surface-500 hidden xl:block tabular-nums">
+              <div className={`${compact ? 'hidden' : 'hidden xl:block'} w-20 shrink-0 px-2 text-sm text-surface-500 tabular-nums`}>
                 {file.page_count ?? '—'}
               </div>
               <div className="w-24 shrink-0 px-2">
@@ -199,7 +207,7 @@ export function FileTable() {
                   {t(fileStatusKeys[file.index_status])}
                 </span>
               </div>
-            </div>
+            </button>
           );
         })}
         </div>
@@ -211,6 +219,7 @@ export function FileTable() {
           </span>
           <div className="flex items-center gap-2">
             <button
+              type="button"
               onClick={() => handlePageJump(page - 1)}
               disabled={page <= 0}
               className="btn-ghost px-2 py-1 rounded text-xs disabled:opacity-30"
@@ -221,6 +230,7 @@ export function FileTable() {
               {t('files.pageOf', { page: page + 1, total: totalPages })}
             </span>
             <button
+              type="button"
               onClick={() => handlePageJump(page + 1)}
               disabled={page >= totalPages - 1}
               className="btn-ghost px-2 py-1 rounded text-xs disabled:opacity-30"

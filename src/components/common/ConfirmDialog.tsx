@@ -1,4 +1,6 @@
+import { useId } from 'react';
 import { useI18n } from '../../lib/i18n';
+import { useDialogFocus } from '../../hooks/useDialogFocus';
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -16,18 +18,35 @@ export function ConfirmDialog({
   onConfirm, onCancel, danger = false,
 }: ConfirmDialogProps) {
   const { t } = useI18n();
+  const titleId = useId();
+  const messageId = useId();
+  const dialogRef = useDialogFocus(open, onCancel);
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-      <div className="card w-96 p-6 shadow-lg" onClick={(e) => e.stopPropagation()}>
-        <h2 className="text-lg font-semibold text-surface-900 dark:text-surface-100 mb-2">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center overscroll-contain bg-black/40 backdrop-blur-sm"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onCancel();
+      }}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={messageId}
+        tabIndex={-1}
+        className="card w-96 max-w-[calc(100vw-2rem)] p-6 shadow-lg"
+      >
+        <h2 id={titleId} className="mb-2 text-lg font-semibold text-surface-900 text-balance dark:text-surface-100">
           {title}
         </h2>
-        <p className="text-sm text-surface-500 mb-6">{message}</p>
+        <p id={messageId} className="mb-6 text-sm text-surface-500 text-pretty">{message}</p>
         <div className="flex justify-end gap-3">
-          <button onClick={onCancel} className="btn-secondary">{cancelLabel || t('common.cancel')}</button>
+          <button type="button" onClick={onCancel} className="btn-secondary" data-dialog-initial-focus>{cancelLabel || t('common.cancel')}</button>
           <button
+            type="button"
             onClick={onConfirm}
             className={danger ? 'btn bg-red-500 text-white hover:bg-red-600' : 'btn-primary'}
           >

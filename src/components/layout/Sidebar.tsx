@@ -4,7 +4,6 @@ import {
 } from 'lucide-react';
 import { useUIStore } from '../../stores/uiStore';
 import { useFolderStore } from '../../stores/folderStore';
-import { useSearchStore } from '../../stores/searchStore';
 import { useI18n } from '../../lib/i18n';
 
 export function Sidebar() {
@@ -16,8 +15,6 @@ export function Sidebar() {
   const selectedFolderId = useFolderStore((s) => s.selectedFolderId);
   const selectFolder = useFolderStore((s) => s.selectFolder);
   const indexProgress = useFolderStore((s) => s.indexProgress);
-  const toggleSearch = useSearchStore((s) => s.toggleOpen);
-
   return (
     <aside className="w-64 flex flex-col border-r border-surface-200 bg-white dark:bg-surface-950 dark:border-surface-800 select-none">
       {/* Header */}
@@ -41,8 +38,9 @@ export function Sidebar() {
       {/* Navigation */}
       <nav className="flex flex-col gap-1 px-3 py-2">
         <button
-          onClick={() => { setView('files'); toggleSearch(); }}
+          onClick={() => setView('files')}
           className={`sidebar-item ${activeView === 'files' ? 'active' : ''}`}
+          aria-current={activeView === 'files' ? 'page' : undefined}
         >
           <FolderOpen size={18} />
           {t('nav.files')}
@@ -50,6 +48,7 @@ export function Sidebar() {
         <button
           onClick={() => setView('search')}
           className={`sidebar-item ${activeView === 'search' ? 'active' : ''}`}
+          aria-current={activeView === 'search' ? 'page' : undefined}
         >
           <Search size={18} />
           {t('nav.search')}
@@ -57,6 +56,7 @@ export function Sidebar() {
         <button
           onClick={() => setView('ocr')}
           className={`sidebar-item ${activeView === 'ocr' ? 'active' : ''}`}
+          aria-current={activeView === 'ocr' ? 'page' : undefined}
         >
           <ScanText size={18} />
           {t('nav.ocr')}
@@ -64,6 +64,7 @@ export function Sidebar() {
         <button
           onClick={() => setView('folders')}
           className={`sidebar-item ${activeView === 'folders' ? 'active' : ''}`}
+          aria-current={activeView === 'folders' ? 'page' : undefined}
         >
           <HardDrive size={18} />
           {t('nav.folders')}
@@ -71,6 +72,7 @@ export function Sidebar() {
         <button
           onClick={() => setView('settings')}
           className={`sidebar-item ${activeView === 'settings' ? 'active' : ''}`}
+          aria-current={activeView === 'settings' ? 'page' : undefined}
         >
           <Settings size={18} />
           {t('nav.settings')}
@@ -103,6 +105,8 @@ export function Sidebar() {
               selectFolder(folder.id);
               setView('files');
             }}
+            aria-pressed={selectedFolderId === folder.id}
+            title={folder.path}
             className={`w-full flex items-center gap-2 px-3 py-2 rounded-xl text-sm transition-colors
               ${selectedFolderId === folder.id
                 ? 'bg-surface-200 dark:bg-surface-800 text-surface-900 dark:text-surface-100'

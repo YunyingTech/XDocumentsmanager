@@ -37,7 +37,10 @@ export interface OcrTask {
 }
 
 const WINDOWS_OCR_CONCURRENCY = 2;
+const INCREMENTAL_OCR_BATCH_SIZE = 100;
+const OCR_TASK_HISTORY_LIMIT = 2_000;
 const pendingWindowsProgress = new Map<string, WindowsOcrProgress>();
+const activeFolderOcr = new Set<number>();
 let windowsProgressFrame: number | null = null;
 
 interface OcrStore {
@@ -179,7 +182,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
     set({ loadingCandidates: true });
     try {
       const { page, pageSize } = get();
-      const result: PaginatedResult<FileInfo> = await listOcrCandidates(folderId, page, pageSize);
+      const result: PaginatedResult<FileInfo> = await listOcrCandidates(folderId, page, pageSize, true);
       set({
         candidates: result.items,
         totalCandidates: result.total,
@@ -336,13 +339,48 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
   },
 
   queueFolderOcr: async (folderId) => {
-    await get().loadSettings();
-    const files = await listOcrCandidateRefs(folderId);
-    while (get().isSubmitting) {
-      await new Promise((resolve) => window.setTimeout(resolve, 250));
+    if (activeFolderOcr.has(folderId)) return 0;
+    activeFolderOcr.add(folderId);
+    try {
+      await get().loadSettings();
+      let afterId = 0;
+      let queued = 0;
+      while (true) {
+        const files = await listOcrCandidateRefs(folderId, afterId, INCREMENTAL_OCR_BATCH_SIZE);
+        if (files.length === 0) break;
+        while (get().isSubmitting) {
+          await new Promise((resolve) => window.setTimeout(resolve, 250));
+        }
+        await get().submitFileBatch(files);
+        queued += files.length;
+        afterId = files[files.length - 1].id;
+
+        if (get().engine === 'mineru') {
+          const batchIds = new Set(files.map((file) => file.id));
+          while (get().tasks.some(
+            (task) => batchIds.has(task.fileId) && ['submitting', 'queued', 'running'].includes(task.status)
+          )) {
+            await get().pollAllTasks();
+            await new Promise((resolve) => window.setTimeout(resolve, 1_000));
+          }
+        }
+
+        set((state) => {
+          if (state.tasks.length <= OCR_TASK_HISTORY_LIMIT) return state;
+          const active = state.tasks.filter((task) => ['submitting', 'queued', 'running'].includes(task.status));
+          const historyCapacity = Math.max(0, OCR_TASK_HISTORY_LIMIT - active.length);
+          const terminal = state.tasks.filter(
+            (task) => !['submitting', 'queued', 'running'].includes(task.status)
+          );
+          const history = historyCapacity > 0 ? terminal.slice(-historyCapacity) : [];
+          return { tasks: [...history, ...active] };
+        });
+        if (files.length < INCREMENTAL_OCR_BATCH_SIZE) break;
+      }
+      return queued;
+    } finally {
+      activeFolderOcr.delete(folderId);
     }
-    await get().submitFileBatch(files);
-    return files.length;
   },
 
   // ── Synchronous parse for single file ──
