@@ -23,10 +23,10 @@ jobs:
             args: --bundles nsis
             artifact: windows-x64
             bundlePath: src-tauri/target/release/bundle/nsis/*.exe
-          - name: macOS x64
-            runner: macos-14
+          - name: macOS Apple Silicon
+            runner: macos-15
             args: --bundles dmg
-            artifact: macos-x64
+            artifact: macos-arm64
             bundlePath: src-tauri/target/release/bundle/dmg/*.dmg
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
@@ -90,7 +90,7 @@ jobs:
 
             Downloads:
             - Windows x64: NSIS setup executable
-            - macOS x64: DMG disk image
+            - macOS Apple Silicon (arm64): DMG disk image
             - SHA256SUMS.txt: SHA-256 checksums
 
             These builds are unsigned. Windows SmartScreen or macOS Privacy & Security may require approval on first launch.
