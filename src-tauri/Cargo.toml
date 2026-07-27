@@ -1,7 +1,7 @@
 [package]
 name = "xdocuments"
-version = "0.1.0"
-description = "60TB-scale PDF Document Manager for Windows"
+version = "0.1.1"
+description = "60TB-scale desktop PDF document manager"
 authors = ["you"]
 license = "MIT"
 repository = ""

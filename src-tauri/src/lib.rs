@@ -11,7 +11,7 @@ use db::Database;
 use search::SearchEngine;
 use commands::ocr_control::OcrTaskManager;
 use tauri::Manager;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -172,7 +172,7 @@ fn find_elasticsearch_distribution<R: tauri::Runtime>(app: &tauri::App<R>) -> Op
 }
 
 fn resolve_elasticsearch_distribution(path: PathBuf) -> Option<PathBuf> {
-    if path.join("bin").join("elasticsearch.bat").is_file() {
+    if is_elasticsearch_distribution(&path) {
         return Some(path);
     }
 
@@ -180,5 +180,15 @@ fn resolve_elasticsearch_distribution(path: PathBuf) -> Option<PathBuf> {
         .ok()?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .find(|candidate| candidate.join("bin").join("elasticsearch.bat").is_file())
+        .find(|candidate| is_elasticsearch_distribution(candidate))
+}
+
+fn is_elasticsearch_distribution(path: &Path) -> bool {
+    path.join("bin")
+        .join(if cfg!(windows) {
+            "elasticsearch.bat"
+        } else {
+            "elasticsearch"
+        })
+        .is_file()
 }

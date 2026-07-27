@@ -1,0 +1,100 @@
+name: Release desktop apps
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            runner: windows-latest
+            args: --bundles nsis
+            artifact: windows-x64
+            bundlePath: src-tauri/target/release/bundle/nsis/*.exe
+          - name: macOS x64
+            runner: macos-14
+            args: --bundles dmg
+            artifact: macos-x64
+            bundlePath: src-tauri/target/release/bundle/dmg/*.dmg
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build release asset
+        uses: tauri-apps/tauri-action@v0
+        with:
+          args: ${{ matrix.args }}
+
+      - name: Store release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.bundlePath }}
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: release-assets
+        run: sha256sum * > SHA256SUMS.txt
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: XDocuments ${{ github.ref_name }}
+          body: |
+            XDocuments desktop release.
+
+            Downloads:
+            - Windows x64: NSIS setup executable
+            - macOS x64: DMG disk image
+            - SHA256SUMS.txt: SHA-256 checksums
+
+            These builds are unsigned. Windows SmartScreen or macOS Privacy & Security may require approval on first launch.
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+          files: release-assets/*

@@ -16,7 +16,8 @@ __pycache__/
 *.local
 src-tauri/resources/elasticsearch/*
 !src-tauri/resources/elasticsearch/README.txt
-src-tauri/resources/elasticsearch-*-windows-x86_64.zip*
+src-tauri/resources/elasticsearch-*.zip*
+src-tauri/resources/elasticsearch-*.tar.gz*
 src-tauri/resources/elasticsearch.part*
 src-tauri/resources/.elasticsearch-extract/
 src-tauri/OCR_result/

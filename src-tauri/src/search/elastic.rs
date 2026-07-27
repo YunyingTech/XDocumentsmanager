@@ -86,7 +86,7 @@ impl ElasticRuntime {
         std::fs::create_dir_all(&config.data_dir).map_err(|e| e.to_string())?;
         std::fs::create_dir_all(&config.logs_dir).map_err(|e| e.to_string())?;
         let distribution_dir = resolve_distribution_dir(&config.distribution_dir)?;
-        let launcher = distribution_dir.join("bin").join("elasticsearch.bat");
+        let launcher = elasticsearch_launcher(&distribution_dir);
         let elastic_root = config
             .data_dir
             .parent()
@@ -579,13 +579,13 @@ fn create_kill_on_close_job(child: &Child) -> Result<isize, String> {
 }
 
 fn resolve_distribution_dir(path: &Path) -> Result<PathBuf, String> {
-    if path.join("bin").join("elasticsearch.bat").is_file() {
+    if is_elasticsearch_distribution(path) {
         return Ok(path.to_path_buf());
     }
     let entries = std::fs::read_dir(path).map_err(|e| e.to_string())?;
     for entry in entries.flatten() {
         let candidate = entry.path();
-        if candidate.join("bin").join("elasticsearch.bat").is_file() {
+        if is_elasticsearch_distribution(&candidate) {
             return Ok(candidate);
         }
     }
@@ -593,6 +593,18 @@ fn resolve_distribution_dir(path: &Path) -> Result<PathBuf, String> {
         "No Elasticsearch distribution found under {}",
         path.display()
     ))
+}
+
+fn is_elasticsearch_distribution(path: &Path) -> bool {
+    elasticsearch_launcher(path).is_file()
+}
+
+fn elasticsearch_launcher(path: &Path) -> PathBuf {
+    path.join("bin").join(if cfg!(windows) {
+        "elasticsearch.bat"
+    } else {
+        "elasticsearch"
+    })
 }
 
 fn prepare_runtime_config(

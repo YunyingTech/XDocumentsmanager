@@ -1,6 +1,6 @@
 # XDocuments Manager
 
-A Windows desktop PDF document manager designed to handle **60TB-scale** PDF collections across local drives and SMB network shares — **without uploading any files**.
+A Windows and macOS desktop PDF document manager designed to handle **60TB-scale** PDF collections across local drives and SMB network shares — **without uploading any files**.
 
 Files stay in place. The app indexes metadata and extracted text for browsing, searching, and viewing.
 
@@ -38,6 +38,7 @@ These choices keep memory proportional to directory depth and fixed batch sizes 
 - **Node.js** 20+ and npm
 - **Rust** (install from https://rustup.rs/)
 - **Visual Studio 2022 Build Tools** or **MinGW-w64** (required for Rust compilation on Windows)
+- **Xcode Command Line Tools** (required for Rust compilation on macOS)
 
 ### Installing Build Tools (Windows)
 
@@ -75,7 +76,8 @@ npm run tauri dev
 npm run tauri build
 ```
 
-The installer will be at `src-tauri/target/release/bundle/msi/`.
+Windows installers are written to `src-tauri/target/release/bundle/nsis/` or `msi/`.
+macOS disk images are written to `src-tauri/target/release/bundle/dmg/`.
 
 ## Project Structure
 
