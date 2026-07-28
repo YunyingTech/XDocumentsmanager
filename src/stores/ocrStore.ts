@@ -17,7 +17,7 @@ import {
   getSetting,
   setSetting,
 } from '../lib/tauri';
-import type { FileInfo, MinerUHealthInfo, OcrCandidateRef, OcrEngine, OcrTaskStatus, PaddleOcrStatus, PaginatedResult, WindowsOcrProgress, WindowsOcrStatus } from '../types';
+import type { FileInfo, MinerUHealthInfo, OcrCandidateRef, OcrEngine, OcrTaskStatus, PaddleInstallProgress, PaddleOcrStatus, PaginatedResult, WindowsOcrProgress, WindowsOcrStatus } from '../types';
 import { translate } from '../lib/i18n';
 import { useUIStore } from './uiStore';
 
@@ -49,6 +49,8 @@ interface OcrStore {
   windowsStatus: WindowsOcrStatus | null;
   paddleStatus: PaddleOcrStatus | null;
   healthChecking: boolean;
+  paddleInstallProgress: PaddleInstallProgress | null;
+  isInstallingPaddle: boolean;
 
   // Files
   candidates: FileInfo[];
@@ -74,7 +76,6 @@ interface OcrStore {
   outputDir: string;
   engine: OcrEngine;
   windowsLanguage: string;
-  paddlePythonPath: string;
   paddleLanguage: string;
   paddleModel: string;
 
@@ -99,13 +100,13 @@ interface OcrStore {
   saveOutputDir: (dir: string) => Promise<void>;
   saveEngine: (engine: OcrEngine) => Promise<void>;
   saveWindowsLanguage: (language: string) => Promise<void>;
-  savePaddlePythonPath: (path: string) => Promise<void>;
   savePaddleLanguage: (language: string) => Promise<void>;
   savePaddleModel: (model: string) => Promise<void>;
   installPaddle: () => Promise<void>;
   cancelTask: (taskId: string) => Promise<void>;
   cancelAllTasks: () => Promise<void>;
   updateWindowsProgress: (progress: WindowsOcrProgress) => void;
+  updatePaddleInstallProgress: (progress: PaddleInstallProgress) => void;
   clearTasks: () => void;
 }
 
@@ -114,6 +115,8 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
   windowsStatus: null,
   paddleStatus: null,
   healthChecking: false,
+  paddleInstallProgress: null,
+  isInstallingPaddle: false,
   candidates: [],
   loadingCandidates: false,
   page: 0,
@@ -129,7 +132,6 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
   outputDir: '',
   engine: 'mineru',
   windowsLanguage: 'auto',
-  paddlePythonPath: 'python',
   paddleLanguage: 'ch',
   paddleModel: 'PP-OCRv5_mobile',
 
@@ -154,7 +156,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
         set({ paddleStatus, healthChecking: false });
       } catch (error) {
         set({
-          paddleStatus: { available: false, python_path: get().paddlePythonPath, paddle_version: null, paddleocr_version: null, error: String(error) },
+          paddleStatus: failedPaddleStatus(error),
           healthChecking: false,
         });
       }
@@ -524,12 +526,11 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
   // ── Settings ──
   loadSettings: async () => {
     try {
-      const [apiUrl, outputDir, engine, windowsLanguage, paddlePythonPath, paddleLanguage, paddleModel] = await Promise.all([
+      const [apiUrl, outputDir, engine, windowsLanguage, paddleLanguage, paddleModel] = await Promise.all([
         getSetting('ocr_api_url'),
         getSetting('ocr_output_dir'),
         getSetting('ocr_engine'),
         getSetting('windows_ocr_language'),
-        getSetting('paddle_python_path'),
         getSetting('paddle_ocr_language'),
         getSetting('paddle_ocr_model'),
       ]);
@@ -538,7 +539,6 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
         outputDir: outputDir || '',
         engine: engine === 'windows' || engine === 'paddle' ? engine : 'mineru',
         windowsLanguage: windowsLanguage || 'auto',
-        paddlePythonPath: paddlePythonPath || 'python',
         paddleLanguage: paddleLanguage || 'ch',
         paddleModel: paddleModel || 'PP-OCRv5_mobile',
       });
@@ -568,11 +568,6 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
     set({ windowsLanguage });
   },
 
-  savePaddlePythonPath: async (paddlePythonPath: string) => {
-    await setSetting('paddle_python_path', paddlePythonPath);
-    set({ paddlePythonPath, paddleStatus: null });
-  },
-
   savePaddleLanguage: async (paddleLanguage: string) => {
     await setSetting('paddle_ocr_language', paddleLanguage);
     set({ paddleLanguage });
@@ -584,14 +579,19 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
   },
 
   installPaddle: async () => {
-    set({ healthChecking: true });
+    if (get().isInstallingPaddle) return;
+    set({
+      isInstallingPaddle: true,
+      paddleInstallProgress: { stage: 'preparing', progress: 0, message: '' },
+    });
     try {
       const paddleStatus = await installPaddleOcr();
-      set({ paddleStatus, paddlePythonPath: paddleStatus.python_path, healthChecking: false });
+      set({ paddleStatus, isInstallingPaddle: false });
     } catch (error) {
       set({
-        paddleStatus: { available: false, python_path: get().paddlePythonPath, paddle_version: null, paddleocr_version: null, error: String(error) },
-        healthChecking: false,
+        paddleStatus: failedPaddleStatus(error),
+        paddleInstallProgress: { stage: 'failed', progress: 100, message: String(error) },
+        isInstallingPaddle: false,
       });
     }
   },
@@ -654,6 +654,13 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
     });
   },
 
+  updatePaddleInstallProgress: (progress: PaddleInstallProgress) => {
+    set({
+      paddleInstallProgress: progress,
+      isInstallingPaddle: progress.stage !== 'completed' && progress.stage !== 'failed',
+    });
+  },
+
   clearTasks: () => {
     get().stopPolling();
     pendingWindowsProgress.clear();
@@ -685,4 +692,18 @@ function mapApiStatus(apiStatus: string): OcrTask['status'] {
     default:
       return 'queued';
   }
+}
+
+function failedPaddleStatus(error: unknown): PaddleOcrStatus {
+  return {
+    available: false,
+    python_path: '',
+    managed: true,
+    install_supported: true,
+    install_required: true,
+    runtime_version: null,
+    paddle_version: null,
+    paddleocr_version: null,
+    error: String(error),
+  };
 }

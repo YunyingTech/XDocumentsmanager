@@ -17,6 +17,15 @@ import { useFolderStore } from '../../stores/folderStore';
 import { formatFileSize } from '../../lib/format';
 import { useI18n } from '../../lib/i18n';
 
+const paddleInstallStageLabels = {
+  preparing: 'ocr.paddleStagePreparing',
+  extracting: 'ocr.paddleStageExtracting',
+  installing: 'ocr.paddleStageInstalling',
+  verifying: 'ocr.paddleStageVerifying',
+  completed: 'ocr.paddleStageCompleted',
+  failed: 'ocr.paddleStageFailed',
+} as const;
+
 export function OcrPage() {
   const { t } = useI18n();
   const engine = useOcrStore((state) => state.engine);
@@ -217,24 +226,22 @@ function SettingsCard() {
   const windowsStatus = useOcrStore((s) => s.windowsStatus);
   const windowsLanguage = useOcrStore((s) => s.windowsLanguage);
   const paddleStatus = useOcrStore((s) => s.paddleStatus);
-  const paddlePythonPath = useOcrStore((s) => s.paddlePythonPath);
+  const paddleInstallProgress = useOcrStore((s) => s.paddleInstallProgress);
+  const isInstallingPaddle = useOcrStore((s) => s.isInstallingPaddle);
   const paddleLanguage = useOcrStore((s) => s.paddleLanguage);
   const paddleModel = useOcrStore((s) => s.paddleModel);
   const saveEngine = useOcrStore((s) => s.saveEngine);
   const saveWindowsLanguage = useOcrStore((s) => s.saveWindowsLanguage);
-  const savePaddlePythonPath = useOcrStore((s) => s.savePaddlePythonPath);
   const savePaddleLanguage = useOcrStore((s) => s.savePaddleLanguage);
   const savePaddleModel = useOcrStore((s) => s.savePaddleModel);
   const installPaddle = useOcrStore((s) => s.installPaddle);
   const healthChecking = useOcrStore((s) => s.healthChecking);
   const [apiUrlDraft, setApiUrlDraft] = useState(apiUrl);
   const [outputDirDraft, setOutputDirDraft] = useState(outputDir);
-  const [paddlePythonDraft, setPaddlePythonDraft] = useState(paddlePythonPath);
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
 
   useEffect(() => setApiUrlDraft(apiUrl), [apiUrl]);
   useEffect(() => setOutputDirDraft(outputDir), [outputDir]);
-  useEffect(() => setPaddlePythonDraft(paddlePythonPath), [paddlePythonPath]);
 
   const saveDraft = async (save: (value: string) => Promise<void>, value: string) => {
     setSaveState('saving');
@@ -328,21 +335,6 @@ function SettingsCard() {
           </select>
           {windowsStatus?.error && <p className="mt-1 text-xs text-red-500">{windowsStatus.error}</p>}
         </div> : <div className="space-y-3">
-          <div>
-            <label htmlFor="ocr-paddle-python" className="block text-xs text-surface-500 mb-1">{t('ocr.paddlePython')}</label>
-            <input
-              id="ocr-paddle-python"
-              name="paddle_python_path"
-              autoComplete="off"
-              spellCheck={false}
-              type="text"
-              className="input text-sm"
-              value={paddlePythonDraft}
-              onChange={(event) => setPaddlePythonDraft(event.target.value)}
-              onBlur={() => { if (paddlePythonDraft !== paddlePythonPath) void saveDraft(savePaddlePythonPath, paddlePythonDraft); }}
-              placeholder="python…"
-            />
-          </div>
           <div className="grid grid-cols-2 gap-2">
             <div>
               <label htmlFor="ocr-paddle-language" className="block text-xs text-surface-500 mb-1">{t('ocr.paddleLanguage')}</label>
@@ -361,17 +353,31 @@ function SettingsCard() {
               </select>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <button type="button" className="btn-secondary flex h-8 items-center gap-1.5 px-2.5 text-xs disabled:opacity-50" onClick={() => void installPaddle()} disabled={healthChecking}>
-              {healthChecking ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+          <div className="flex min-w-0 items-center gap-2">
+            <button type="button" className="btn-secondary flex h-8 shrink-0 items-center gap-1.5 px-2.5 text-xs disabled:opacity-50" onClick={() => void installPaddle()} disabled={healthChecking || isInstallingPaddle || paddleStatus?.install_supported === false}>
+              {isInstallingPaddle ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
               {t('ocr.installPaddle')}
             </button>
-            {paddleStatus && (
+            {!isInstallingPaddle && paddleStatus && (
               <span className={`min-w-0 truncate text-xs ${paddleStatus.available ? 'text-green-600' : 'text-red-500'}`} title={paddleStatus.error ?? undefined}>
                 {paddleStatus.available ? `PaddleOCR ${paddleStatus.paddleocr_version ?? ''}` : paddleStatus.error}
               </span>
             )}
           </div>
+          {isInstallingPaddle && paddleInstallProgress && (
+            <div className="space-y-1.5" role="status" aria-live="polite">
+              <div className="flex items-center justify-between gap-3 text-xs text-surface-500">
+                <span>{t(paddleInstallStageLabels[paddleInstallProgress.stage])}</span>
+                <span className="font-mono tabular-nums">{paddleInstallProgress.progress}%</span>
+              </div>
+              <div className="h-1.5 overflow-hidden rounded-sm bg-surface-200 dark:bg-surface-800">
+                <div className="h-full bg-accent-500 transition-[width] duration-300" style={{ width: `${paddleInstallProgress.progress}%` }} />
+              </div>
+              {paddleInstallProgress.message && (
+                <p className="truncate text-[11px] text-surface-400" title={paddleInstallProgress.message}>{paddleInstallProgress.message}</p>
+              )}
+            </div>
+          )}
         </div>}
         <div>
           <label htmlFor="ocr-output-directory" className="block text-xs text-surface-500 mb-1">

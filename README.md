@@ -9,7 +9,7 @@ Files stay in place. Local indexing, Windows OCR, and PaddleOCR do not upload do
 - 📁 **Index local folders & SMB shares** — Add UNC paths like `\\server\share\pdfs` or local paths
 - 🔍 **Dual-backend search** — Bundled Elasticsearch with an embedded Tantivy fallback
 - ✨ **Optional AI query expansion** — OpenAI-compatible models extract selectable search terms without receiving PDF contents
-- 🧾 **Three OCR engines** — Local Windows OCR, local PaddleOCR, or an optional MinerU service
+- 🧾 **Three OCR engines** — Local Windows OCR, app-managed PaddleOCR, or an optional MinerU service
 - 📄 **Built-in PDF viewer** — PDF.js page rendering in file-browser and search split views
 - 📊 **Virtualized file table** — TanStack Virtual renders only visible rows for large collections
 - 🌓 **Dark mode** — System-aware cozy gray theme
@@ -72,6 +72,8 @@ npm install
 # Build and run the app
 npm run tauri dev
 ```
+
+PaddleOCR does not require a system Python installation. Desktop packages include a verified private Python bootstrap runtime; the app installs pinned PaddleOCR components into its application-data directory on first use. The first setup and initial model download require network access.
 
 ## Build for Production
 

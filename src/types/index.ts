@@ -222,9 +222,19 @@ export interface WindowsOcrStatus {
 export interface PaddleOcrStatus {
   available: boolean;
   python_path: string;
+  managed: boolean;
+  install_supported: boolean;
+  install_required: boolean;
+  runtime_version: string | null;
   paddle_version: string | null;
   paddleocr_version: string | null;
   error: string | null;
+}
+
+export interface PaddleInstallProgress {
+  stage: 'preparing' | 'extracting' | 'installing' | 'verifying' | 'completed' | 'failed';
+  progress: number;
+  message: string;
 }
 
 export interface WindowsOcrProgress {

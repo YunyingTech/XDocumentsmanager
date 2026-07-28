@@ -32,6 +32,11 @@ pub fn run_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error
 
     // Insert default settings
     conn.execute_batch(INSERT_DEFAULT_SETTINGS)?;
+    conn.execute(
+        "UPDATE settings SET value = '', updated_at = datetime('now')
+         WHERE key = 'paddle_python_path' AND value = 'python'",
+        [],
+    )?;
 
     // Clean up unused tables from previous versions
     conn.execute_batch("DROP TABLE IF EXISTS file_tags;")?;
@@ -235,7 +240,7 @@ INSERT OR IGNORE INTO settings (key, value) VALUES
     ('ocr_languages', 'eng'),
     ('ocr_engine', 'mineru'),
     ('windows_ocr_language', 'auto'),
-    ('paddle_python_path', 'python'),
+    ('paddle_python_path', ''),
     ('paddle_ocr_language', 'ch'),
     ('paddle_ocr_model', 'PP-OCRv5_mobile'),
     ('ocr_api_url', 'http://127.0.0.1:8000'),

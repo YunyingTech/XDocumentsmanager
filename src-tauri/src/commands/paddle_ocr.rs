@@ -13,11 +13,16 @@ use crate::commands::ocr::{
 };
 use crate::commands::ocr_control::OcrTaskManager;
 use crate::db::Database;
+use crate::paddle_runtime::{self, RuntimePaths};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaddleOcrStatus {
     pub available: bool,
     pub python_path: String,
+    pub managed: bool,
+    pub install_supported: bool,
+    pub install_required: bool,
+    pub runtime_version: Option<String>,
     pub paddle_version: Option<String>,
     pub paddleocr_version: Option<String>,
     pub error: Option<String>,
@@ -38,10 +43,19 @@ pub async fn get_paddle_ocr_status(
     app: AppHandle,
     db: State<'_, Database>,
 ) -> Result<PaddleOcrStatus, String> {
-    let python_path = setting(&db, "paddle_python_path", "python");
+    let paths = RuntimePaths::for_app(&app)?;
+    let (python_path, managed) = match resolve_python(&paths, &db) {
+        Some(runtime) => runtime,
+        None => {
+            return Ok(unavailable_status(
+                &paths.python,
+                true,
+                "PaddleOCR is not installed. Install the managed runtime to continue.",
+            ));
+        }
+    };
     let script = worker_script(&app)?;
-    let python_for_worker = python_path.clone();
-    tokio::task::spawn_blocking(move || check_environment(&python_for_worker, &script))
+    tokio::task::spawn_blocking(move || check_environment(&python_path, &script, &paths, managed))
         .await
         .map_err(|error| format!("PaddleOCR status task failed: {error}"))?
 }
@@ -51,50 +65,21 @@ pub async fn install_paddle_ocr(
     app: AppHandle,
     db: State<'_, Database>,
 ) -> Result<PaddleOcrStatus, String> {
-    let base_python = setting(&db, "paddle_python_path", "python");
     let requirements = requirements_path(&app)?;
-    let environment = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| error.to_string())?
-        .join("paddleocr-venv");
-    let environment_python = environment.join("Scripts").join("python.exe");
-    let install_python = environment_python.clone();
-    let base_for_worker = base_python.clone();
-    log::info!(
-        "PaddleOCR environment installation started: base_python='{}', environment='{}'",
-        base_python,
-        environment.display()
-    );
-    tokio::task::spawn_blocking(move || -> Result<(), String> {
-        if !install_python.is_file() {
-            let status = hidden_command(&base_for_worker)
-                .args(["-m", "venv"])
-                .arg(&environment)
-                .status()
-                .map_err(|error| format!("Cannot create PaddleOCR environment: {error}"))?;
-            if !status.success() {
-                return Err(format!("Python venv exited with {status}"));
-            }
-        }
-        let output = hidden_command(&install_python)
-            .args(["-m", "pip", "install", "--upgrade", "-r"])
-            .arg(&requirements)
-            .output()
-            .map_err(|error| format!("Cannot install PaddleOCR dependencies: {error}"))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("PaddleOCR installation failed: {}", tail(&stderr, 4_000)));
-        }
-        Ok(())
+    let constraints = constraints_path(&app)?;
+    let script = worker_script(&app)?;
+    let app_for_install = app.clone();
+    log::info!("PaddleOCR managed runtime installation started");
+    let status = tokio::task::spawn_blocking(move || -> Result<PaddleOcrStatus, String> {
+        let paths =
+            paddle_runtime::install_managed_runtime(&app_for_install, &requirements, &constraints)?;
+        check_environment(&paths.python, &script, &paths, true)
     })
     .await
     .map_err(|error| format!("PaddleOCR installer task failed: {error}"))??;
-
-    let environment_python = environment_python.to_string_lossy().to_string();
-    set_setting(&db, "paddle_python_path", &environment_python)?;
-    log::info!("PaddleOCR environment installation completed");
-    check_environment(&environment_python, &worker_script(&app)?)
+    set_setting(&db, "paddle_python_path", "")?;
+    log::info!("PaddleOCR managed runtime installation completed");
+    Ok(status)
 }
 
 #[tauri::command]
@@ -107,6 +92,10 @@ pub async fn run_paddle_ocr(
     db: State<'_, Database>,
     tasks: State<'_, OcrTaskManager>,
 ) -> Result<String, String> {
+    let runtime_paths = RuntimePaths::for_app(&app)?;
+    let (python_path, _) = resolve_python(&runtime_paths, &db).ok_or_else(|| {
+        "PaddleOCR is not installed. Install the managed runtime before starting OCR.".to_string()
+    })?;
     let registration = tasks.register(&task_id)?;
     let cancellation = registration.cancellation_flag();
     let (file_path, file_name) = get_file_abs_path(&db, file_id)?;
@@ -118,7 +107,6 @@ pub async fn run_paddle_ocr(
         .map(|value| value.to_string_lossy().to_string())
         .unwrap_or_else(|| format!("file_{file_id}"));
     let output_path = Path::new(&output_dir).join(format!("{file_stem}_{suffix}_paddle.md"));
-    let python_path = setting(&db, "paddle_python_path", "python");
     let script = worker_script(&app)?;
     let language = language.unwrap_or_else(|| "ch".to_string());
     let model = model.unwrap_or_else(|| "PP-OCRv5_mobile".to_string());
@@ -140,6 +128,7 @@ pub async fn run_paddle_ocr(
     let worker_result = tokio::task::spawn_blocking(move || {
         run_worker(
             &python_path,
+            &runtime_paths,
             &script,
             &file_path,
             &output_for_worker,
@@ -181,7 +170,8 @@ pub async fn run_paddle_ocr(
 }
 
 fn run_worker(
-    python: &str,
+    python: &Path,
+    runtime_paths: &RuntimePaths,
     script: &Path,
     input: &str,
     output: &Path,
@@ -193,7 +183,9 @@ fn run_worker(
     app: &AppHandle,
     cancellation: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), String> {
-    let mut child = hidden_command(python)
+    let mut command = hidden_command(python);
+    paddle_runtime::configure_python_command(&mut command, runtime_paths);
+    let mut child = command
         .arg(script)
         .args(["--input", input, "--language", language, "--model", model])
         .arg("--output")
@@ -201,9 +193,20 @@ fn run_worker(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| format!("Cannot start PaddleOCR worker with '{python}': {error}"))?;
-    let stdout = child.stdout.take().ok_or_else(|| "PaddleOCR stdout unavailable".to_string())?;
-    let stderr = child.stderr.take().ok_or_else(|| "PaddleOCR stderr unavailable".to_string())?;
+        .map_err(|error| {
+            format!(
+                "Cannot start PaddleOCR worker with '{}': {error}",
+                python.display()
+            )
+        })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "PaddleOCR stdout unavailable".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "PaddleOCR stderr unavailable".to_string())?;
     let (sender, receiver) = mpsc::channel();
     let stdout_thread = std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
@@ -241,7 +244,10 @@ fn run_worker(
     if !status.success() {
         let stderr = stderr_text.lock().unwrap();
         return Err(worker_error.unwrap_or_else(|| {
-            format!("PaddleOCR worker exited with {status}: {}", tail(&stderr, 4_000))
+            format!(
+                "PaddleOCR worker exited with {status}: {}",
+                tail(&stderr, 4_000)
+            )
         }));
     }
     Ok(())
@@ -290,12 +296,24 @@ fn handle_worker_line(
     );
 }
 
-fn check_environment(python: &str, script: &Path) -> Result<PaddleOcrStatus, String> {
-    let output = hidden_command(python)
+fn check_environment(
+    python: &Path,
+    script: &Path,
+    runtime_paths: &RuntimePaths,
+    managed: bool,
+) -> Result<PaddleOcrStatus, String> {
+    let mut command = hidden_command(python);
+    paddle_runtime::configure_python_command(&mut command, runtime_paths);
+    let output = command
         .arg(script)
         .arg("--check")
         .output()
-        .map_err(|error| format!("Cannot start Python interpreter '{python}': {error}"))?;
+        .map_err(|error| {
+            format!(
+                "Cannot start PaddleOCR runtime '{}': {error}",
+                python.display()
+            )
+        })?;
     let value = String::from_utf8_lossy(&output.stdout)
         .lines()
         .rev()
@@ -308,7 +326,11 @@ fn check_environment(python: &str, script: &Path) -> Result<PaddleOcrStatus, Str
             .unwrap_or(false);
     Ok(PaddleOcrStatus {
         available,
-        python_path: python.to_string(),
+        python_path: python.to_string_lossy().to_string(),
+        managed,
+        install_supported: paddle_runtime::install_supported(),
+        install_required: !available,
+        runtime_version: managed.then(|| paddle_runtime::RUNTIME_VERSION.to_string()),
         paddle_version: value
             .as_ref()
             .and_then(|value| value.get("paddle_version"))
@@ -334,12 +356,49 @@ fn check_environment(python: &str, script: &Path) -> Result<PaddleOcrStatus, Str
     })
 }
 
+fn resolve_python(paths: &RuntimePaths, db: &Database) -> Option<(PathBuf, bool)> {
+    if paths.is_ready() {
+        return Some((paths.python.clone(), true));
+    }
+    let configured = setting(db, "paddle_python_path", "");
+    let configured = configured.trim();
+    if !configured.is_empty() && !configured.eq_ignore_ascii_case("python") {
+        let path = PathBuf::from(configured);
+        if path.is_file() {
+            return Some((path, false));
+        }
+    }
+    None
+}
+
+fn unavailable_status(path: &Path, managed: bool, error: &str) -> PaddleOcrStatus {
+    PaddleOcrStatus {
+        available: false,
+        python_path: path.to_string_lossy().to_string(),
+        managed,
+        install_supported: paddle_runtime::install_supported(),
+        install_required: true,
+        runtime_version: managed.then(|| paddle_runtime::RUNTIME_VERSION.to_string()),
+        paddle_version: None,
+        paddleocr_version: None,
+        error: Some(if paddle_runtime::install_supported() {
+            error.to_string()
+        } else {
+            paddle_runtime::unsupported_message()
+        }),
+    }
+}
+
 fn worker_script(app: &AppHandle) -> Result<PathBuf, String> {
     resource_file(app, "paddle_ocr_worker.py")
 }
 
 fn requirements_path(app: &AppHandle) -> Result<PathBuf, String> {
     resource_file(app, "paddleocr-requirements.txt")
+}
+
+fn constraints_path(app: &AppHandle) -> Result<PathBuf, String> {
+    resource_file(app, "paddleocr-constraints.txt")
 }
 
 fn resource_file(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
@@ -349,7 +408,11 @@ fn resource_file(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
         candidates.push(resource_dir.join(name));
     }
     #[cfg(debug_assertions)]
-    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts").join(name));
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("scripts")
+            .join(name),
+    );
     candidates
         .into_iter()
         .find(|path| path.is_file())
@@ -358,8 +421,10 @@ fn resource_file(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
 
 fn setting(db: &Database, key: &str, default: &str) -> String {
     let conn = db.get_connection();
-    conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| row.get(0))
-        .unwrap_or_else(|_| default.to_string())
+    conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+        row.get(0)
+    })
+    .unwrap_or_else(|_| default.to_string())
 }
 
 fn set_setting(db: &Database, key: &str, value: &str) -> Result<(), String> {

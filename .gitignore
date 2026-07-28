@@ -20,6 +20,8 @@ src-tauri/resources/elasticsearch-*.zip*
 src-tauri/resources/elasticsearch-*.tar.gz*
 src-tauri/resources/elasticsearch.part*
 src-tauri/resources/.elasticsearch-extract/
+src-tauri/resources/paddle-runtime/*
+!src-tauri/resources/paddle-runtime/README.txt
 src-tauri/OCR_result/
 
 # Editor directories and files

@@ -2,6 +2,7 @@ mod commands;
 mod db;
 mod indexer;
 mod models;
+mod paddle_runtime;
 mod search;
 mod smb;
 mod utils;

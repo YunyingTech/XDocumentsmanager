@@ -7,13 +7,14 @@ import { useFolderStore } from './stores/folderStore';
 import { useUIStore } from './stores/uiStore';
 import { useSearchStore } from './stores/searchStore';
 import { useOcrStore } from './stores/ocrStore';
-import type { IndexProgress, SearchProgress, WindowsOcrProgress } from './types';
+import type { IndexProgress, PaddleInstallProgress, SearchProgress, WindowsOcrProgress } from './types';
 
 export default function App() {
   const loadFolders = useFolderStore((s) => s.loadFolders);
   const setIndexProgress = useFolderStore((s) => s.setIndexProgress);
   const updateSearchProgress = useSearchStore((s) => s.updateProgress);
   const updateWindowsOcrProgress = useOcrStore((s) => s.updateWindowsProgress);
+  const updatePaddleInstallProgress = useOcrStore((s) => s.updatePaddleInstallProgress);
   const queueFolderOcr = useOcrStore((s) => s.queueFolderOcr);
   const sidebarOpen = useUIStore((s) => s.sidebarOpen);
   const theme = useUIStore((s) => s.theme);
@@ -41,13 +42,17 @@ export default function App() {
     const unlistenOcr = listen<WindowsOcrProgress>('ocr:progress', (event) => {
       updateWindowsOcrProgress(event.payload);
     });
+    const unlistenPaddleInstall = listen<PaddleInstallProgress>('paddle-install:progress', (event) => {
+      updatePaddleInstallProgress(event.payload);
+    });
 
     return () => {
       unlisten.then((fn) => fn());
       unlistenSearch.then((fn) => fn());
       unlistenOcr.then((fn) => fn());
+      unlistenPaddleInstall.then((fn) => fn());
     };
-  }, [loadFolders, queueFolderOcr, setIndexProgress, updateSearchProgress, updateWindowsOcrProgress]);
+  }, [loadFolders, queueFolderOcr, setIndexProgress, updatePaddleInstallProgress, updateSearchProgress, updateWindowsOcrProgress]);
 
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)');

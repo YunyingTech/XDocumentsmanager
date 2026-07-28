@@ -1,10 +1,20 @@
 import { useState, useEffect, useCallback } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import { Wifi, Loader2, CheckCircle, XCircle, Save, Trash2, Monitor, Server, Boxes, Download } from 'lucide-react';
 import { getSetting, setSetting, checkOcrHealth, getWindowsOcrStatus, getPaddleOcrStatus, installPaddleOcr, vacuumDatabase, getOpenAiConfig, setOpenAiConfig, testOpenAiConnection, getSearchBackendStatus } from '../../lib/tauri';
 import { useUIStore } from '../../stores/uiStore';
-import type { MinerUHealthInfo, OcrEngine, PaddleOcrStatus, SearchBackendStatus, WindowsOcrStatus } from '../../types';
+import type { MinerUHealthInfo, OcrEngine, PaddleInstallProgress, PaddleOcrStatus, SearchBackendStatus, WindowsOcrStatus } from '../../types';
 import { useI18n } from '../../lib/i18n';
 import type { Language } from '../../stores/uiStore';
+
+const paddleInstallStageLabels = {
+  preparing: 'ocr.paddleStagePreparing',
+  extracting: 'ocr.paddleStageExtracting',
+  installing: 'ocr.paddleStageInstalling',
+  verifying: 'ocr.paddleStageVerifying',
+  completed: 'ocr.paddleStageCompleted',
+  failed: 'ocr.paddleStageFailed',
+} as const;
 
 export function SettingsPanel() {
   const { t } = useI18n();
@@ -15,10 +25,11 @@ export function SettingsPanel() {
   const [ocrEngine, setOcrEngine] = useState<OcrEngine>('mineru');
   const [windowsOcrLanguage, setWindowsOcrLanguage] = useState('auto');
   const [windowsOcrStatus, setWindowsOcrStatus] = useState<WindowsOcrStatus | null>(null);
-  const [paddlePythonPath, setPaddlePythonPath] = useState('python');
   const [paddleLanguage, setPaddleLanguage] = useState('ch');
   const [paddleModel, setPaddleModel] = useState('PP-OCRv5_mobile');
   const [paddleStatus, setPaddleStatus] = useState<PaddleOcrStatus | null>(null);
+  const [paddleInstallProgress, setPaddleInstallProgress] = useState<PaddleInstallProgress | null>(null);
+  const [paddleInstalling, setPaddleInstalling] = useState(false);
   const [ocrHealth, setOcrHealth] = useState<MinerUHealthInfo | null>(null);
   const [ocrChecking, setOcrChecking] = useState(false);
   const [openAiEndpoint, setOpenAiEndpoint] = useState('https://api.openai.com/v1');
@@ -42,7 +53,7 @@ export function SettingsPanel() {
     (async () => {
       const keys = [
         'max_file_size_mb', 'ocr_api_url', 'ocr_output_dir', 'ocr_engine', 'windows_ocr_language',
-        'paddle_python_path', 'paddle_ocr_language', 'paddle_ocr_model'
+        'paddle_ocr_language', 'paddle_ocr_model'
       ];
       for (const key of keys) {
         const val = await getSetting(key);
@@ -53,7 +64,6 @@ export function SettingsPanel() {
             case 'ocr_output_dir': setOcrOutputDir(val); break;
             case 'ocr_engine': setOcrEngine(val === 'windows' || val === 'paddle' ? val : 'mineru'); break;
             case 'windows_ocr_language': setWindowsOcrLanguage(val); break;
-            case 'paddle_python_path': setPaddlePythonPath(val); break;
             case 'paddle_ocr_language': setPaddleLanguage(val); break;
             case 'paddle_ocr_model': setPaddleModel(val); break;
           }
@@ -65,6 +75,14 @@ export function SettingsPanel() {
       setOpenAiKeyConfigured(openAi.api_key_configured);
       setSmartSearchEnabled(openAi.smart_search_enabled);
     })();
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen<PaddleInstallProgress>('paddle-install:progress', (event) => {
+      setPaddleInstallProgress(event.payload);
+      setPaddleInstalling(event.payload.stage !== 'completed' && event.payload.stage !== 'failed');
+    });
+    return () => { unlisten.then((stop) => stop()); };
   }, []);
 
   useEffect(() => {
@@ -103,13 +121,7 @@ export function SettingsPanel() {
       .then((status) => { if (active) setPaddleStatus(status); })
       .catch((error) => {
         if (active) {
-          setPaddleStatus({
-            available: false,
-            python_path: '',
-            paddle_version: null,
-            paddleocr_version: null,
-            error: String(error),
-          });
+          setPaddleStatus(failedPaddleStatus(error));
         }
       });
     return () => { active = false; };
@@ -143,13 +155,7 @@ export function SettingsPanel() {
       try {
         setPaddleStatus(await getPaddleOcrStatus());
       } catch (error) {
-        setPaddleStatus({
-          available: false,
-          python_path: paddlePythonPath,
-          paddle_version: null,
-          paddleocr_version: null,
-          error: String(error),
-        });
+        setPaddleStatus(failedPaddleStatus(error));
       }
       setOcrChecking(false);
       return;
@@ -170,21 +176,17 @@ export function SettingsPanel() {
   };
 
   const installPaddle = async () => {
-    setOcrChecking(true);
+    if (paddleInstalling) return;
+    setPaddleInstalling(true);
+    setPaddleInstallProgress({ stage: 'preparing', progress: 0, message: '' });
     try {
       const status = await installPaddleOcr();
       setPaddleStatus(status);
-      setPaddlePythonPath(status.python_path);
     } catch (error) {
-      setPaddleStatus({
-        available: false,
-        python_path: paddlePythonPath,
-        paddle_version: null,
-        paddleocr_version: null,
-        error: String(error),
-      });
+      setPaddleStatus(failedPaddleStatus(error));
+      setPaddleInstallProgress({ stage: 'failed', progress: 100, message: String(error) });
     } finally {
-      setOcrChecking(false);
+      setPaddleInstalling(false);
     }
   };
 
@@ -320,12 +322,6 @@ export function SettingsPanel() {
                 </select>
                 {windowsOcrStatus?.error && <p className="mt-1 text-xs text-red-500">{windowsOcrStatus.error}</p>}
               </div> : <div className="space-y-3">
-                <div>
-                  <label htmlFor="setting-paddle-python" className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
-                    {t('ocr.paddlePython')}
-                  </label>
-                  <input id="setting-paddle-python" name="paddle_python_path" autoComplete="off" spellCheck={false} className="input" value={paddlePythonPath} onChange={(event) => { setPaddlePythonPath(event.target.value); setPaddleStatus(null); }} onBlur={() => void save('paddle_python_path', paddlePythonPath)} placeholder="python…" />
-                </div>
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div>
                     <label htmlFor="setting-paddle-language" className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">{t('ocr.paddleLanguage')}</label>
@@ -345,12 +341,30 @@ export function SettingsPanel() {
                   </div>
                 </div>
                 <div className="flex min-w-0 items-center gap-2">
-                  <button type="button" className="btn-secondary inline-flex h-8 shrink-0 items-center gap-1.5 px-2.5 text-xs disabled:opacity-50" onClick={() => void installPaddle()} disabled={ocrChecking}>
-                    {ocrChecking ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+                  <button type="button" className="btn-secondary inline-flex h-8 shrink-0 items-center gap-1.5 px-2.5 text-xs disabled:opacity-50" onClick={() => void installPaddle()} disabled={ocrChecking || paddleInstalling || paddleStatus?.install_supported === false}>
+                    {paddleInstalling ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
                     {t('ocr.installPaddle')}
                   </button>
-                  {paddleStatus?.error && <p className="min-w-0 truncate text-xs text-red-500" title={paddleStatus.error}>{paddleStatus.error}</p>}
+                  {!paddleInstalling && paddleStatus && (
+                    <p className={`min-w-0 truncate text-xs ${paddleStatus.available ? 'text-green-600' : 'text-red-500'}`} title={paddleStatus.error ?? undefined}>
+                      {paddleStatus.available ? `PaddleOCR ${paddleStatus.paddleocr_version ?? ''}` : paddleStatus.error}
+                    </p>
+                  )}
                 </div>
+                {paddleInstalling && paddleInstallProgress && (
+                  <div className="space-y-1.5" role="status" aria-live="polite">
+                    <div className="flex items-center justify-between gap-3 text-xs text-surface-500">
+                      <span>{t(paddleInstallStageLabels[paddleInstallProgress.stage])}</span>
+                      <span className="font-mono tabular-nums">{paddleInstallProgress.progress}%</span>
+                    </div>
+                    <div className="h-1.5 overflow-hidden rounded-sm bg-surface-200 dark:bg-surface-800">
+                      <div className="h-full bg-accent-500 transition-[width] duration-300" style={{ width: `${paddleInstallProgress.progress}%` }} />
+                    </div>
+                    {paddleInstallProgress.message && (
+                      <p className="truncate text-[11px] text-surface-400" title={paddleInstallProgress.message}>{paddleInstallProgress.message}</p>
+                    )}
+                  </div>
+                )}
               </div>}
               <div>
                 <label htmlFor="setting-ocr-output" className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
@@ -586,4 +600,18 @@ export function SettingsPanel() {
       </div>
     </div>
   );
+}
+
+function failedPaddleStatus(error: unknown): PaddleOcrStatus {
+  return {
+    available: false,
+    python_path: '',
+    managed: true,
+    install_supported: true,
+    install_required: true,
+    runtime_version: null,
+    paddle_version: null,
+    paddleocr_version: null,
+    error: String(error),
+  };
 }

@@ -48,6 +48,8 @@ describe('OCR store', () => {
       windowsStatus: null,
       paddleStatus: null,
       healthChecking: false,
+      paddleInstallProgress: null,
+      isInstallingPaddle: false,
       candidates: [],
       loadingCandidates: false,
       page: 0,
@@ -63,7 +65,6 @@ describe('OCR store', () => {
       outputDir: '',
       engine: 'mineru',
       windowsLanguage: 'auto',
-      paddlePythonPath: 'python',
       paddleLanguage: 'ch',
       paddleModel: 'PP-OCRv5_mobile',
     });
@@ -219,6 +220,44 @@ describe('OCR store', () => {
     await useOcrStore.getState().checkHealth();
     expect(useOcrStore.getState().health).toMatchObject({ connected: false, api_url: 'http://127.0.0.1:8000' });
     expect(useOcrStore.getState().healthChecking).toBe(false);
+  });
+
+  it('tracks managed PaddleOCR installation progress and completion', async () => {
+    const installation = deferred<import('../types').PaddleOcrStatus>();
+    mocks.installPaddleOcr.mockReturnValue(installation.promise);
+
+    const pending = useOcrStore.getState().installPaddle();
+    expect(useOcrStore.getState()).toMatchObject({
+      isInstallingPaddle: true,
+      paddleInstallProgress: { stage: 'preparing', progress: 0 },
+    });
+
+    useOcrStore.getState().updatePaddleInstallProgress({
+      stage: 'installing',
+      progress: 40,
+      message: 'Installing dependencies',
+    });
+    expect(useOcrStore.getState()).toMatchObject({
+      isInstallingPaddle: true,
+      paddleInstallProgress: { stage: 'installing', progress: 40 },
+    });
+
+    installation.resolve({
+      available: true,
+      python_path: 'C:\\runtime\\python.exe',
+      managed: true,
+      install_supported: true,
+      install_required: false,
+      runtime_version: '2',
+      paddle_version: '3.3.1',
+      paddleocr_version: '3.3.1',
+      error: null,
+    });
+    await pending;
+    expect(useOcrStore.getState()).toMatchObject({
+      isInstallingPaddle: false,
+      paddleStatus: { available: true, managed: true, runtime_version: '2' },
+    });
   });
 
   it('loads, paginates, selects, and clears OCR candidates', async () => {

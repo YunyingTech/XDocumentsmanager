@@ -6,7 +6,7 @@
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "npm run prepare:elasticsearch && npm run dev",
+    "beforeDevCommand": "npm run prepare:runtime && npm run dev",
     "beforeBuildCommand": "npm run build:tauri"
   },
   "app": {
@@ -31,8 +31,10 @@
     "targets": "all",
     "resources": [
       "resources/elasticsearch/**/*",
+      "resources/paddle-runtime/**/*",
       "scripts/paddle_ocr_worker.py",
-      "scripts/paddleocr-requirements.txt"
+      "scripts/paddleocr-requirements.txt",
+      "scripts/paddleocr-constraints.txt"
     ],
     "icon": [
       "icons/32x32.png",
