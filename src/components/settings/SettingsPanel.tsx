@@ -5,6 +5,7 @@ import { getSetting, setSetting, checkOcrHealth, getWindowsOcrStatus, getPaddleO
 import { useUIStore } from '../../stores/uiStore';
 import type { MinerUHealthInfo, OcrEngine, PaddleInstallProgress, PaddleOcrStatus, SearchBackendStatus, WindowsOcrStatus } from '../../types';
 import { useI18n } from '../../lib/i18n';
+import { APP_VERSION } from '../../lib/constants';
 import type { Language } from '../../stores/uiStore';
 
 const paddleInstallStageLabels = {
@@ -593,7 +594,7 @@ export function SettingsPanel() {
               {t('settings.about')}
             </h3>
             <p className="text-sm text-surface-500">
-              {t('settings.aboutText')}
+              {t('settings.aboutText', { version: APP_VERSION })}
             </p>
           </div>
         </div>
