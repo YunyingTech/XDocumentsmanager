@@ -1,15 +1,17 @@
 # XDocuments Manager
 
-A Windows and macOS desktop PDF document manager designed to handle **60TB-scale** PDF collections across local drives and SMB network shares — **without uploading any files**.
+A Windows and macOS desktop PDF document manager designed for **60TB-scale** PDF collections across local drives and SMB network shares.
 
-Files stay in place. The app indexes metadata and extracted text for browsing, searching, and viewing.
+Files stay in place. Local indexing, Windows OCR, and PaddleOCR do not upload documents. MinerU is an optional external OCR service and sends selected files to the configured endpoint. See [TECHNICAL_ROADMAP.md](TECHNICAL_ROADMAP.md) for the current architecture, privacy boundaries, known limits, and delivery plan.
 
 ## Features
 
 - 📁 **Index local folders & SMB shares** — Add UNC paths like `\\server\share\pdfs` or local paths
-- 🔍 **Full-text search** — SQLite FTS5 (Phase 1) → Tantivy (Phase 2) for sub-100ms search across millions of PDFs
-- 📄 **Built-in PDF viewer** — PDF.js with lazy loading and byte-range streaming for large files
-- 📊 **Virtualized file table** — TanStack Virtual renders only visible rows, handles millions of entries
+- 🔍 **Dual-backend search** — Bundled Elasticsearch with an embedded Tantivy fallback
+- ✨ **Optional AI query expansion** — OpenAI-compatible models extract selectable search terms without receiving PDF contents
+- 🧾 **Three OCR engines** — Local Windows OCR, local PaddleOCR, or an optional MinerU service
+- 📄 **Built-in PDF viewer** — PDF.js page rendering in file-browser and search split views
+- 📊 **Virtualized file table** — TanStack Virtual renders only visible rows for large collections
 - 🌓 **Dark mode** — System-aware cozy gray theme
 - ⚡ **Memory efficient** — Tauri 2.0 (Rust backend) uses 30–50MB idle vs Electron's 150–300MB
 
@@ -29,9 +31,10 @@ These choices keep memory proportional to directory depth and fixed batch sizes 
 | Frontend | React 19 + TypeScript + Tailwind CSS + Vite 8 |
 | State Management | Zustand |
 | Table | TanStack Table + TanStack Virtual |
-| Search | SQLite FTS5 (Phase 1), Tantivy (Phase 2) |
+| Search | Elasticsearch 8.17 with Tantivy fallback |
 | PDF Viewer | PDF.js (lazy-loaded) |
-| PDF Extraction | pdfium-render (Phase 2) |
+| OCR | Windows Runtime OCR, PaddleOCR, MinerU API |
+| AI Search | OpenAI-compatible chat completions API |
 
 ## Prerequisites
 
@@ -100,9 +103,9 @@ XDocumentsmanager/
 │   │   ├── commands/            # Tauri IPC handlers (files, folders, index, search, viewer)
 │   │   ├── indexer/             # walker, hasher, extractor, pipeline
 │   │   ├── db/                  # SQLite schema + migrations
-│   │   ├── search/              # Tantivy integration (Phase 2)
-│   │   ├── watcher/             # File system watchers (Phase 2)
-│   │   ├── smb/                 # SMB utilities (Phase 2)
+│   │   ├── search/              # Elasticsearch, Tantivy, and AI query expansion
+│   │   ├── watcher/             # Local and network change-detection utilities
+│   │   ├── smb/                 # SMB path utilities
 │   │   ├── models/              # Shared Rust types
 │   │   └── utils/               # Path handling, crypto, formatting
 │   └── Cargo.toml
@@ -119,35 +122,15 @@ SQLite database at `%APPDATA%/com.xdocuments.manager/xdocuments.db`:
 |-------|---------|
 | `watched_folders` | Local/SMB folders being indexed |
 | `files` | One row per indexed PDF with metadata |
-| `files_fts` | FTS5 virtual table for full-text search |
 | `index_jobs` | Background indexing job tracking |
 | `settings` | Key-value app configuration |
 | `search_history` | User search queries |
-| `tags` / `file_tags` | User-defined tags (Phase 3) |
+
+Full-text documents are stored in the Elasticsearch and Tantivy indexes under the application data directory rather than in SQLite FTS5.
 
 ## Roadmap
 
-### Phase 1 ✅ (Current)
-- [x] Local folder indexing
-- [x] SQLite FTS5 search
-- [x] PDF.js viewer
-- [x] Virtualized file browser
-- [x] Folder management UI
-
-### Phase 2 (Next)
-- [ ] pdfium-render text extraction
-- [ ] Tantivy full-text search engine
-- [ ] SMB share support with credential management
-- [ ] File system watchers (notify + polling)
-- [ ] Advanced query parser (AND/OR/NOT/phrase/field filters)
-- [ ] Background indexing with progress events
-
-### Phase 3 (Future)
-- [ ] OCR (Tesseract) for scanned PDFs
-- [ ] Streaming PDF viewer for large files
-- [ ] Tags and collections
-- [ ] CJK tokenization
-- [ ] Windows MSI installer
+The prioritized roadmap is maintained in [TECHNICAL_ROADMAP.md](TECHNICAL_ROADMAP.md). Near-term work focuses on a software-managed PaddleOCR runtime, native text extraction for text PDFs, persistent OCR jobs, and repeatable million-file scale benchmarks.
 
 ## License
 
