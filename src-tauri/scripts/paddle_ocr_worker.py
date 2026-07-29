@@ -9,7 +9,7 @@ def emit(payload):
     print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
-def dependency_status():
+def dependency_status(device):
     try:
         import fitz
         import paddle
@@ -17,13 +17,64 @@ def dependency_status():
     except Exception as error:
         emit({"available": False, "error": str(error)})
         return 1
+    compiled_with_cuda = bool(paddle.is_compiled_with_cuda())
+    cuda_device_count = 0
+    gpu_name = None
+    cuda_version = None
+    cudnn_version = None
+    if compiled_with_cuda:
+        try:
+            cuda_device_count = int(paddle.device.cuda.device_count())
+        except Exception:
+            cuda_device_count = 0
+        try:
+            cuda_version = paddle.version.cuda() or None
+        except Exception:
+            pass
+        try:
+            cudnn_version = paddle.version.cudnn() or None
+        except Exception:
+            pass
+        if cuda_device_count:
+            try:
+                gpu_name = paddle.device.cuda.get_device_name(0)
+            except Exception:
+                pass
+
+    requested_gpu = device.startswith("gpu")
+    device_index = 0
+    if requested_gpu and ":" in device:
+        try:
+            device_index = int(device.split(":", 1)[1])
+        except ValueError:
+            emit({"available": False, "error": f"Invalid PaddleOCR device: {device}"})
+            return 1
+    device_available = not requested_gpu or (
+        compiled_with_cuda and 0 <= device_index < cuda_device_count
+    )
+    error = None
+    if requested_gpu and not compiled_with_cuda:
+        error = "This PaddlePaddle runtime was not built with CUDA support"
+    elif requested_gpu and cuda_device_count == 0:
+        error = "No NVIDIA CUDA device is available to PaddlePaddle; install a compatible NVIDIA driver"
+    elif requested_gpu and device_index >= cuda_device_count:
+        error = f"CUDA device {device_index} is unavailable; detected {cuda_device_count} device(s)"
+
     emit({
-        "available": True,
+        "available": device_available,
         "paddle_version": getattr(paddle, "__version__", "unknown"),
         "paddleocr_version": getattr(paddleocr, "__version__", "unknown"),
         "pymupdf_version": getattr(fitz, "VersionBind", "unknown"),
+        "requested_device": device,
+        "active_device": device if device_available else None,
+        "compiled_with_cuda": compiled_with_cuda,
+        "cuda_device_count": cuda_device_count,
+        "cuda_version": cuda_version,
+        "cudnn_version": str(cudnn_version) if cudnn_version is not None else None,
+        "gpu_name": gpu_name,
+        "error": error,
     })
-    return 0
+    return 0 if device_available else 1
 
 
 def collect_text(value):
@@ -56,13 +107,13 @@ def collect_text(value):
     return []
 
 
-def create_engine(language, model):
+def create_engine(language, model, device):
     from paddleocr import PaddleOCR
 
-    # PaddleOCR 3.x enables oneDNN by default on CPU. Some Windows Paddle
-    # builds fail in PIR conversion before inference, so use the stable CPU
-    # execution path here.
-    runtime_options = {"enable_mkldnn": False}
+    runtime_options = {"device": device}
+    if device == "cpu":
+        # Some Windows CPU builds fail during PIR conversion with oneDNN.
+        runtime_options["enable_mkldnn"] = False
     preset = {
         "PP-OCRv5_mobile": ("PP-OCRv5_mobile_det", "PP-OCRv5_mobile_rec"),
         "PP-OCRv5_server": ("PP-OCRv5_server_det", "PP-OCRv5_server_rec"),
@@ -88,7 +139,11 @@ def create_engine(language, model):
             use_textline_orientation=True,
             **runtime_options,
         )
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as error:
+        if device != "cpu":
+            raise RuntimeError(
+                f"Installed PaddleOCR does not accept CUDA device '{device}': {error}"
+            ) from error
         return PaddleOCR(
             lang=language,
             use_angle_cls=True,
@@ -106,7 +161,8 @@ def recognize_page(engine, image_path):
 def run(args):
     import fitz
 
-    engine = create_engine(args.language, args.model)
+    engine = create_engine(args.language, args.model, args.device)
+    emit({"type": "runtime", "active_device": args.device})
     document = fitz.open(args.input)
     if document.page_count == 0:
         raise RuntimeError("The PDF contains no pages")
@@ -139,9 +195,10 @@ def main():
     parser.add_argument("--output")
     parser.add_argument("--language", default="ch")
     parser.add_argument("--model", default="PP-OCRv5_mobile")
+    parser.add_argument("--device", choices=("cpu", "gpu:0"), default="cpu")
     args = parser.parse_args()
     if args.check:
-        return dependency_status()
+        return dependency_status(args.device)
     if not args.input or not args.output:
         parser.error("--input and --output are required")
     try:

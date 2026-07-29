@@ -185,7 +185,7 @@ export interface AppSettings {
 
 // ── OCR (MinerU API) ──
 
-export type OcrEngine = 'mineru' | 'windows' | 'paddle';
+export type OcrEngine = 'rapid' | 'mineru' | 'windows' | 'paddle';
 
 export interface MinerUHealthInfo {
   protocol_version: string;
@@ -228,6 +228,18 @@ export interface PaddleOcrStatus {
   runtime_version: string | null;
   paddle_version: string | null;
   paddleocr_version: string | null;
+  requested_device_mode: PaddleDeviceMode;
+  active_device: string | null;
+  runtime_profile: 'cpu' | 'cu126' | null;
+  gpu_detected: boolean;
+  gpu_compatible: boolean;
+  gpu_runtime_installed: boolean;
+  gpu_name: string | null;
+  gpu_compute_capability: string | null;
+  gpu_driver_version: string | null;
+  cuda_version: string | null;
+  cudnn_version: string | null;
+  fallback_reason: string | null;
   error: string | null;
 }
 
@@ -236,6 +248,34 @@ export interface PaddleInstallProgress {
   progress: number;
   message: string;
 }
+
+export type PaddlePackageIndex = 'ustc' | 'tsinghua' | 'official';
+export type PaddleDeviceMode = 'auto' | 'cpu' | 'cuda12';
+
+export interface RapidOcrStatus {
+  available: boolean;
+  python_path: string;
+  managed: boolean;
+  install_supported: boolean;
+  install_required: boolean;
+  runtime_version: string | null;
+  rapidocr_version: string | null;
+  onnxruntime_version: string | null;
+  pymupdf_version: string | null;
+  requested_device_mode: RapidDeviceMode;
+  requested_provider: string | null;
+  active_provider: string | null;
+  accelerated: boolean;
+  available_providers: string[];
+  session_providers: string[][];
+  runtime_profile: 'directml' | 'coreml' | null;
+  fallback_reason: string | null;
+  error: string | null;
+}
+
+export type RapidInstallProgress = PaddleInstallProgress;
+export type RapidPackageIndex = PaddlePackageIndex;
+export type RapidDeviceMode = 'auto' | 'cpu';
 
 export interface WindowsOcrProgress {
   task_id: string;

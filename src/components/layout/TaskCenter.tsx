@@ -25,6 +25,8 @@ export function TaskCenter() {
   const indexProgress = useFolderStore((s) => s.indexProgress);
   const folders = useFolderStore((s) => s.folders);
   const tasks = useOcrStore((s) => s.tasks);
+  const bulkOcrRunning = useOcrStore((s) => s.bulkOcrRunning);
+  const bulkOcrQueued = useOcrStore((s) => s.bulkOcrQueued);
   const clearTasks = useOcrStore((s) => s.clearTasks);
   const downloadResult = useOcrStore((s) => s.downloadResult);
   const cancelTask = useOcrStore((s) => s.cancelTask);
@@ -34,7 +36,7 @@ export function TaskCenter() {
   const indexFailed = indexProgress?.status === 'error';
   const activeOcr = tasks.filter((task) => activeOcrStatuses.includes(task.status)).length;
   const failedOcr = tasks.filter((task) => task.status === 'failed').length;
-  const activeCount = activeOcr + (indexActive ? 1 : 0);
+  const activeCount = (bulkOcrRunning ? Math.max(activeOcr, bulkOcrQueued, 1) : activeOcr) + (indexActive ? 1 : 0);
   const failedCount = failedOcr + (indexFailed ? 1 : 0);
   const hasHistory = tasks.length > 0 || Boolean(indexProgress);
 
@@ -77,7 +79,7 @@ export function TaskCenter() {
                 </span>
               )}
             </div>
-            {activeOcr > 0 ? (
+            {activeOcr > 0 || bulkOcrRunning ? (
               <button type="button" onClick={() => void cancelAllTasks()} className="icon-button text-surface-400 hover:text-red-600" title={t('tasks.cancelAllOcr')} aria-label={t('tasks.cancelAllOcr')}>
                 <CircleStop size={15} />
               </button>
@@ -186,7 +188,7 @@ function OcrTaskRow({ task, onDownload, onCancel }: { task: OcrTask; onDownload:
         </div>
         {task.error ? <p className="mt-0.5 truncate text-[11px] text-red-500" title={task.error}>{task.error}</p>
           : task.status === 'queued' && task.queuedAhead != null ? <p className="mt-0.5 text-[11px] text-surface-400">{t('tasks.queueAhead', { count: task.queuedAhead })}</p>
-          : <p className="mt-0.5 text-[11px] text-surface-400">{task.engine === 'windows' ? 'Windows OCR' : task.engine === 'paddle' ? 'PaddleOCR' : 'MinerU'} - {t('tasks.ocrProcessing')}</p>}
+          : <p className="mt-0.5 text-[11px] text-surface-400">{task.engine === 'rapid' ? 'RapidOCR' : task.engine === 'windows' ? 'Windows OCR' : task.engine === 'paddle' ? 'PaddleOCR' : 'MinerU'} - {t('tasks.ocrProcessing')}</p>}
       </div>
       {active && (
         <button type="button" onClick={() => void onCancel(task.taskId)} className="icon-button shrink-0 text-surface-400 hover:text-red-600" title={t('tasks.cancel')} aria-label={t('tasks.cancelFor', { name: task.fileName })}>

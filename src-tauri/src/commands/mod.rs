@@ -5,6 +5,7 @@ pub mod logs;
 pub mod ocr;
 pub mod ocr_control;
 pub mod paddle_ocr;
+pub mod rapid_ocr;
 pub mod search;
 pub mod viewer;
 pub mod settings;

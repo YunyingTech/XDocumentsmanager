@@ -1,9 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { Wifi, Loader2, CheckCircle, XCircle, Save, Trash2, Monitor, Server, Boxes, Download } from 'lucide-react';
-import { getSetting, setSetting, checkOcrHealth, getWindowsOcrStatus, getPaddleOcrStatus, installPaddleOcr, vacuumDatabase, getOpenAiConfig, setOpenAiConfig, testOpenAiConnection, getSearchBackendStatus } from '../../lib/tauri';
+import { Wifi, Loader2, CheckCircle, XCircle, Save, Trash2, Monitor, Server, Boxes, Download, Zap } from 'lucide-react';
+import { getSetting, setSetting, checkOcrHealth, getWindowsOcrStatus, getPaddleOcrStatus, installPaddleOcr, getRapidOcrStatus, installRapidOcr, vacuumDatabase, getOpenAiConfig, setOpenAiConfig, testOpenAiConnection, getSearchBackendStatus } from '../../lib/tauri';
 import { useUIStore } from '../../stores/uiStore';
-import type { MinerUHealthInfo, OcrEngine, PaddleInstallProgress, PaddleOcrStatus, SearchBackendStatus, WindowsOcrStatus } from '../../types';
+import type { MinerUHealthInfo, OcrEngine, PaddleDeviceMode, PaddleInstallProgress, PaddleOcrStatus, PaddlePackageIndex, RapidDeviceMode, RapidInstallProgress, RapidOcrStatus, SearchBackendStatus, WindowsOcrStatus } from '../../types';
 import { useI18n } from '../../lib/i18n';
 import { APP_VERSION } from '../../lib/constants';
 import type { Language } from '../../stores/uiStore';
@@ -17,20 +17,37 @@ const paddleInstallStageLabels = {
   failed: 'ocr.paddleStageFailed',
 } as const;
 
+const rapidInstallStageLabels = {
+  preparing: 'ocr.rapidStagePreparing',
+  extracting: 'ocr.rapidStageExtracting',
+  installing: 'ocr.rapidStageInstalling',
+  verifying: 'ocr.rapidStageVerifying',
+  completed: 'ocr.rapidStageCompleted',
+  failed: 'ocr.rapidStageFailed',
+} as const;
+
 export function SettingsPanel() {
   const { t } = useI18n();
   // ── State ──
   const [maxFileSizeMb, setMaxFileSizeMb] = useState('500');
   const [ocrApiUrl, setOcrApiUrl] = useState('http://127.0.0.1:8000');
   const [ocrOutputDir, setOcrOutputDir] = useState('');
-  const [ocrEngine, setOcrEngine] = useState<OcrEngine>('mineru');
+  const [ocrEngine, setOcrEngine] = useState<OcrEngine>('rapid');
   const [windowsOcrLanguage, setWindowsOcrLanguage] = useState('auto');
   const [windowsOcrStatus, setWindowsOcrStatus] = useState<WindowsOcrStatus | null>(null);
   const [paddleLanguage, setPaddleLanguage] = useState('ch');
   const [paddleModel, setPaddleModel] = useState('PP-OCRv5_mobile');
+  const [paddleDeviceMode, setPaddleDeviceMode] = useState<PaddleDeviceMode>('auto');
+  const [paddlePypiPrimary, setPaddlePypiPrimary] = useState<PaddlePackageIndex>('ustc');
+  const [paddlePypiFallback, setPaddlePypiFallback] = useState<PaddlePackageIndex>('tsinghua');
   const [paddleStatus, setPaddleStatus] = useState<PaddleOcrStatus | null>(null);
   const [paddleInstallProgress, setPaddleInstallProgress] = useState<PaddleInstallProgress | null>(null);
   const [paddleInstalling, setPaddleInstalling] = useState(false);
+  const [rapidLanguage, setRapidLanguage] = useState('ch');
+  const [rapidDeviceMode, setRapidDeviceMode] = useState<RapidDeviceMode>('auto');
+  const [rapidStatus, setRapidStatus] = useState<RapidOcrStatus | null>(null);
+  const [rapidInstallProgress, setRapidInstallProgress] = useState<RapidInstallProgress | null>(null);
+  const [rapidInstalling, setRapidInstalling] = useState(false);
   const [ocrHealth, setOcrHealth] = useState<MinerUHealthInfo | null>(null);
   const [ocrChecking, setOcrChecking] = useState(false);
   const [openAiEndpoint, setOpenAiEndpoint] = useState('https://api.openai.com/v1');
@@ -54,7 +71,8 @@ export function SettingsPanel() {
     (async () => {
       const keys = [
         'max_file_size_mb', 'ocr_api_url', 'ocr_output_dir', 'ocr_engine', 'windows_ocr_language',
-        'paddle_ocr_language', 'paddle_ocr_model'
+        'paddle_ocr_language', 'paddle_ocr_model', 'paddle_device_mode', 'paddle_pypi_primary', 'paddle_pypi_fallback',
+        'rapidocr_language', 'rapidocr_device_mode'
       ];
       for (const key of keys) {
         const val = await getSetting(key);
@@ -63,10 +81,15 @@ export function SettingsPanel() {
             case 'max_file_size_mb': setMaxFileSizeMb(val); break;
             case 'ocr_api_url': setOcrApiUrl(val); break;
             case 'ocr_output_dir': setOcrOutputDir(val); break;
-            case 'ocr_engine': setOcrEngine(val === 'windows' || val === 'paddle' ? val : 'mineru'); break;
+            case 'ocr_engine': setOcrEngine(val === 'rapid' || val === 'mineru' || val === 'windows' || val === 'paddle' ? val : 'rapid'); break;
             case 'windows_ocr_language': setWindowsOcrLanguage(val); break;
             case 'paddle_ocr_language': setPaddleLanguage(val); break;
             case 'paddle_ocr_model': setPaddleModel(val); break;
+            case 'paddle_device_mode': setPaddleDeviceMode(deviceMode(val)); break;
+            case 'paddle_pypi_primary': setPaddlePypiPrimary(packageIndex(val, 'ustc')); break;
+            case 'paddle_pypi_fallback': setPaddlePypiFallback(packageIndex(val, 'tsinghua')); break;
+            case 'rapidocr_language': setRapidLanguage(val); break;
+            case 'rapidocr_device_mode': setRapidDeviceMode(rapidDeviceModeValue(val)); break;
           }
         }
       }
@@ -82,6 +105,14 @@ export function SettingsPanel() {
     const unlisten = listen<PaddleInstallProgress>('paddle-install:progress', (event) => {
       setPaddleInstallProgress(event.payload);
       setPaddleInstalling(event.payload.stage !== 'completed' && event.payload.stage !== 'failed');
+    });
+    return () => { unlisten.then((stop) => stop()); };
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen<RapidInstallProgress>('rapid-install:progress', (event) => {
+      setRapidInstallProgress(event.payload);
+      setRapidInstalling(event.payload.stage !== 'completed' && event.payload.stage !== 'failed');
     });
     return () => { unlisten.then((stop) => stop()); };
   }, []);
@@ -128,6 +159,15 @@ export function SettingsPanel() {
     return () => { active = false; };
   }, [ocrEngine]);
 
+  useEffect(() => {
+    if (ocrEngine !== 'rapid') return;
+    let active = true;
+    getRapidOcrStatus()
+      .then((status) => { if (active) setRapidStatus(status); })
+      .catch((error) => { if (active) setRapidStatus(failedRapidStatus(error)); });
+    return () => { active = false; };
+  }, [ocrEngine]);
+
   // ── Save helpers ──
   const save = useCallback(async (key: string, value: string) => {
     setSaveState('saving');
@@ -143,6 +183,15 @@ export function SettingsPanel() {
   // ── Health check ──
   const checkHealth = async () => {
     setOcrChecking(true);
+    if (ocrEngine === 'rapid') {
+      try {
+        setRapidStatus(await getRapidOcrStatus());
+      } catch (error) {
+        setRapidStatus(failedRapidStatus(error));
+      }
+      setOcrChecking(false);
+      return;
+    }
     if (ocrEngine === 'windows') {
       try {
         setWindowsOcrStatus(await getWindowsOcrStatus());
@@ -181,13 +230,55 @@ export function SettingsPanel() {
     setPaddleInstalling(true);
     setPaddleInstallProgress({ stage: 'preparing', progress: 0, message: '' });
     try {
-      const status = await installPaddleOcr();
+      const status = await installPaddleOcr(paddlePypiPrimary, paddlePypiFallback, paddleDeviceMode);
       setPaddleStatus(status);
     } catch (error) {
       setPaddleStatus(failedPaddleStatus(error));
       setPaddleInstallProgress({ stage: 'failed', progress: 100, message: String(error) });
     } finally {
       setPaddleInstalling(false);
+    }
+  };
+
+  const installRapid = async () => {
+    if (rapidInstalling) return;
+    setRapidInstalling(true);
+    setRapidInstallProgress({ stage: 'preparing', progress: 0, message: '' });
+    try {
+      setRapidStatus(await installRapidOcr(rapidDeviceMode));
+    } catch (error) {
+      setRapidStatus(failedRapidStatus(error));
+      setRapidInstallProgress({ stage: 'failed', progress: 100, message: String(error) });
+    } finally {
+      setRapidInstalling(false);
+    }
+  };
+
+  const selectRapidDeviceMode = async (value: RapidDeviceMode) => {
+    setRapidDeviceMode(value);
+    setRapidStatus(null);
+    await save('rapidocr_device_mode', value);
+    setOcrChecking(true);
+    try {
+      setRapidStatus(await getRapidOcrStatus());
+    } catch (error) {
+      setRapidStatus(failedRapidStatus(error));
+    } finally {
+      setOcrChecking(false);
+    }
+  };
+
+  const selectPaddleDeviceMode = async (value: PaddleDeviceMode) => {
+    setPaddleDeviceMode(value);
+    setPaddleStatus(null);
+    await save('paddle_device_mode', value);
+    setOcrChecking(true);
+    try {
+      setPaddleStatus(await getPaddleOcrStatus());
+    } catch (error) {
+      setPaddleStatus(failedPaddleStatus(error));
+    } finally {
+      setOcrChecking(false);
     }
   };
 
@@ -285,6 +376,9 @@ export function SettingsPanel() {
                   {t('ocr.engine')}
                 </span>
                 <div className="inline-flex rounded-md border border-surface-200 bg-surface-50 p-0.5 dark:border-surface-700 dark:bg-surface-900">
+                  <button type="button" aria-pressed={ocrEngine === 'rapid'} onClick={() => { setOcrEngine('rapid'); save('ocr_engine', 'rapid'); setRapidStatus(null); }} className={`inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs font-medium ${ocrEngine === 'rapid' ? 'bg-white shadow-sm dark:bg-surface-700' : 'text-surface-500'}`}>
+                    <Zap size={14} /> RapidOCR
+                  </button>
                   <button type="button" aria-pressed={ocrEngine === 'mineru'} onClick={() => { setOcrEngine('mineru'); save('ocr_engine', 'mineru'); setOcrHealth(null); }} className={`inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs font-medium ${ocrEngine === 'mineru' ? 'bg-white shadow-sm dark:bg-surface-700' : 'text-surface-500'}`}>
                     <Server size={14} /> MinerU
                   </button>
@@ -296,7 +390,47 @@ export function SettingsPanel() {
                   </button>
                 </div>
               </div>
-              {ocrEngine === 'mineru' ? <div>
+              {ocrEngine === 'rapid' ? <div className="space-y-3">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div>
+                    <label htmlFor="setting-rapid-language" className="mb-1.5 block text-sm text-surface-600 dark:text-surface-400">{t('ocr.rapidLanguage')}</label>
+                    <select id="setting-rapid-language" name="rapidocr_language" className="input" value={rapidLanguage} onChange={(event) => { setRapidLanguage(event.target.value); void save('rapidocr_language', event.target.value); }}>
+                      <option value="ch">中文</option>
+                      <option value="en">English</option>
+                      <option value="japan">日本語</option>
+                      <option value="korean">한국어</option>
+                    </select>
+                  </div>
+                  <div>
+                    <span className="mb-1.5 block text-sm text-surface-600 dark:text-surface-400">{t('ocr.rapidDevice')}</span>
+                    <RapidDeviceModeControl value={rapidDeviceMode} onChange={(value) => void selectRapidDeviceMode(value)} disabled={ocrChecking || rapidInstalling} t={t} />
+                  </div>
+                </div>
+                <div className="flex min-w-0 items-center gap-2">
+                  <button type="button" className="btn-secondary inline-flex h-8 shrink-0 items-center gap-1.5 px-2.5 text-xs disabled:opacity-50" onClick={() => void installRapid()} disabled={ocrChecking || rapidInstalling || rapidStatus?.install_supported === false}>
+                    {rapidInstalling ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+                    {t('ocr.installRapid')}
+                  </button>
+                  {!rapidInstalling && rapidStatus && (
+                    <p className={`min-w-0 truncate text-xs ${rapidStatus.available ? 'text-green-600' : 'text-red-500'}`} title={rapidStatus.error ?? undefined}>
+                      {rapidStatus.available ? rapidRuntimeLabel(rapidStatus, t) : rapidStatus.error}
+                    </p>
+                  )}
+                </div>
+                {!rapidInstalling && rapidStatus?.fallback_reason && <p className="text-xs text-amber-600 dark:text-amber-400">{rapidStatus.fallback_reason}</p>}
+                {rapidInstalling && rapidInstallProgress && (
+                  <div className="space-y-1.5" role="status" aria-live="polite">
+                    <div className="flex items-center justify-between gap-3 text-xs text-surface-500">
+                      <span>{t(rapidInstallStageLabels[rapidInstallProgress.stage])}</span>
+                      <span className="font-mono tabular-nums">{rapidInstallProgress.progress}%</span>
+                    </div>
+                    <div className="h-1.5 overflow-hidden rounded-sm bg-surface-200 dark:bg-surface-800">
+                      <div className="h-full bg-accent-500 transition-[width] duration-300" style={{ width: `${rapidInstallProgress.progress}%` }} />
+                    </div>
+                    {rapidInstallProgress.message && <p className="truncate text-[11px] text-surface-400" title={rapidInstallProgress.message}>{rapidInstallProgress.message}</p>}
+                  </div>
+                )}
+              </div> : ocrEngine === 'mineru' ? <div>
                 <label htmlFor="setting-ocr-api-url" className="block text-sm text-surface-600 dark:text-surface-400 mb-1.5">
                   {t('settings.ocrApiUrl')}
                 </label>
@@ -341,17 +475,48 @@ export function SettingsPanel() {
                     </select>
                   </div>
                 </div>
+                <div>
+                  <span className="mb-1.5 block text-sm text-surface-600 dark:text-surface-400">{t('ocr.paddleDevice')}</span>
+                  <PaddleDeviceModeControl
+                    value={paddleDeviceMode}
+                    onChange={(value) => void selectPaddleDeviceMode(value)}
+                    disabled={ocrChecking || paddleInstalling}
+                    t={t}
+                  />
+                </div>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div>
+                    <label htmlFor="setting-paddle-pypi-primary" className="mb-1.5 block text-sm text-surface-600 dark:text-surface-400">{t('ocr.paddlePypiPrimary')}</label>
+                    <select id="setting-paddle-pypi-primary" name="paddle_pypi_primary" className="input" value={paddlePypiPrimary} onChange={(event) => { const value = event.target.value as PaddlePackageIndex; setPaddlePypiPrimary(value); void save('paddle_pypi_primary', value); }}>
+                      <PaddlePackageIndexOptions t={t} />
+                    </select>
+                  </div>
+                  <div>
+                    <label htmlFor="setting-paddle-pypi-fallback" className="mb-1.5 block text-sm text-surface-600 dark:text-surface-400">{t('ocr.paddlePypiFallback')}</label>
+                    <select id="setting-paddle-pypi-fallback" name="paddle_pypi_fallback" className="input" value={paddlePypiFallback} onChange={(event) => { const value = event.target.value as PaddlePackageIndex; setPaddlePypiFallback(value); void save('paddle_pypi_fallback', value); }}>
+                      <PaddlePackageIndexOptions t={t} />
+                    </select>
+                  </div>
+                </div>
                 <div className="flex min-w-0 items-center gap-2">
-                  <button type="button" className="btn-secondary inline-flex h-8 shrink-0 items-center gap-1.5 px-2.5 text-xs disabled:opacity-50" onClick={() => void installPaddle()} disabled={ocrChecking || paddleInstalling || paddleStatus?.install_supported === false}>
+                  <button type="button" className="btn-secondary inline-flex h-8 shrink-0 items-center gap-1.5 px-2.5 text-xs disabled:opacity-50" onClick={() => void installPaddle()} disabled={ocrChecking || paddleInstalling || paddleStatus?.install_supported === false || (paddleDeviceMode === 'cuda12' && paddleStatus?.gpu_compatible === false)}>
                     {paddleInstalling ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
                     {t('ocr.installPaddle')}
                   </button>
                   {!paddleInstalling && paddleStatus && (
                     <p className={`min-w-0 truncate text-xs ${paddleStatus.available ? 'text-green-600' : 'text-red-500'}`} title={paddleStatus.error ?? undefined}>
-                      {paddleStatus.available ? `PaddleOCR ${paddleStatus.paddleocr_version ?? ''}` : paddleStatus.error}
+                      {paddleStatus.available ? paddleRuntimeLabel(paddleStatus, t) : paddleStatus.error}
                     </p>
                   )}
                 </div>
+                {!paddleInstalling && paddleStatus?.fallback_reason && (
+                  <p className="text-xs text-amber-600 dark:text-amber-400">{paddleStatus.fallback_reason}</p>
+                )}
+                {!paddleInstalling && paddleStatus?.gpu_detected && (
+                  <p className="text-[11px] text-surface-400">
+                    {[paddleStatus.gpu_name, paddleStatus.gpu_compute_capability ? `CC ${paddleStatus.gpu_compute_capability}` : null, paddleStatus.gpu_driver_version ? `${t('ocr.paddleDriver')} ${paddleStatus.gpu_driver_version}` : null].filter(Boolean).join(' · ')}
+                  </p>
+                )}
                 {paddleInstalling && paddleInstallProgress && (
                   <div className="space-y-1.5" role="status" aria-live="polite">
                     <div className="flex items-center justify-between gap-3 text-xs text-surface-500">
@@ -416,6 +581,12 @@ export function SettingsPanel() {
                         {t('settings.cannotConnect')}
                       </>
                     )}
+                  </span>
+                )}
+                {ocrEngine === 'rapid' && rapidStatus && (
+                  <span role="status" aria-live="polite" className={`inline-flex min-w-0 items-center gap-1 text-xs ${rapidStatus.available ? 'text-green-600' : 'text-red-500'}`} title={rapidStatus.error ?? undefined}>
+                    {rapidStatus.available ? <CheckCircle size={12} /> : <XCircle size={12} />}
+                    <span className="truncate">{rapidStatus.available ? t('ocr.rapidReady') : t('ocr.rapidUnavailable')}</span>
                   </span>
                 )}
                 {ocrEngine === 'windows' && windowsOcrStatus && (
@@ -613,6 +784,124 @@ function failedPaddleStatus(error: unknown): PaddleOcrStatus {
     runtime_version: null,
     paddle_version: null,
     paddleocr_version: null,
+    requested_device_mode: 'auto',
+    active_device: null,
+    runtime_profile: null,
+    gpu_detected: false,
+    gpu_compatible: false,
+    gpu_runtime_installed: false,
+    gpu_name: null,
+    gpu_compute_capability: null,
+    gpu_driver_version: null,
+    cuda_version: null,
+    cudnn_version: null,
+    fallback_reason: null,
     error: String(error),
   };
+}
+
+function failedRapidStatus(error: unknown): RapidOcrStatus {
+  return {
+    available: false,
+    python_path: '',
+    managed: true,
+    install_supported: true,
+    install_required: true,
+    runtime_version: null,
+    rapidocr_version: null,
+    onnxruntime_version: null,
+    pymupdf_version: null,
+    requested_device_mode: 'auto',
+    requested_provider: null,
+    active_provider: null,
+    accelerated: false,
+    available_providers: [],
+    session_providers: [],
+    runtime_profile: null,
+    fallback_reason: null,
+    error: String(error),
+  };
+}
+
+function packageIndex(value: string, fallback: PaddlePackageIndex): PaddlePackageIndex {
+  return value === 'ustc' || value === 'tsinghua' || value === 'official' ? value : fallback;
+}
+
+function deviceMode(value: string): PaddleDeviceMode {
+  return value === 'cpu' || value === 'cuda12' ? value : 'auto';
+}
+
+function rapidDeviceModeValue(value: string): RapidDeviceMode {
+  return value === 'cpu' ? 'cpu' : 'auto';
+}
+
+function PaddlePackageIndexOptions({ t }: { t: ReturnType<typeof useI18n>['t'] }) {
+  return (
+    <>
+      <option value="ustc">{t('ocr.paddlePypiUstc')}</option>
+      <option value="tsinghua">{t('ocr.paddlePypiTsinghua')}</option>
+      <option value="official">{t('ocr.paddlePypiOfficial')}</option>
+    </>
+  );
+}
+
+function PaddleDeviceModeControl({ value, onChange, disabled, t }: {
+  value: PaddleDeviceMode;
+  onChange: (value: PaddleDeviceMode) => void;
+  disabled: boolean;
+  t: ReturnType<typeof useI18n>['t'];
+}) {
+  const options: Array<{ value: PaddleDeviceMode; label: string }> = [
+    { value: 'auto', label: t('ocr.paddleDeviceAuto') },
+    { value: 'cpu', label: t('ocr.paddleDeviceCpu') },
+    { value: 'cuda12', label: t('ocr.paddleDeviceCuda') },
+  ];
+  return (
+    <div className="inline-flex rounded-md border border-surface-200 bg-surface-50 p-0.5 dark:border-surface-700 dark:bg-surface-900" role="group" aria-label={t('ocr.paddleDevice')}>
+      {options.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          aria-pressed={value === option.value}
+          disabled={disabled}
+          onClick={() => onChange(option.value)}
+          className={`h-7 rounded px-2.5 text-xs font-medium transition-colors disabled:opacity-50 ${value === option.value ? 'bg-white text-surface-900 shadow-sm dark:bg-surface-700 dark:text-surface-100' : 'text-surface-500 hover:text-surface-800 dark:hover:text-surface-200'}`}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function RapidDeviceModeControl({ value, onChange, disabled, t }: {
+  value: RapidDeviceMode;
+  onChange: (value: RapidDeviceMode) => void;
+  disabled: boolean;
+  t: ReturnType<typeof useI18n>['t'];
+}) {
+  const options: Array<{ value: RapidDeviceMode; label: string }> = [
+    { value: 'auto', label: t('ocr.rapidDeviceAuto') },
+    { value: 'cpu', label: t('ocr.rapidDeviceCpu') },
+  ];
+  return (
+    <div className="inline-flex rounded-md border border-surface-200 bg-surface-50 p-0.5 dark:border-surface-700 dark:bg-surface-900" role="group" aria-label={t('ocr.rapidDevice')}>
+      {options.map((option) => (
+        <button key={option.value} type="button" aria-pressed={value === option.value} disabled={disabled} onClick={() => onChange(option.value)} className={`h-7 rounded px-2.5 text-xs font-medium transition-colors disabled:opacity-50 ${value === option.value ? 'bg-white text-surface-900 shadow-sm dark:bg-surface-700 dark:text-surface-100' : 'text-surface-500 hover:text-surface-800 dark:hover:text-surface-200'}`}>
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function rapidRuntimeLabel(status: RapidOcrStatus, t: ReturnType<typeof useI18n>['t']) {
+  return `RapidOCR ${status.rapidocr_version ?? ''} · ${status.accelerated ? t('ocr.rapidAccelerated') : t('ocr.rapidCpu')} · ${status.active_provider ?? '?'}`;
+}
+
+function paddleRuntimeLabel(status: PaddleOcrStatus, t: ReturnType<typeof useI18n>['t']) {
+  const device = status.active_device === 'gpu:0'
+    ? `${t('ocr.paddleDeviceCuda')}${status.cuda_version ? ` (${status.cuda_version})` : ''}`
+    : t('ocr.paddleDeviceCpu');
+  return `PaddleOCR ${status.paddleocr_version ?? ''} · ${device}`;
 }

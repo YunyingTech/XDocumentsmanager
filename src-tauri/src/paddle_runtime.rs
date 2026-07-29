@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -11,10 +11,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 
-pub const RUNTIME_VERSION: &str = "2";
+pub const RUNTIME_VERSION: &str = "3";
+pub const RAPID_RUNTIME_VERSION: &str = "2";
+const RAPID_WHEELHOUSE_VERSION: u32 = 1;
 const PYTHON_VERSION: &str = "3.11";
 const PADDLE_VERSION: &str = "3.3.1";
 const PADDLEOCR_VERSION: &str = "3.3.1";
+pub const RAPIDOCR_VERSION: &str = "3.9.2";
+pub const RAPID_ORT_VERSION: &str = "1.24.4";
+const PYMUPDF_VERSION: &str = "1.24.14";
+pub const CUDA_VERSION: &str = "12.6";
+const CUDA_PACKAGE_INDEX: &str = "https://www.paddlepaddle.org.cn/packages/stable/cu126/";
 const PIP_WHEEL: &str = "pip-25.1.1-py3-none-any.whl";
 const PIP_WHEEL_SHA256: &str = "2913a38a2abf4ea6b64ab507bd9e967f3b53dc1ede74b01b0931e1ce548751af";
 const SETUPTOOLS_WHEEL: &str = "setuptools-80.9.0-py3-none-any.whl";
@@ -22,11 +29,79 @@ const SETUPTOOLS_WHEEL_SHA256: &str =
     "062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922";
 const WHEEL_WHEEL: &str = "wheel-0.45.1-py3-none-any.whl";
 const WHEEL_WHEEL_SHA256: &str = "708e7481cc80179af0e556bbf0cc00b8444c7321e2700b8d8580231d13017248";
+const USTC_PYPI_URL: &str = "https://mirrors.ustc.edu.cn/pypi/simple";
+const TSINGHUA_PYPI_URL: &str = "https://pypi.tuna.tsinghua.edu.cn/simple";
+const OFFICIAL_PYPI_URL: &str = "https://pypi.org/simple";
 
 static INSTALL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeProfile {
+    Cpu,
+    Cuda126,
+}
+
+impl RuntimeProfile {
+    pub fn directory_name(self) -> String {
+        format!("{}-v{RUNTIME_VERSION}", self.as_str())
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Cuda126 => "cu126",
+        }
+    }
+
+    fn paddle_package(self) -> &'static str {
+        match self {
+            Self::Cpu => "paddlepaddle",
+            Self::Cuda126 => "paddlepaddle-gpu",
+        }
+    }
+
+    fn expects_cuda(self) -> bool {
+        matches!(self, Self::Cuda126)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RapidRuntimeProfile {
+    DirectMl,
+    CoreMl,
+}
+
+impl RapidRuntimeProfile {
+    pub fn directory_name(self) -> String {
+        format!("{}-v{RAPID_RUNTIME_VERSION}", self.as_str())
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DirectMl => "directml",
+            Self::CoreMl => "coreml",
+        }
+    }
+
+    fn provider_package(self) -> &'static str {
+        match self {
+            Self::DirectMl => "onnxruntime-directml",
+            Self::CoreMl => "onnxruntime",
+        }
+    }
+
+    pub fn expected_provider(self) -> &'static str {
+        match self {
+            Self::DirectMl => "DmlExecutionProvider",
+            Self::CoreMl => "CoreMLExecutionProvider",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
-pub struct PaddleInstallProgress {
+pub struct RuntimeInstallProgress {
     pub stage: &'static str,
     pub progress: u8,
     pub message: String,
@@ -45,11 +120,64 @@ pub struct RuntimePaths {
 #[derive(Debug, Serialize, Deserialize)]
 struct RuntimeManifest {
     runtime_version: String,
+    profile: RuntimeProfile,
     python_version: String,
+    paddle_package: String,
     paddle_version: String,
     paddleocr_version: String,
+    cuda_version: Option<String>,
     requirements_sha256: String,
     constraints_sha256: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RapidRuntimeManifest {
+    runtime_version: String,
+    profile: RapidRuntimeProfile,
+    python_version: String,
+    rapidocr_version: String,
+    onnxruntime_package: String,
+    onnxruntime_version: String,
+    pymupdf_version: String,
+    available_providers: Vec<String>,
+    wheelhouse_sha256: String,
+    requirements_sha256: String,
+    constraints_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbeddedRapidWheelhouseManifest {
+    version: u32,
+    profile: String,
+    python_version: String,
+    requirements_sha256: String,
+    constraints_sha256: String,
+    files: Vec<EmbeddedRapidWheel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbeddedRapidWheel {
+    name: String,
+    size: u64,
+    sha256: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RuntimeProbe {
+    python: String,
+    paddle: String,
+    paddleocr: String,
+    compiled_with_cuda: bool,
+    cuda: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RapidRuntimeProbe {
+    python: String,
+    rapidocr: String,
+    onnxruntime: String,
+    pymupdf: String,
+    providers: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -66,13 +194,13 @@ struct BundleSpec {
 }
 
 impl RuntimePaths {
-    pub fn for_app(app: &AppHandle) -> Result<Self, String> {
+    pub fn for_app(app: &AppHandle, profile: RuntimeProfile) -> Result<Self, String> {
         let root = app
             .path()
             .app_data_dir()
             .map_err(|error| error.to_string())?
             .join("paddle-runtime");
-        let install_dir = root.join(format!("v{RUNTIME_VERSION}"));
+        let install_dir = root.join(profile.directory_name());
         let python = install_dir.join(python_relative_path());
         Ok(Self {
             manifest: install_dir.join("runtime-manifest.json"),
@@ -84,7 +212,25 @@ impl RuntimePaths {
         })
     }
 
-    pub fn is_ready(&self) -> bool {
+    pub fn for_rapid_app(app: &AppHandle, profile: RapidRuntimeProfile) -> Result<Self, String> {
+        let root = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| error.to_string())?
+            .join("rapidocr-runtime");
+        let install_dir = root.join(profile.directory_name());
+        let python = install_dir.join(python_relative_path());
+        Ok(Self {
+            manifest: install_dir.join("runtime-manifest.json"),
+            model_cache: root.join("models"),
+            pip_cache: root.join("pip-cache"),
+            root,
+            install_dir,
+            python,
+        })
+    }
+
+    pub fn is_ready(&self, profile: RuntimeProfile) -> bool {
         if !self.python.is_file() || !self.manifest.is_file() {
             return false;
         }
@@ -93,9 +239,43 @@ impl RuntimePaths {
             .and_then(|contents| serde_json::from_str::<RuntimeManifest>(&contents).ok())
             .is_some_and(|manifest| {
                 manifest.runtime_version == RUNTIME_VERSION
+                    && manifest.profile == profile
                     && manifest.python_version.starts_with(PYTHON_VERSION)
+                    && manifest.paddle_package == profile.paddle_package()
                     && manifest.paddle_version == PADDLE_VERSION
                     && manifest.paddleocr_version == PADDLEOCR_VERSION
+                    && match profile {
+                        RuntimeProfile::Cpu => manifest.cuda_version.is_none(),
+                        RuntimeProfile::Cuda126 => manifest
+                            .cuda_version
+                            .as_deref()
+                            .is_some_and(|version| version.starts_with(CUDA_VERSION)),
+                    }
+                    && manifest.requirements_sha256.len() == 64
+                    && manifest.constraints_sha256.len() == 64
+            })
+    }
+
+    pub fn is_rapid_ready(&self, profile: RapidRuntimeProfile) -> bool {
+        if !self.python.is_file() || !self.manifest.is_file() {
+            return false;
+        }
+        fs::read_to_string(&self.manifest)
+            .ok()
+            .and_then(|contents| serde_json::from_str::<RapidRuntimeManifest>(&contents).ok())
+            .is_some_and(|manifest| {
+                manifest.runtime_version == RAPID_RUNTIME_VERSION
+                    && manifest.profile == profile
+                    && manifest.python_version.starts_with(PYTHON_VERSION)
+                    && manifest.rapidocr_version == RAPIDOCR_VERSION
+                    && manifest.onnxruntime_package == profile.provider_package()
+                    && manifest.onnxruntime_version == RAPID_ORT_VERSION
+                    && manifest.pymupdf_version == PYMUPDF_VERSION
+                    && manifest.wheelhouse_sha256.len() == 64
+                    && manifest
+                        .available_providers
+                        .iter()
+                        .any(|provider| provider == profile.expected_provider())
                     && manifest.requirements_sha256.len() == 64
                     && manifest.constraints_sha256.len() == 64
             })
@@ -105,6 +285,27 @@ impl RuntimePaths {
 pub fn install_supported() -> bool {
     cfg!(all(target_os = "windows", target_arch = "x86_64"))
         || cfg!(all(target_os = "macos", target_arch = "aarch64"))
+}
+
+pub fn profile_install_supported(profile: RuntimeProfile) -> bool {
+    match profile {
+        RuntimeProfile::Cpu => install_supported(),
+        RuntimeProfile::Cuda126 => cfg!(all(target_os = "windows", target_arch = "x86_64")),
+    }
+}
+
+pub fn rapid_runtime_profile() -> Result<RapidRuntimeProfile, String> {
+    if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        Ok(RapidRuntimeProfile::DirectMl)
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        Ok(RapidRuntimeProfile::CoreMl)
+    } else {
+        Err(format!(
+            "The managed RapidOCR runtime is not available for {}/{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ))
+    }
 }
 
 pub fn configure_python_command(command: &mut Command, paths: &RuntimePaths) {
@@ -122,21 +323,29 @@ pub fn configure_python_command(command: &mut Command, paths: &RuntimePaths) {
 
 pub fn install_managed_runtime(
     app: &AppHandle,
+    profile: RuntimeProfile,
     requirements: &Path,
     constraints: &Path,
+    package_indexes: &[String],
 ) -> Result<RuntimePaths, String> {
-    if !install_supported() {
-        return Err(unsupported_message());
+    if !profile_install_supported(profile) {
+        return Err(unsupported_profile_message(profile));
     }
     let lock = INSTALL_LOCK.get_or_init(|| Mutex::new(()));
     let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let paths = RuntimePaths::for_app(app)?;
-    if paths.is_ready() && probe_versions(&paths.python, &paths).is_ok() {
+    let paths = RuntimePaths::for_app(app, profile)?;
+    if paths.is_ready(profile)
+        && probe_runtime(&paths.python, &paths)
+            .is_ok_and(|probe| runtime_probe_matches_profile(&probe, profile))
+    {
         emit_progress(
             app,
             "completed",
             100,
-            "PaddleOCR runtime is already installed",
+            &format!(
+                "PaddleOCR {} runtime is already installed",
+                profile.as_str()
+            ),
         );
         return Ok(paths);
     }
@@ -153,7 +362,15 @@ pub fn install_managed_runtime(
     fs::create_dir_all(&staging)
         .map_err(|error| format!("Cannot create PaddleOCR staging directory: {error}"))?;
 
-    let result = install_into(app, requirements, constraints, &paths, &staging);
+    let result = install_into(
+        app,
+        profile,
+        requirements,
+        constraints,
+        package_indexes,
+        &paths,
+        &staging,
+    );
     if let Err(error) = &result {
         let _ = fs::remove_dir_all(&staging);
         emit_progress(app, "failed", 100, error);
@@ -162,10 +379,249 @@ pub fn install_managed_runtime(
     result.map(|_| paths)
 }
 
-fn install_into(
+pub fn install_managed_rapid_runtime(
     app: &AppHandle,
+    profile: RapidRuntimeProfile,
     requirements: &Path,
     constraints: &Path,
+    wheelhouse: &Path,
+) -> Result<RuntimePaths, String> {
+    let supported_profile = rapid_runtime_profile()?;
+    if profile != supported_profile {
+        return Err(format!(
+            "RapidOCR runtime profile {} is not supported on this platform",
+            profile.as_str()
+        ));
+    }
+    let wheelhouse_sha256 =
+        verify_rapid_wheelhouse(profile, requirements, constraints, wheelhouse)?;
+    let lock = INSTALL_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let paths = RuntimePaths::for_rapid_app(app, profile)?;
+    if paths.is_rapid_ready(profile)
+        && probe_rapid_runtime(&paths.python, &paths)
+            .is_ok_and(|probe| rapid_probe_matches_profile(&probe, profile))
+    {
+        emit_runtime_progress(
+            app,
+            "rapid-install:progress",
+            "completed",
+            100,
+            &format!("RapidOCR {} runtime is already installed", profile.as_str()),
+        );
+        return Ok(paths);
+    }
+    if paths.install_dir.exists() {
+        log::warn!("Existing RapidOCR runtime did not pass verification and will be repaired");
+    }
+
+    fs::create_dir_all(&paths.root)
+        .map_err(|error| format!("Cannot create RapidOCR runtime directory: {error}"))?;
+    cleanup_interrupted_installations(&paths.root);
+    let staging = paths
+        .root
+        .join(format!(".installing-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&staging)
+        .map_err(|error| format!("Cannot create RapidOCR staging directory: {error}"))?;
+
+    let result = install_rapid_into(
+        app,
+        profile,
+        requirements,
+        constraints,
+        wheelhouse,
+        &wheelhouse_sha256,
+        &paths,
+        &staging,
+    );
+    if let Err(error) = &result {
+        let _ = fs::remove_dir_all(&staging);
+        emit_runtime_progress(app, "rapid-install:progress", "failed", 100, error);
+        log::error!("RapidOCR managed runtime installation failed: {error}");
+    }
+    result.map(|_| paths)
+}
+
+fn install_rapid_into(
+    app: &AppHandle,
+    profile: RapidRuntimeProfile,
+    requirements: &Path,
+    constraints: &Path,
+    wheelhouse: &Path,
+    wheelhouse_sha256: &str,
+    paths: &RuntimePaths,
+    staging: &Path,
+) -> Result<(), String> {
+    let event = "rapid-install:progress";
+    let spec = bundle_spec()?;
+    emit_runtime_progress(
+        app,
+        event,
+        "preparing",
+        5,
+        "Checking bundled Python runtime",
+    );
+    let archive = runtime_resource(app, spec.archive_name)?;
+    verify_sha256(&archive, spec.archive_sha256)?;
+    let pip_wheel = runtime_resource(app, PIP_WHEEL)?;
+    verify_sha256(&pip_wheel, PIP_WHEEL_SHA256)?;
+    let setuptools_wheel = runtime_resource(app, SETUPTOOLS_WHEEL)?;
+    verify_sha256(&setuptools_wheel, SETUPTOOLS_WHEEL_SHA256)?;
+    let wheel_wheel = runtime_resource(app, WHEEL_WHEEL)?;
+    verify_sha256(&wheel_wheel, WHEEL_WHEEL_SHA256)?;
+
+    emit_runtime_progress(
+        app,
+        event,
+        "extracting",
+        20,
+        "Preparing the private Python runtime",
+    );
+    match spec.kind {
+        ArchiveKind::Zip => extract_zip(&archive, staging)?,
+        ArchiveKind::TarGz => extract_tar_gz(&archive, staging)?,
+    }
+    prepare_python(staging, &[pip_wheel, setuptools_wheel, wheel_wheel])?;
+    let staging_python = staging.join(python_relative_path());
+    if !staging_python.is_file() {
+        return Err(format!(
+            "Bundled Python runtime is incomplete: {} was not found",
+            staging_python.display()
+        ));
+    }
+
+    fs::create_dir_all(&paths.pip_cache)
+        .map_err(|error| format!("Cannot create pip cache: {error}"))?;
+    fs::create_dir_all(&paths.model_cache)
+        .map_err(|error| format!("Cannot create RapidOCR model cache: {error}"))?;
+
+    let mut pip_check = hidden_command(&staging_python);
+    configure_python_command(&mut pip_check, paths);
+    let pip_check = pip_check
+        .args(["-I", "-m", "pip", "--version"])
+        .output()
+        .map_err(|error| format!("Cannot start bundled Python: {error}"))?;
+    if !pip_check.status.success() {
+        return Err(format!(
+            "Bundled pip bootstrap failed: {}",
+            output_error(&pip_check)
+        ));
+    }
+
+    emit_runtime_progress(
+        app,
+        event,
+        "installing",
+        40,
+        "Installing RapidOCR and ONNX Runtime components",
+    );
+    install_offline_requirements(
+        &staging_python,
+        paths,
+        requirements,
+        constraints,
+        wheelhouse,
+        app,
+    )?;
+
+    emit_runtime_progress(app, event, "verifying", 90, "Verifying RapidOCR components");
+    let probe = probe_rapid_runtime(&staging_python, paths)?;
+    if !rapid_probe_matches_profile(&probe, profile) {
+        return Err(format!(
+            "RapidOCR runtime verification failed: expected profile {}, Python {PYTHON_VERSION}, RapidOCR {RAPIDOCR_VERSION}, ONNX Runtime {RAPID_ORT_VERSION}, PyMuPDF {PYMUPDF_VERSION}; got Python {}, RapidOCR {}, ONNX Runtime {}, PyMuPDF {}, providers {:?}",
+            profile.as_str(),
+            probe.python,
+            probe.rapidocr,
+            probe.onnxruntime,
+            probe.pymupdf,
+            probe.providers
+        ));
+    }
+    let manifest = RapidRuntimeManifest {
+        runtime_version: RAPID_RUNTIME_VERSION.to_string(),
+        profile,
+        python_version: probe.python,
+        rapidocr_version: probe.rapidocr,
+        onnxruntime_package: profile.provider_package().to_string(),
+        onnxruntime_version: probe.onnxruntime,
+        pymupdf_version: probe.pymupdf,
+        available_providers: probe.providers,
+        wheelhouse_sha256: wheelhouse_sha256.to_string(),
+        requirements_sha256: file_sha256(requirements)?,
+        constraints_sha256: file_sha256(constraints)?,
+    };
+    fs::write(
+        staging.join("runtime-manifest.json"),
+        serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("Cannot write RapidOCR runtime manifest: {error}"))?;
+
+    promote_runtime(&paths.install_dir, staging)?;
+    emit_runtime_progress(
+        app,
+        event,
+        "completed",
+        100,
+        &format!("RapidOCR {} runtime is ready", profile.as_str()),
+    );
+    log::info!(
+        "RapidOCR managed runtime {} ({}) installed at {}",
+        RAPID_RUNTIME_VERSION,
+        profile.as_str(),
+        paths.install_dir.display()
+    );
+    Ok(())
+}
+
+fn install_offline_requirements(
+    python: &Path,
+    paths: &RuntimePaths,
+    requirements: &Path,
+    constraints: &Path,
+    wheelhouse: &Path,
+    app: &AppHandle,
+) -> Result<(), String> {
+    emit_runtime_progress(
+        app,
+        "rapid-install:progress",
+        "installing",
+        40,
+        "Installing the embedded RapidOCR runtime without network access",
+    );
+    let mut install = hidden_command(python);
+    configure_python_command(&mut install, paths);
+    install.args([
+        "-I",
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        "--no-input",
+        "--no-index",
+        "--only-binary=:all:",
+        "--no-warn-script-location",
+        "--find-links",
+    ]);
+    install
+        .arg(wheelhouse)
+        .arg("--constraint")
+        .arg(constraints)
+        .arg("--requirement")
+        .arg(requirements);
+    run_install_command(
+        install,
+        app,
+        "rapid-install:progress",
+        "RapidOCR",
+    )
+}
+
+fn install_into(
+    app: &AppHandle,
+    profile: RuntimeProfile,
+    requirements: &Path,
+    constraints: &Path,
+    package_indexes: &[String],
     paths: &RuntimePaths,
     staging: &Path,
 ) -> Result<(), String> {
@@ -223,24 +679,41 @@ fn install_into(
         40,
         "Installing PaddleOCR components. The first installation can take several minutes.",
     );
-    install_dependencies(&staging_python, paths, requirements, constraints, app)?;
+    install_dependencies(
+        &staging_python,
+        paths,
+        profile,
+        requirements,
+        constraints,
+        package_indexes,
+        app,
+    )?;
 
     emit_progress(app, "verifying", 90, "Verifying PaddleOCR components");
-    let versions = probe_versions(&staging_python, paths)?;
-    if !versions.0.starts_with(PYTHON_VERSION)
-        || versions.1 != PADDLE_VERSION
-        || versions.2 != PADDLEOCR_VERSION
+    let probe = probe_runtime(&staging_python, paths)?;
+    if !probe.python.starts_with(PYTHON_VERSION)
+        || probe.paddle != PADDLE_VERSION
+        || probe.paddleocr != PADDLEOCR_VERSION
+        || !runtime_probe_matches_profile(&probe, profile)
     {
         return Err(format!(
-            "PaddleOCR version verification failed: expected Python {PYTHON_VERSION}, PaddlePaddle {PADDLE_VERSION}, PaddleOCR {PADDLEOCR_VERSION}; got Python {}, PaddlePaddle {}, PaddleOCR {}",
-            versions.0, versions.1, versions.2
+            "PaddleOCR runtime verification failed: expected profile {}, Python {PYTHON_VERSION}, PaddlePaddle {PADDLE_VERSION}, PaddleOCR {PADDLEOCR_VERSION}; got Python {}, PaddlePaddle {}, PaddleOCR {}, CUDA build {}, CUDA version {}",
+            profile.as_str(),
+            probe.python,
+            probe.paddle,
+            probe.paddleocr,
+            probe.compiled_with_cuda,
+            probe.cuda.as_deref().unwrap_or("none")
         ));
     }
     let manifest = RuntimeManifest {
         runtime_version: RUNTIME_VERSION.to_string(),
-        python_version: versions.0,
-        paddle_version: versions.1,
-        paddleocr_version: versions.2,
+        profile,
+        python_version: probe.python,
+        paddle_package: profile.paddle_package().to_string(),
+        paddle_version: probe.paddle,
+        paddleocr_version: probe.paddleocr,
+        cuda_version: probe.cuda,
         requirements_sha256: file_sha256(requirements)?,
         constraints_sha256: file_sha256(constraints)?,
     };
@@ -251,10 +724,16 @@ fn install_into(
     .map_err(|error| format!("Cannot write PaddleOCR runtime manifest: {error}"))?;
 
     promote_runtime(&paths.install_dir, staging)?;
-    emit_progress(app, "completed", 100, "PaddleOCR is ready");
+    emit_progress(
+        app,
+        "completed",
+        100,
+        &format!("PaddleOCR {} runtime is ready", profile.as_str()),
+    );
     log::info!(
-        "PaddleOCR managed runtime {} installed at {}",
+        "PaddleOCR managed runtime {} ({}) installed at {}",
         RUNTIME_VERSION,
+        profile.as_str(),
         paths.install_dir.display()
     );
     Ok(())
@@ -263,22 +742,87 @@ fn install_into(
 fn install_dependencies(
     python: &Path,
     paths: &RuntimePaths,
+    profile: RuntimeProfile,
     requirements: &Path,
     constraints: &Path,
+    package_indexes: &[String],
     app: &AppHandle,
 ) -> Result<(), String> {
-    let indexes = [
-        "https://pypi.tuna.tsinghua.edu.cn/simple",
-        "https://pypi.org/simple",
-    ];
+    if profile == RuntimeProfile::Cuda126 {
+        emit_progress(
+            app,
+            "installing",
+            40,
+            "Installing the PaddlePaddle CUDA 12.6 runtime from the official CUDA repository",
+        );
+        let mut install = hidden_command(python);
+        configure_python_command(&mut install, paths);
+        install.args([
+            "-I",
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--no-input",
+            "--no-build-isolation",
+            "--no-warn-script-location",
+            "--prefer-binary",
+            "--timeout",
+            "120",
+            "--retries",
+            "3",
+            "--upgrade",
+            "--index-url",
+            CUDA_PACKAGE_INDEX,
+        ]);
+        if let Some(extra_index) = package_indexes.first() {
+            install.args(["--extra-index-url", extra_index]);
+        }
+        install
+            .arg("--constraint")
+            .arg(constraints)
+            .arg(format!("paddlepaddle-gpu=={PADDLE_VERSION}"));
+        run_install_command(install, app, "paddle-install:progress", "PaddleOCR").map_err(
+            |error| {
+            format!(
+                "PaddlePaddle CUDA {CUDA_VERSION} could not be installed from {CUDA_PACKAGE_INDEX}: {error}"
+            )
+        },
+        )?;
+    }
+
+    install_requirements(
+        python,
+        paths,
+        requirements,
+        constraints,
+        package_indexes,
+        app,
+        "paddle-install:progress",
+        "PaddleOCR",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn install_requirements(
+    python: &Path,
+    paths: &RuntimePaths,
+    requirements: &Path,
+    constraints: &Path,
+    package_indexes: &[String],
+    app: &AppHandle,
+    progress_event: &'static str,
+    display_name: &'static str,
+) -> Result<(), String> {
     let mut errors = Vec::new();
-    for (attempt, index) in indexes.iter().enumerate() {
+    for (attempt, index) in package_indexes.iter().enumerate() {
         if attempt > 0 {
-            emit_progress(
+            emit_runtime_progress(
                 app,
+                progress_event,
                 "installing",
                 40,
-                "The package mirror was unavailable. Retrying with the official Python index.",
+                &format!("The package mirror was unavailable. Retrying with backup index: {index}"),
             );
         }
         let mut install = hidden_command(python);
@@ -299,25 +843,49 @@ fn install_dependencies(
             "3",
             "--upgrade",
             "--index-url",
-            index,
+            index.as_str(),
             "--constraint",
         ]);
         install
             .arg(constraints)
             .arg("--requirement")
             .arg(requirements);
-        match run_install_command(install, app) {
+        match run_install_command(install, app, progress_event, display_name) {
             Ok(()) => return Ok(()),
             Err(error) => {
-                log::warn!("PaddleOCR installation through {index} failed: {error}");
+                log::warn!("{display_name} installation through {index} failed: {error}");
                 errors.push(error);
             }
         }
     }
     Err(format!(
-        "PaddleOCR packages could not be installed from either package index: {}",
+        "{display_name} packages could not be installed from either package index: {}",
         errors.join("\n---\n")
     ))
+}
+
+pub fn package_index_urls(primary: &str, fallback: &str) -> Vec<String> {
+    let primary = package_index_url(primary).unwrap_or(USTC_PYPI_URL);
+    let requested_fallback = package_index_url(fallback).unwrap_or(TSINGHUA_PYPI_URL);
+    let fallback = if requested_fallback == primary {
+        if primary == USTC_PYPI_URL {
+            TSINGHUA_PYPI_URL
+        } else {
+            USTC_PYPI_URL
+        }
+    } else {
+        requested_fallback
+    };
+    vec![primary.to_string(), fallback.to_string()]
+}
+
+fn package_index_url(index: &str) -> Option<&'static str> {
+    match index.trim().to_ascii_lowercase().as_str() {
+        "ustc" => Some(USTC_PYPI_URL),
+        "tsinghua" => Some(TSINGHUA_PYPI_URL),
+        "official" => Some(OFFICIAL_PYPI_URL),
+        _ => None,
+    }
 }
 
 fn prepare_python(staging: &Path, bootstrap_wheels: &[PathBuf]) -> Result<(), String> {
@@ -340,14 +908,14 @@ fn prepare_python(staging: &Path, bootstrap_wheels: &[PathBuf]) -> Result<(), St
     Ok(())
 }
 
-fn probe_versions(python: &Path, paths: &RuntimePaths) -> Result<(String, String, String), String> {
+fn probe_runtime(python: &Path, paths: &RuntimePaths) -> Result<RuntimeProbe, String> {
     let mut command = hidden_command(python);
     configure_python_command(&mut command, paths);
     let output = command
         .args([
             "-I",
             "-c",
-            "import json,sys,paddle,paddleocr,fitz; print(json.dumps({'python':sys.version.split()[0],'paddle':paddle.__version__,'paddleocr':paddleocr.__version__}))",
+            "import json,sys,paddle,paddleocr,fitz; print(json.dumps({'python':sys.version.split()[0],'paddle':paddle.__version__,'paddleocr':paddleocr.__version__,'compiled_with_cuda':paddle.is_compiled_with_cuda(),'cuda':paddle.version.cuda() or None}))",
         ])
         .output()
         .map_err(|error| format!("Cannot verify PaddleOCR runtime: {error}"))?;
@@ -357,34 +925,81 @@ fn probe_versions(python: &Path, paths: &RuntimePaths) -> Result<(String, String
             output_error(&output)
         ));
     }
-    let value = String::from_utf8_lossy(&output.stdout)
+    String::from_utf8_lossy(&output.stdout)
         .lines()
         .rev()
-        .find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .ok_or_else(|| "PaddleOCR verification returned no version information".to_string())?;
-    let get = |name: &str| {
-        value
-            .get(name)
-            .and_then(|item| item.as_str())
-            .map(str::to_string)
-            .ok_or_else(|| format!("PaddleOCR verification omitted {name}"))
-    };
-    Ok((get("python")?, get("paddle")?, get("paddleocr")?))
+        .find_map(|line| serde_json::from_str::<RuntimeProbe>(line).ok())
+        .ok_or_else(|| "PaddleOCR verification returned no runtime information".to_string())
 }
 
-fn run_install_command(mut command: Command, app: &AppHandle) -> Result<(), String> {
+fn runtime_probe_matches_profile(probe: &RuntimeProbe, profile: RuntimeProfile) -> bool {
+    probe.compiled_with_cuda == profile.expects_cuda()
+        && match profile {
+            RuntimeProfile::Cpu => probe.cuda.is_none(),
+            RuntimeProfile::Cuda126 => probe
+                .cuda
+                .as_deref()
+                .is_some_and(|version| version.starts_with(CUDA_VERSION)),
+        }
+}
+
+fn probe_rapid_runtime(python: &Path, paths: &RuntimePaths) -> Result<RapidRuntimeProbe, String> {
+    let mut command = hidden_command(python);
+    configure_python_command(&mut command, paths);
+    let output = command
+        .args([
+            "-I",
+            "-c",
+            "import json,sys,fitz,onnxruntime; from importlib.metadata import version; print(json.dumps({'python':sys.version.split()[0],'rapidocr':version('rapidocr'),'onnxruntime':onnxruntime.__version__,'pymupdf':fitz.VersionBind,'providers':onnxruntime.get_available_providers()}))",
+        ])
+        .output()
+        .map_err(|error| format!("Cannot verify RapidOCR runtime: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "RapidOCR verification failed: {}",
+            output_error(&output)
+        ));
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .rev()
+        .find_map(|line| serde_json::from_str::<RapidRuntimeProbe>(line).ok())
+        .ok_or_else(|| "RapidOCR verification returned no runtime information".to_string())
+}
+
+fn rapid_probe_matches_profile(probe: &RapidRuntimeProbe, profile: RapidRuntimeProfile) -> bool {
+    probe.python.starts_with(PYTHON_VERSION)
+        && probe.rapidocr == RAPIDOCR_VERSION
+        && probe.onnxruntime == RAPID_ORT_VERSION
+        && probe.pymupdf == PYMUPDF_VERSION
+        && probe
+            .providers
+            .iter()
+            .any(|provider| provider == profile.expected_provider())
+        && probe
+            .providers
+            .iter()
+            .any(|provider| provider == "CPUExecutionProvider")
+}
+
+fn run_install_command(
+    mut command: Command,
+    app: &AppHandle,
+    progress_event: &'static str,
+    display_name: &'static str,
+) -> Result<(), String> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command
         .spawn()
-        .map_err(|error| format!("Cannot start PaddleOCR dependency installer: {error}"))?;
+        .map_err(|error| format!("Cannot start {display_name} dependency installer: {error}"))?;
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| "PaddleOCR installer stdout is unavailable".to_string())?;
+        .ok_or_else(|| format!("{display_name} installer stdout is unavailable"))?;
     let stderr = child
         .stderr
         .take()
-        .ok_or_else(|| "PaddleOCR installer stderr is unavailable".to_string())?;
+        .ok_or_else(|| format!("{display_name} installer stderr is unavailable"))?;
     let (sender, receiver) = mpsc::channel::<(bool, String)>();
     let stdout_sender = sender.clone();
     let stdout_thread = std::thread::spawn(move || {
@@ -402,9 +1017,15 @@ fn run_install_command(mut command: Command, app: &AppHandle) -> Result<(), Stri
 
     let status = loop {
         match receiver.recv_timeout(Duration::from_millis(150)) {
-            Ok((is_error, line)) => {
-                record_install_line(app, is_error, line, &mut output_tail, &mut progress)
-            }
+            Ok((is_error, line)) => record_install_line(
+                app,
+                progress_event,
+                display_name,
+                is_error,
+                line,
+                &mut output_tail,
+                &mut progress,
+            ),
             Err(mpsc::RecvTimeoutError::Disconnected) => {}
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
@@ -415,11 +1036,19 @@ fn run_install_command(mut command: Command, app: &AppHandle) -> Result<(), Stri
     let _ = stdout_thread.join();
     let _ = stderr_thread.join();
     while let Ok((is_error, line)) = receiver.try_recv() {
-        record_install_line(app, is_error, line, &mut output_tail, &mut progress);
+        record_install_line(
+            app,
+            progress_event,
+            display_name,
+            is_error,
+            line,
+            &mut output_tail,
+            &mut progress,
+        );
     }
     if !status.success() {
         return Err(format!(
-            "PaddleOCR dependency installation exited with {status}: {}",
+            "{display_name} dependency installation exited with {status}: {}",
             output_tail.into_iter().collect::<Vec<_>>().join("\n")
         ));
     }
@@ -428,6 +1057,8 @@ fn run_install_command(mut command: Command, app: &AppHandle) -> Result<(), Stri
 
 fn record_install_line(
     app: &AppHandle,
+    progress_event: &'static str,
+    display_name: &'static str,
     is_error: bool,
     line: String,
     output_tail: &mut VecDeque<String>,
@@ -438,17 +1069,18 @@ fn record_install_line(
         return;
     }
     if is_error {
-        log::warn!("PaddleOCR installer: {line}");
+        log::warn!("{display_name} installer: {line}");
     } else {
-        log::info!("PaddleOCR installer: {line}");
+        log::info!("{display_name} installer: {line}");
     }
     if output_tail.len() == 80 {
         output_tail.pop_front();
     }
     output_tail.push_back(line.clone());
     *progress = (*progress).max(install_line_progress(&line));
-    emit_progress(
+    emit_runtime_progress(
         app,
+        progress_event,
         "installing",
         *progress,
         &line.chars().take(300).collect::<String>(),
@@ -476,13 +1108,13 @@ fn promote_runtime(final_dir: &Path, staging: &Path) -> Result<(), String> {
     let had_existing = final_dir.exists();
     if had_existing {
         fs::rename(final_dir, &backup)
-            .map_err(|error| format!("Cannot replace the previous PaddleOCR runtime: {error}"))?;
+            .map_err(|error| format!("Cannot replace the previous managed OCR runtime: {error}"))?;
     }
     if let Err(error) = fs::rename(staging, final_dir) {
         if had_existing {
             let _ = fs::rename(&backup, final_dir);
         }
-        return Err(format!("Cannot activate the PaddleOCR runtime: {error}"));
+        return Err(format!("Cannot activate the managed OCR runtime: {error}"));
     }
     if had_existing {
         let _ = fs::remove_dir_all(backup);
@@ -572,6 +1204,107 @@ fn file_sha256(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
+pub fn embedded_rapid_wheelhouse(
+    app: &AppHandle,
+    profile: RapidRuntimeProfile,
+    requirements: &Path,
+    constraints: &Path,
+) -> Result<PathBuf, String> {
+    let mut candidates = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(
+            resource_dir
+                .join("resources")
+                .join("rapidocr-runtime")
+                .join(profile.as_str()),
+        );
+        candidates.push(
+            resource_dir
+                .join("rapidocr-runtime")
+                .join(profile.as_str()),
+        );
+    }
+    #[cfg(debug_assertions)]
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("rapidocr-runtime")
+            .join(profile.as_str()),
+    );
+    let wheelhouse = candidates
+        .into_iter()
+        .find(|path| path.join("wheelhouse-manifest.json").is_file())
+        .ok_or_else(|| {
+            format!(
+                "Embedded RapidOCR {} wheelhouse was not found. Rebuild the release with npm run prepare:rapidocr-runtime.",
+                profile.as_str()
+            )
+        })?;
+    verify_rapid_wheelhouse(profile, requirements, constraints, &wheelhouse)?;
+    Ok(wheelhouse)
+}
+
+fn verify_rapid_wheelhouse(
+    profile: RapidRuntimeProfile,
+    requirements: &Path,
+    constraints: &Path,
+    wheelhouse: &Path,
+) -> Result<String, String> {
+    let manifest_path = wheelhouse.join("wheelhouse-manifest.json");
+    let manifest_contents = fs::read_to_string(&manifest_path).map_err(|error| {
+        format!(
+            "Cannot read embedded RapidOCR wheelhouse manifest {}: {error}",
+            manifest_path.display()
+        )
+    })?;
+    let manifest: EmbeddedRapidWheelhouseManifest = serde_json::from_str(&manifest_contents)
+        .map_err(|error| format!("Invalid embedded RapidOCR wheelhouse manifest: {error}"))?;
+    if manifest.version != RAPID_WHEELHOUSE_VERSION
+        || manifest.profile != profile.as_str()
+        || !manifest.python_version.starts_with(PYTHON_VERSION)
+        || manifest.requirements_sha256 != file_sha256(requirements)?
+        || manifest.constraints_sha256 != file_sha256(constraints)?
+        || manifest.files.is_empty()
+    {
+        return Err(format!(
+            "Embedded RapidOCR {} wheelhouse does not match runtime version {RAPID_RUNTIME_VERSION}",
+            profile.as_str()
+        ));
+    }
+
+    let mut names = HashSet::new();
+    for file in &manifest.files {
+        let relative = Path::new(&file.name);
+        if !file.name.ends_with(".whl")
+            || relative.components().count() != 1
+            || !names.insert(file.name.as_str())
+        {
+            return Err(format!(
+                "Unsafe or duplicate wheel name in RapidOCR manifest: {}",
+                file.name
+            ));
+        }
+        let path = wheelhouse.join(relative);
+        let metadata = fs::metadata(&path)
+            .map_err(|error| format!("Embedded RapidOCR wheel {} is missing: {error}", path.display()))?;
+        if !metadata.is_file() || metadata.len() != file.size {
+            return Err(format!(
+                "Embedded RapidOCR wheel {} has an unexpected size",
+                path.display()
+            ));
+        }
+        let actual = file_sha256(&path)?;
+        if actual != file.sha256 {
+            return Err(format!(
+                "Security check failed for embedded RapidOCR wheel {}: expected {}, got {actual}",
+                path.display(),
+                file.sha256
+            ));
+        }
+    }
+    file_sha256(&manifest_path)
+}
+
 fn runtime_resource(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
     let mut candidates = Vec::new();
     if let Ok(resource_dir) = app.path().resource_dir() {
@@ -593,13 +1326,23 @@ fn runtime_resource(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
     candidates
         .into_iter()
         .find(|path| path.is_file())
-        .ok_or_else(|| format!("Bundled PaddleOCR runtime resource '{name}' was not found"))
+        .ok_or_else(|| format!("Bundled Python runtime resource '{name}' was not found"))
 }
 
 fn emit_progress(app: &AppHandle, stage: &'static str, progress: u8, message: &str) {
+    emit_runtime_progress(app, "paddle-install:progress", stage, progress, message);
+}
+
+fn emit_runtime_progress(
+    app: &AppHandle,
+    event: &'static str,
+    stage: &'static str,
+    progress: u8,
+    message: &str,
+) {
     let _ = app.emit(
-        "paddle-install:progress",
-        PaddleInstallProgress {
+        event,
+        RuntimeInstallProgress {
             stage,
             progress,
             message: message.to_string(),
@@ -683,6 +1426,16 @@ pub fn unsupported_message() -> String {
     )
 }
 
+pub fn unsupported_profile_message(profile: RuntimeProfile) -> String {
+    if profile == RuntimeProfile::Cuda126 {
+        format!(
+            "The managed PaddleOCR CUDA {CUDA_VERSION} runtime is only available on Windows x64"
+        )
+    } else {
+        unsupported_message()
+    }
+}
+
 fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let command = Command::new(program);
     #[cfg(windows)]
@@ -699,7 +1452,12 @@ fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
 #[cfg(test)]
 mod tests {
     use super::{
-        file_sha256, install_line_progress, install_supported, promote_runtime, RUNTIME_VERSION,
+        file_sha256, install_line_progress, install_supported, package_index_urls,
+        profile_install_supported, promote_runtime, rapid_probe_matches_profile,
+        rapid_runtime_profile, runtime_probe_matches_profile, verify_rapid_wheelhouse,
+        RapidRuntimeProbe,
+        RapidRuntimeProfile, RuntimeProbe, RuntimeProfile, RAPIDOCR_VERSION, RAPID_ORT_VERSION,
+        RAPID_RUNTIME_VERSION, RUNTIME_VERSION,
     };
 
     #[test]
@@ -716,12 +1474,162 @@ mod tests {
 
     #[test]
     fn runtime_version_is_explicit() {
-        assert_eq!(RUNTIME_VERSION, "2");
+        assert_eq!(RUNTIME_VERSION, "3");
+        assert_eq!(RuntimeProfile::Cpu.directory_name(), "cpu-v3");
+        assert_eq!(RuntimeProfile::Cuda126.directory_name(), "cu126-v3");
         if cfg!(all(target_os = "windows", target_arch = "x86_64"))
             || cfg!(all(target_os = "macos", target_arch = "aarch64"))
         {
             assert!(install_supported());
         }
+        assert_eq!(
+            profile_install_supported(RuntimeProfile::Cuda126),
+            cfg!(all(target_os = "windows", target_arch = "x86_64"))
+        );
+    }
+
+    #[test]
+    fn runtime_probe_requires_the_expected_cuda_profile() {
+        let cpu = RuntimeProbe {
+            python: "3.11.9".to_string(),
+            paddle: "3.3.1".to_string(),
+            paddleocr: "3.3.1".to_string(),
+            compiled_with_cuda: false,
+            cuda: None,
+        };
+        let cuda126 = RuntimeProbe {
+            compiled_with_cuda: true,
+            cuda: Some("12.6.77".to_string()),
+            ..cpu.clone()
+        };
+        let cuda118 = RuntimeProbe {
+            cuda: Some("11.8".to_string()),
+            ..cuda126.clone()
+        };
+
+        assert!(runtime_probe_matches_profile(&cpu, RuntimeProfile::Cpu));
+        assert!(runtime_probe_matches_profile(
+            &cuda126,
+            RuntimeProfile::Cuda126
+        ));
+        assert!(!runtime_probe_matches_profile(
+            &cuda118,
+            RuntimeProfile::Cuda126
+        ));
+        assert!(!runtime_probe_matches_profile(
+            &cuda126,
+            RuntimeProfile::Cpu
+        ));
+    }
+
+    #[test]
+    fn rapid_runtime_profile_and_versions_are_explicit() {
+        assert_eq!(RAPID_RUNTIME_VERSION, "2");
+        assert_eq!(RAPIDOCR_VERSION, "3.9.2");
+        assert_eq!(RAPID_ORT_VERSION, "1.24.4");
+        assert_eq!(
+            RapidRuntimeProfile::DirectMl.directory_name(),
+            "directml-v2"
+        );
+        assert_eq!(RapidRuntimeProfile::CoreMl.directory_name(), "coreml-v2");
+        if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+            assert_eq!(
+                rapid_runtime_profile().unwrap(),
+                RapidRuntimeProfile::DirectMl
+            );
+        } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            assert_eq!(
+                rapid_runtime_profile().unwrap(),
+                RapidRuntimeProfile::CoreMl
+            );
+        } else {
+            assert!(rapid_runtime_profile().is_err());
+        }
+    }
+
+    #[test]
+    fn rapid_runtime_probe_requires_the_platform_provider_and_cpu_fallback() {
+        let directml = RapidRuntimeProbe {
+            python: "3.11.9".to_string(),
+            rapidocr: "3.9.2".to_string(),
+            onnxruntime: "1.24.4".to_string(),
+            pymupdf: "1.24.14".to_string(),
+            providers: vec![
+                "DmlExecutionProvider".to_string(),
+                "CPUExecutionProvider".to_string(),
+            ],
+        };
+        assert!(rapid_probe_matches_profile(
+            &directml,
+            RapidRuntimeProfile::DirectMl
+        ));
+
+        let cpu_only = RapidRuntimeProbe {
+            providers: vec!["CPUExecutionProvider".to_string()],
+            ..directml.clone()
+        };
+        assert!(!rapid_probe_matches_profile(
+            &cpu_only,
+            RapidRuntimeProfile::DirectMl
+        ));
+
+        let directml_without_cpu = RapidRuntimeProbe {
+            providers: vec!["DmlExecutionProvider".to_string()],
+            ..directml
+        };
+        assert!(!rapid_probe_matches_profile(
+            &directml_without_cpu,
+            RapidRuntimeProfile::DirectMl
+        ));
+    }
+
+    #[test]
+    fn embedded_rapid_wheelhouse_rejects_tampered_wheels() {
+        let root = std::env::temp_dir().join(format!(
+            "xdocuments-rapid-wheelhouse-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let requirements = root.join("requirements.txt");
+        let constraints = root.join("constraints.txt");
+        let wheel = root.join("package-1.0-py3-none-any.whl");
+        std::fs::write(&requirements, "package==1.0\n").unwrap();
+        std::fs::write(&constraints, "package==1.0\n").unwrap();
+        std::fs::write(&wheel, b"wheel").unwrap();
+        let manifest = serde_json::json!({
+            "version": 1,
+            "profile": "directml",
+            "python_version": "3.11",
+            "requirements_sha256": file_sha256(&requirements).unwrap(),
+            "constraints_sha256": file_sha256(&constraints).unwrap(),
+            "files": [{
+                "name": "package-1.0-py3-none-any.whl",
+                "size": 5,
+                "sha256": file_sha256(&wheel).unwrap()
+            }]
+        });
+        std::fs::write(
+            root.join("wheelhouse-manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        assert!(verify_rapid_wheelhouse(
+            RapidRuntimeProfile::DirectMl,
+            &requirements,
+            &constraints,
+            &root
+        )
+        .is_ok());
+        std::fs::write(&wheel, b"tampered").unwrap();
+        assert!(verify_rapid_wheelhouse(
+            RapidRuntimeProfile::DirectMl,
+            &requirements,
+            &constraints,
+            &root
+        )
+        .is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -737,12 +1645,37 @@ mod tests {
     }
 
     #[test]
+    fn package_indexes_default_to_ustc_then_tsinghua() {
+        assert_eq!(
+            package_index_urls("", ""),
+            vec![
+                "https://mirrors.ustc.edu.cn/pypi/simple",
+                "https://pypi.tuna.tsinghua.edu.cn/simple"
+            ]
+        );
+        assert_eq!(
+            package_index_urls("tsinghua", "official"),
+            vec![
+                "https://pypi.tuna.tsinghua.edu.cn/simple",
+                "https://pypi.org/simple"
+            ]
+        );
+        assert_eq!(
+            package_index_urls("ustc", "ustc"),
+            vec![
+                "https://mirrors.ustc.edu.cn/pypi/simple",
+                "https://pypi.tuna.tsinghua.edu.cn/simple"
+            ]
+        );
+    }
+
+    #[test]
     fn promotes_a_staged_runtime_over_an_existing_version() {
         let root = std::env::temp_dir().join(format!(
             "xdocuments-runtime-promote-{}",
             uuid::Uuid::new_v4()
         ));
-        let final_dir = root.join("v2");
+        let final_dir = root.join("cpu-v3");
         let staging = root.join(".installing-test");
         std::fs::create_dir_all(&final_dir).unwrap();
         std::fs::create_dir_all(&staging).unwrap();

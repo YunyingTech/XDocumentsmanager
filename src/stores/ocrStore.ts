@@ -10,6 +10,9 @@ import {
   getPaddleOcrStatus,
   installPaddleOcr,
   runPaddleOcr,
+  getRapidOcrStatus,
+  installRapidOcr,
+  runRapidOcr,
   cancelOcrTask,
   cancelAllOcrTasks,
   listOcrCandidates,
@@ -17,7 +20,7 @@ import {
   getSetting,
   setSetting,
 } from '../lib/tauri';
-import type { FileInfo, MinerUHealthInfo, OcrCandidateRef, OcrEngine, OcrTaskStatus, PaddleInstallProgress, PaddleOcrStatus, PaginatedResult, WindowsOcrProgress, WindowsOcrStatus } from '../types';
+import type { FileInfo, MinerUHealthInfo, OcrCandidateRef, OcrEngine, OcrTaskStatus, PaddleDeviceMode, PaddleInstallProgress, PaddleOcrStatus, PaddlePackageIndex, PaginatedResult, RapidDeviceMode, RapidInstallProgress, RapidOcrStatus, WindowsOcrProgress, WindowsOcrStatus } from '../types';
 import { translate } from '../lib/i18n';
 import { useUIStore } from './uiStore';
 
@@ -40,7 +43,8 @@ const WINDOWS_OCR_CONCURRENCY = 2;
 const INCREMENTAL_OCR_BATCH_SIZE = 100;
 const OCR_TASK_HISTORY_LIMIT = 2_000;
 const pendingWindowsProgress = new Map<string, WindowsOcrProgress>();
-const activeFolderOcr = new Set<number>();
+const activeBulkOcr = new Map<string, string>();
+const cancelledBulkOcr = new Set<string>();
 let windowsProgressFrame: number | null = null;
 
 interface OcrStore {
@@ -48,9 +52,12 @@ interface OcrStore {
   health: MinerUHealthInfo | null;
   windowsStatus: WindowsOcrStatus | null;
   paddleStatus: PaddleOcrStatus | null;
+  rapidStatus: RapidOcrStatus | null;
   healthChecking: boolean;
   paddleInstallProgress: PaddleInstallProgress | null;
   isInstallingPaddle: boolean;
+  rapidInstallProgress: RapidInstallProgress | null;
+  isInstallingRapid: boolean;
 
   // Files
   candidates: FileInfo[];
@@ -68,6 +75,8 @@ interface OcrStore {
   // Tasks
   tasks: OcrTask[];
   isSubmitting: boolean;
+  bulkOcrRunning: boolean;
+  bulkOcrQueued: number;
   polling: boolean;
   pollTimer: ReturnType<typeof setInterval> | null;
 
@@ -78,6 +87,14 @@ interface OcrStore {
   windowsLanguage: string;
   paddleLanguage: string;
   paddleModel: string;
+  paddleDeviceMode: PaddleDeviceMode;
+  paddlePypiPrimary: PaddlePackageIndex;
+  paddlePypiFallback: PaddlePackageIndex;
+  rapidLanguage: string;
+  rapidModel: string;
+  rapidDeviceMode: RapidDeviceMode;
+  rapidPypiPrimary: PaddlePackageIndex;
+  rapidPypiFallback: PaddlePackageIndex;
 
   // Actions
   checkHealth: () => Promise<void>;
@@ -89,7 +106,9 @@ interface OcrStore {
   deselectAll: () => void;
   submitTasks: () => Promise<void>;
   submitFileBatch: (files: OcrCandidateRef[]) => Promise<void>;
+  queueAllOcr: () => Promise<number>;
   queueFolderOcr: (folderId: number) => Promise<number>;
+  queuePendingOcr: (folderId?: number) => Promise<number>;
   submitSyncParse: (fileId: number) => Promise<string>;
   pollAllTasks: () => Promise<void>;
   startPolling: () => void;
@@ -102,11 +121,20 @@ interface OcrStore {
   saveWindowsLanguage: (language: string) => Promise<void>;
   savePaddleLanguage: (language: string) => Promise<void>;
   savePaddleModel: (model: string) => Promise<void>;
+  savePaddleDeviceMode: (mode: PaddleDeviceMode) => Promise<void>;
+  savePaddlePypiPrimary: (index: PaddlePackageIndex) => Promise<void>;
+  savePaddlePypiFallback: (index: PaddlePackageIndex) => Promise<void>;
   installPaddle: () => Promise<void>;
+  saveRapidLanguage: (language: string) => Promise<void>;
+  saveRapidDeviceMode: (mode: RapidDeviceMode) => Promise<void>;
+  saveRapidPypiPrimary: (index: PaddlePackageIndex) => Promise<void>;
+  saveRapidPypiFallback: (index: PaddlePackageIndex) => Promise<void>;
+  installRapid: () => Promise<void>;
   cancelTask: (taskId: string) => Promise<void>;
   cancelAllTasks: () => Promise<void>;
   updateWindowsProgress: (progress: WindowsOcrProgress) => void;
   updatePaddleInstallProgress: (progress: PaddleInstallProgress) => void;
+  updateRapidInstallProgress: (progress: RapidInstallProgress) => void;
   clearTasks: () => void;
 }
 
@@ -114,9 +142,12 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
   health: null,
   windowsStatus: null,
   paddleStatus: null,
+  rapidStatus: null,
   healthChecking: false,
   paddleInstallProgress: null,
   isInstallingPaddle: false,
+  rapidInstallProgress: null,
+  isInstallingRapid: false,
   candidates: [],
   loadingCandidates: false,
   page: 0,
@@ -126,18 +157,37 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
   selectedFileIds: new Set<number>(),
   tasks: [],
   isSubmitting: false,
+  bulkOcrRunning: false,
+  bulkOcrQueued: 0,
   polling: false,
   pollTimer: null,
   apiUrl: 'http://127.0.0.1:8000',
   outputDir: '',
-  engine: 'mineru',
+  engine: 'rapid',
   windowsLanguage: 'auto',
   paddleLanguage: 'ch',
   paddleModel: 'PP-OCRv5_mobile',
+  paddleDeviceMode: 'auto',
+  paddlePypiPrimary: 'ustc',
+  paddlePypiFallback: 'tsinghua',
+  rapidLanguage: 'ch',
+  rapidModel: 'PP-OCRv6_small',
+  rapidDeviceMode: 'auto',
+  rapidPypiPrimary: 'ustc',
+  rapidPypiFallback: 'tsinghua',
 
   // ── Health check ──
   checkHealth: async () => {
     set({ healthChecking: true });
+    if (get().engine === 'rapid') {
+      try {
+        const rapidStatus = await getRapidOcrStatus();
+        set({ rapidStatus, healthChecking: false });
+      } catch (error) {
+        set({ rapidStatus: failedRapidStatus(error), healthChecking: false });
+      }
+      return;
+    }
     if (get().engine === 'windows') {
       try {
         const windowsStatus = await getWindowsOcrStatus();
@@ -236,7 +286,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
 
   submitFileBatch: async (files) => {
     if (get().isSubmitting || files.length === 0) return;
-    const { engine, windowsLanguage, paddleLanguage, paddleModel } = get();
+    const { engine, windowsLanguage, paddleLanguage, paddleModel, rapidLanguage, rapidModel } = get();
     const submittedAt = Date.now();
     const batch = files.map((file, index): OcrTask => ({
       taskId: crypto.randomUUID(),
@@ -254,7 +304,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
       isSubmitting: true,
     }));
 
-    if (engine === 'windows' || engine === 'paddle') {
+    if (engine === 'rapid' || engine === 'windows' || engine === 'paddle') {
       let nextIndex = 0;
       const runWorker = async () => {
         while (nextIndex < batch.length) {
@@ -272,9 +322,11 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
             ),
           }));
           try {
-            const resultPath = engine === 'windows'
-              ? await runWindowsOcr(task.fileId, task.taskId, windowsLanguage)
-              : await runPaddleOcr(task.fileId, task.taskId, paddleLanguage, paddleModel);
+            const resultPath = engine === 'rapid'
+              ? await runRapidOcr(task.fileId, task.taskId, rapidLanguage, rapidModel)
+              : engine === 'windows'
+                ? await runWindowsOcr(task.fileId, task.taskId, windowsLanguage)
+                : await runPaddleOcr(task.fileId, task.taskId, paddleLanguage, paddleModel);
             set((state) => ({
               tasks: state.tasks.map((item) =>
                 item.taskId === task.taskId
@@ -298,7 +350,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
         }
       };
       await Promise.all(
-        Array.from({ length: Math.min(engine === 'paddle' ? 1 : WINDOWS_OCR_CONCURRENCY, batch.length) }, () => runWorker())
+        Array.from({ length: Math.min(engine === 'paddle' || engine === 'rapid' ? 1 : WINDOWS_OCR_CONCURRENCY, batch.length) }, () => runWorker())
       );
       await get().loadCandidates();
       set({ isSubmitting: false });
@@ -340,28 +392,55 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
     set({ isSubmitting: false });
   },
 
-  queueFolderOcr: async (folderId) => {
-    if (activeFolderOcr.has(folderId)) return 0;
-    activeFolderOcr.add(folderId);
+  queueAllOcr: async () => get().queuePendingOcr(),
+
+  queueFolderOcr: async (folderId) => get().queuePendingOcr(folderId),
+
+  queuePendingOcr: async (folderId) => {
+    const scope = folderId === undefined ? 'all' : `folder:${folderId}`;
+    if (
+      activeBulkOcr.has('all') ||
+      activeBulkOcr.has(scope) ||
+      (scope === 'all' && activeBulkOcr.size > 0)
+    ) {
+      return 0;
+    }
+    const runId = crypto.randomUUID();
+    const startsNewQueue = activeBulkOcr.size === 0;
+    activeBulkOcr.set(scope, runId);
+    let plannedTotal = 0;
+    set((state) => ({
+      bulkOcrRunning: true,
+      bulkOcrQueued: startsNewQueue ? 0 : state.bulkOcrQueued,
+    }));
     try {
+      plannedTotal = (await listOcrCandidates(folderId, 0, 1, true)).total;
+      set((state) => ({
+        bulkOcrQueued: startsNewQueue ? plannedTotal : state.bulkOcrQueued + plannedTotal,
+      }));
       await get().loadSettings();
       let afterId = 0;
       let queued = 0;
-      while (true) {
+      while (!cancelledBulkOcr.has(runId)) {
         const files = await listOcrCandidateRefs(folderId, afterId, INCREMENTAL_OCR_BATCH_SIZE);
         if (files.length === 0) break;
-        while (get().isSubmitting) {
+        while (get().isSubmitting && !cancelledBulkOcr.has(runId)) {
           await new Promise((resolve) => window.setTimeout(resolve, 250));
         }
-        await get().submitFileBatch(files);
+        if (cancelledBulkOcr.has(runId)) break;
+        const submission = get().submitFileBatch(files);
         queued += files.length;
+        if (plannedTotal === 0) {
+          set((state) => ({ bulkOcrQueued: state.bulkOcrQueued + files.length }));
+        }
         afterId = files[files.length - 1].id;
+        await submission;
 
-        if (get().engine === 'mineru') {
+        if (get().engine === 'mineru' && !cancelledBulkOcr.has(runId)) {
           const batchIds = new Set(files.map((file) => file.id));
           while (get().tasks.some(
             (task) => batchIds.has(task.fileId) && ['submitting', 'queued', 'running'].includes(task.status)
-          )) {
+          ) && !cancelledBulkOcr.has(runId)) {
             await get().pollAllTasks();
             await new Promise((resolve) => window.setTimeout(resolve, 1_000));
           }
@@ -377,11 +456,12 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
           const history = historyCapacity > 0 ? terminal.slice(-historyCapacity) : [];
           return { tasks: [...history, ...active] };
         });
-        if (files.length < INCREMENTAL_OCR_BATCH_SIZE) break;
       }
       return queued;
     } finally {
-      activeFolderOcr.delete(folderId);
+      activeBulkOcr.delete(scope);
+      cancelledBulkOcr.delete(runId);
+      set({ bulkOcrRunning: activeBulkOcr.size > 0 });
     }
   },
 
@@ -526,21 +606,37 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
   // ── Settings ──
   loadSettings: async () => {
     try {
-      const [apiUrl, outputDir, engine, windowsLanguage, paddleLanguage, paddleModel] = await Promise.all([
+      const [apiUrl, outputDir, engine, windowsLanguage, paddleLanguage, paddleModel, paddleDeviceMode, paddlePypiPrimary, paddlePypiFallback, rapidLanguage, rapidModel, rapidDeviceMode, rapidPypiPrimary, rapidPypiFallback] = await Promise.all([
         getSetting('ocr_api_url'),
         getSetting('ocr_output_dir'),
         getSetting('ocr_engine'),
         getSetting('windows_ocr_language'),
         getSetting('paddle_ocr_language'),
         getSetting('paddle_ocr_model'),
+        getSetting('paddle_device_mode'),
+        getSetting('paddle_pypi_primary'),
+        getSetting('paddle_pypi_fallback'),
+        getSetting('rapidocr_language'),
+        getSetting('rapidocr_model'),
+        getSetting('rapidocr_device_mode'),
+        getSetting('rapidocr_pypi_primary'),
+        getSetting('rapidocr_pypi_fallback'),
       ]);
       set({
         apiUrl: apiUrl || 'http://127.0.0.1:8000',
         outputDir: outputDir || '',
-        engine: engine === 'windows' || engine === 'paddle' ? engine : 'mineru',
+        engine: engine === 'rapid' || engine === 'mineru' || engine === 'windows' || engine === 'paddle' ? engine : 'rapid',
         windowsLanguage: windowsLanguage || 'auto',
         paddleLanguage: paddleLanguage || 'ch',
         paddleModel: paddleModel || 'PP-OCRv5_mobile',
+        paddleDeviceMode: deviceMode(paddleDeviceMode),
+        paddlePypiPrimary: packageIndex(paddlePypiPrimary, 'ustc'),
+        paddlePypiFallback: packageIndex(paddlePypiFallback, 'tsinghua'),
+        rapidLanguage: rapidLanguage || 'ch',
+        rapidModel: rapidModel || 'PP-OCRv6_small',
+        rapidDeviceMode: rapidDeviceModeValue(rapidDeviceMode),
+        rapidPypiPrimary: packageIndex(rapidPypiPrimary, 'ustc'),
+        rapidPypiFallback: packageIndex(rapidPypiFallback, 'tsinghua'),
       });
     } catch {
       // use defaults
@@ -559,7 +655,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
 
   saveEngine: async (engine: OcrEngine) => {
     await setSetting('ocr_engine', engine);
-    set({ engine, health: null, windowsStatus: null, paddleStatus: null });
+    set({ engine, health: null, windowsStatus: null, paddleStatus: null, rapidStatus: null });
     await get().checkHealth();
   },
 
@@ -578,6 +674,24 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
     set({ paddleModel });
   },
 
+  savePaddleDeviceMode: async (paddleDeviceMode) => {
+    await setSetting('paddle_device_mode', paddleDeviceMode);
+    set({ paddleDeviceMode, paddleStatus: null });
+    if (get().engine === 'paddle') {
+      await get().checkHealth();
+    }
+  },
+
+  savePaddlePypiPrimary: async (paddlePypiPrimary) => {
+    await setSetting('paddle_pypi_primary', paddlePypiPrimary);
+    set({ paddlePypiPrimary });
+  },
+
+  savePaddlePypiFallback: async (paddlePypiFallback) => {
+    await setSetting('paddle_pypi_fallback', paddlePypiFallback);
+    set({ paddlePypiFallback });
+  },
+
   installPaddle: async () => {
     if (get().isInstallingPaddle) return;
     set({
@@ -585,13 +699,55 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
       paddleInstallProgress: { stage: 'preparing', progress: 0, message: '' },
     });
     try {
-      const paddleStatus = await installPaddleOcr();
+      const { paddlePypiPrimary, paddlePypiFallback, paddleDeviceMode } = get();
+      const paddleStatus = await installPaddleOcr(paddlePypiPrimary, paddlePypiFallback, paddleDeviceMode);
       set({ paddleStatus, isInstallingPaddle: false });
     } catch (error) {
       set({
         paddleStatus: failedPaddleStatus(error),
         paddleInstallProgress: { stage: 'failed', progress: 100, message: String(error) },
         isInstallingPaddle: false,
+      });
+    }
+  },
+
+  saveRapidLanguage: async (rapidLanguage: string) => {
+    await setSetting('rapidocr_language', rapidLanguage);
+    set({ rapidLanguage });
+  },
+
+  saveRapidDeviceMode: async (rapidDeviceMode) => {
+    await setSetting('rapidocr_device_mode', rapidDeviceMode);
+    set({ rapidDeviceMode, rapidStatus: null });
+    if (get().engine === 'rapid') {
+      await get().checkHealth();
+    }
+  },
+
+  saveRapidPypiPrimary: async (rapidPypiPrimary) => {
+    await setSetting('rapidocr_pypi_primary', rapidPypiPrimary);
+    set({ rapidPypiPrimary });
+  },
+
+  saveRapidPypiFallback: async (rapidPypiFallback) => {
+    await setSetting('rapidocr_pypi_fallback', rapidPypiFallback);
+    set({ rapidPypiFallback });
+  },
+
+  installRapid: async () => {
+    if (get().isInstallingRapid) return;
+    set({
+      isInstallingRapid: true,
+      rapidInstallProgress: { stage: 'preparing', progress: 0, message: '' },
+    });
+    try {
+      const rapidStatus = await installRapidOcr(get().rapidDeviceMode);
+      set({ rapidStatus, isInstallingRapid: false });
+    } catch (error) {
+      set({
+        rapidStatus: failedRapidStatus(error),
+        rapidInstallProgress: { stage: 'failed', progress: 100, message: String(error) },
+        isInstallingRapid: false,
       });
     }
   },
@@ -619,7 +775,9 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
     const activeTasks = get().tasks.filter((task) =>
       ['submitting', 'queued', 'running'].includes(task.status)
     );
-    if (activeTasks.length === 0) return;
+    const bulkRuns = [...activeBulkOcr.values()];
+    if (activeTasks.length === 0 && bulkRuns.length === 0) return;
+    bulkRuns.forEach((runId) => cancelledBulkOcr.add(runId));
     set((state) => ({
       tasks: state.tasks.map((task) =>
         ['submitting', 'queued', 'running'].includes(task.status)
@@ -646,7 +804,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
       set((state) => ({
         tasks: state.tasks.map((task) => {
           const update = updates.get(task.taskId);
-          return update && (task.engine === 'windows' || task.engine === 'paddle') && task.status !== 'cancelled'
+          return update && (task.engine === 'rapid' || task.engine === 'windows' || task.engine === 'paddle') && task.status !== 'cancelled'
             ? { ...task, status: 'running' as const, progress: update.progress }
             : task;
         }),
@@ -661,14 +819,22 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
     });
   },
 
+  updateRapidInstallProgress: (progress: RapidInstallProgress) => {
+    set({
+      rapidInstallProgress: progress,
+      isInstallingRapid: progress.stage !== 'completed' && progress.stage !== 'failed',
+    });
+  },
+
   clearTasks: () => {
+    if (activeBulkOcr.size > 0) return;
     get().stopPolling();
     pendingWindowsProgress.clear();
     if (windowsProgressFrame !== null) {
       window.cancelAnimationFrame(windowsProgressFrame);
       windowsProgressFrame = null;
     }
-    set({ tasks: [], isSubmitting: false });
+    set({ tasks: [], isSubmitting: false, bulkOcrQueued: 0 });
   },
 }));
 
@@ -704,6 +870,53 @@ function failedPaddleStatus(error: unknown): PaddleOcrStatus {
     runtime_version: null,
     paddle_version: null,
     paddleocr_version: null,
+    requested_device_mode: 'auto',
+    active_device: null,
+    runtime_profile: null,
+    gpu_detected: false,
+    gpu_compatible: false,
+    gpu_runtime_installed: false,
+    gpu_name: null,
+    gpu_compute_capability: null,
+    gpu_driver_version: null,
+    cuda_version: null,
+    cudnn_version: null,
+    fallback_reason: null,
     error: String(error),
   };
+}
+
+function failedRapidStatus(error: unknown): RapidOcrStatus {
+  return {
+    available: false,
+    python_path: '',
+    managed: true,
+    install_supported: true,
+    install_required: true,
+    runtime_version: null,
+    rapidocr_version: null,
+    onnxruntime_version: null,
+    pymupdf_version: null,
+    requested_device_mode: 'auto',
+    requested_provider: null,
+    active_provider: null,
+    accelerated: false,
+    available_providers: [],
+    session_providers: [],
+    runtime_profile: null,
+    fallback_reason: null,
+    error: String(error),
+  };
+}
+
+function packageIndex(value: string | null, fallback: PaddlePackageIndex): PaddlePackageIndex {
+  return value === 'ustc' || value === 'tsinghua' || value === 'official' ? value : fallback;
+}
+
+function deviceMode(value: string | null): PaddleDeviceMode {
+  return value === 'cpu' || value === 'cuda12' ? value : 'auto';
+}
+
+function rapidDeviceModeValue(value: string | null): RapidDeviceMode {
+  return value === 'cpu' ? 'cpu' : 'auto';
 }

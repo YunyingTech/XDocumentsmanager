@@ -153,8 +153,12 @@ export async function getPaddleOcrStatus(): Promise<import('../types').PaddleOcr
   return invoke('get_paddle_ocr_status');
 }
 
-export async function installPaddleOcr(): Promise<import('../types').PaddleOcrStatus> {
-  return invoke('install_paddle_ocr');
+export async function installPaddleOcr(
+  primaryIndex?: import('../types').PaddlePackageIndex,
+  fallbackIndex?: import('../types').PaddlePackageIndex,
+  deviceMode?: import('../types').PaddleDeviceMode,
+): Promise<import('../types').PaddleOcrStatus> {
+  return invoke('install_paddle_ocr', { primaryIndex, fallbackIndex, deviceMode });
 }
 
 export async function runPaddleOcr(
@@ -164,6 +168,25 @@ export async function runPaddleOcr(
   model: string,
 ): Promise<string> {
   return invoke('run_paddle_ocr', { fileId, taskId, language, model });
+}
+
+export async function getRapidOcrStatus(): Promise<import('../types').RapidOcrStatus> {
+  return invoke('get_rapid_ocr_status');
+}
+
+export async function installRapidOcr(
+  deviceMode?: import('../types').RapidDeviceMode,
+): Promise<import('../types').RapidOcrStatus> {
+  return invoke('install_rapid_ocr', { deviceMode });
+}
+
+export async function runRapidOcr(
+  fileId: number,
+  taskId: string,
+  language: string,
+  model: string,
+): Promise<string> {
+  return invoke('run_rapid_ocr', { fileId, taskId, language, model });
 }
 
 export async function cancelOcrTask(taskId: string): Promise<boolean> {
@@ -188,7 +211,7 @@ export async function listOcrCandidates(
 }
 
 export async function listOcrCandidateRefs(
-  folderId: number,
+  folderId?: number,
   afterId: number = 0,
   limit: number = 500,
 ): Promise<import('../types').OcrCandidateRef[]> {

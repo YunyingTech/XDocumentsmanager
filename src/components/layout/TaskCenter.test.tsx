@@ -8,6 +8,8 @@ const state = vi.hoisted(() => ({
   clearTasks: vi.fn(),
   downloadResult: vi.fn(),
   tasks: [] as Array<Record<string, unknown>>,
+  bulkOcrRunning: false,
+  bulkOcrQueued: 0,
   folders: [] as Array<Record<string, unknown>>,
   indexProgress: null as Record<string, unknown> | null,
 }));
@@ -29,6 +31,8 @@ describe('task center', () => {
     state.clearTasks.mockReset();
     state.downloadResult.mockReset();
     state.tasks = [];
+    state.bulkOcrRunning = false;
+    state.bulkOcrQueued = 0;
     state.folders = [];
     state.indexProgress = null;
     useUIStore.setState({ language: 'en' });
@@ -53,6 +57,36 @@ describe('task center', () => {
 
     expect(state.cancelAllTasks).toHaveBeenCalledOnce();
     expect(screen.getByText('scan.pdf')).toBeInTheDocument();
+  });
+
+  it('keeps bulk OCR cancellable while it is switching batches', async () => {
+    state.bulkOcrRunning = true;
+    const user = userEvent.setup();
+    render(<TaskCenter />);
+
+    await user.click(screen.getByTitle('Open task center'));
+    await user.click(screen.getByRole('button', { name: 'Cancel all OCR tasks' }));
+
+    expect(state.cancelAllTasks).toHaveBeenCalledOnce();
+  });
+
+  it('shows the full bulk OCR total instead of the current 100-file batch', () => {
+    state.bulkOcrRunning = true;
+    state.bulkOcrQueued = 205;
+    state.tasks = Array.from({ length: 100 }, (_, index) => ({
+      taskId: `task-${index}`,
+      fileId: index,
+      fileName: `${index}.pdf`,
+      status: 'queued',
+      queuedAhead: index,
+      progress: 0,
+      submittedAt: index,
+      engine: 'rapid',
+    }));
+
+    render(<TaskCenter />);
+
+    expect(screen.getByText('205 tasks running')).toBeInTheDocument();
   });
 
   it('shows that an index task will continue with OCR', async () => {

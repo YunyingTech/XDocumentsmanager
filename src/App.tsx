@@ -7,7 +7,7 @@ import { useFolderStore } from './stores/folderStore';
 import { useUIStore } from './stores/uiStore';
 import { useSearchStore } from './stores/searchStore';
 import { useOcrStore } from './stores/ocrStore';
-import type { IndexProgress, PaddleInstallProgress, SearchProgress, WindowsOcrProgress } from './types';
+import type { IndexProgress, PaddleInstallProgress, RapidInstallProgress, SearchProgress, WindowsOcrProgress } from './types';
 
 export default function App() {
   const loadFolders = useFolderStore((s) => s.loadFolders);
@@ -15,6 +15,7 @@ export default function App() {
   const updateSearchProgress = useSearchStore((s) => s.updateProgress);
   const updateWindowsOcrProgress = useOcrStore((s) => s.updateWindowsProgress);
   const updatePaddleInstallProgress = useOcrStore((s) => s.updatePaddleInstallProgress);
+  const updateRapidInstallProgress = useOcrStore((s) => s.updateRapidInstallProgress);
   const queueFolderOcr = useOcrStore((s) => s.queueFolderOcr);
   const sidebarOpen = useUIStore((s) => s.sidebarOpen);
   const theme = useUIStore((s) => s.theme);
@@ -45,14 +46,18 @@ export default function App() {
     const unlistenPaddleInstall = listen<PaddleInstallProgress>('paddle-install:progress', (event) => {
       updatePaddleInstallProgress(event.payload);
     });
+    const unlistenRapidInstall = listen<RapidInstallProgress>('rapid-install:progress', (event) => {
+      updateRapidInstallProgress(event.payload);
+    });
 
     return () => {
       unlisten.then((fn) => fn());
       unlistenSearch.then((fn) => fn());
       unlistenOcr.then((fn) => fn());
       unlistenPaddleInstall.then((fn) => fn());
+      unlistenRapidInstall.then((fn) => fn());
     };
-  }, [loadFolders, queueFolderOcr, setIndexProgress, updatePaddleInstallProgress, updateSearchProgress, updateWindowsOcrProgress]);
+  }, [loadFolders, queueFolderOcr, setIndexProgress, updatePaddleInstallProgress, updateRapidInstallProgress, updateSearchProgress, updateWindowsOcrProgress]);
 
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)');

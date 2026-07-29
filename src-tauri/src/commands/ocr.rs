@@ -1141,7 +1141,7 @@ pub fn list_ocr_candidates(
 
 #[tauri::command]
 pub fn list_ocr_candidate_refs(
-    folder_id: i64,
+    folder_id: Option<i64>,
     after_id: Option<i64>,
     limit: Option<i64>,
     db: State<'_, Database>,
@@ -1152,7 +1152,7 @@ pub fn list_ocr_candidate_refs(
 
 fn list_ocr_candidate_refs_from_connection(
     conn: &rusqlite::Connection,
-    folder_id: i64,
+    folder_id: Option<i64>,
     after_id: Option<i64>,
     limit: Option<i64>,
 ) -> Result<Vec<OcrCandidateRef>, String> {
@@ -1161,7 +1161,7 @@ fn list_ocr_candidate_refs_from_connection(
     let mut statement = conn
         .prepare(
             "SELECT id, file_name FROM files \
-             WHERE folder_id = ?1 AND index_status = 'indexed' \
+             WHERE (?1 IS NULL OR folder_id = ?1) AND index_status = 'indexed' \
                AND ocr_applied = 0 AND id > ?2 \
              ORDER BY id LIMIT ?3",
         )
@@ -1204,15 +1204,53 @@ mod incremental_ocr_tests {
             .unwrap();
         }
 
-        let first = list_ocr_candidate_refs_from_connection(&conn, 1, None, Some(2)).unwrap();
+        let first = list_ocr_candidate_refs_from_connection(&conn, Some(1), None, Some(2)).unwrap();
         assert_eq!(
             first.iter().map(|item| item.id).collect::<Vec<_>>(),
             vec![1, 3]
         );
-        let second = list_ocr_candidate_refs_from_connection(&conn, 1, Some(3), Some(2)).unwrap();
+        let second =
+            list_ocr_candidate_refs_from_connection(&conn, Some(1), Some(3), Some(2)).unwrap();
         assert_eq!(
             second.iter().map(|item| item.id).collect::<Vec<_>>(),
             vec![4]
         );
+    }
+
+    #[test]
+    fn cursor_query_streams_more_than_one_hundred_candidates_across_folders() {
+        let conn = Connection::open_in_memory().unwrap();
+        schema::run_migrations(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO watched_folders (id, path) VALUES (1, 'C:/one'), (2, 'C:/two')",
+            [],
+        )
+        .unwrap();
+        for id in 1..=205 {
+            conn.execute(
+                "INSERT INTO files (
+                    id, folder_id, relative_path, file_name, file_size_bytes,
+                    content_hash, file_modified_at, index_status, ocr_applied
+                 ) VALUES (?1, ?2, ?3, ?3, 10, 'hash', '2026-01-01', 'indexed', 0)",
+                rusqlite::params![id, if id % 2 == 0 { 1 } else { 2 }, format!("{id}.pdf")],
+            )
+            .unwrap();
+        }
+
+        let mut after_id = None;
+        let mut ids = Vec::new();
+        loop {
+            let batch =
+                list_ocr_candidate_refs_from_connection(&conn, None, after_id, Some(100)).unwrap();
+            if batch.is_empty() {
+                break;
+            }
+            after_id = batch.last().map(|item| item.id);
+            ids.extend(batch.into_iter().map(|item| item.id));
+        }
+
+        assert_eq!(ids.len(), 205);
+        assert_eq!(ids.first(), Some(&1));
+        assert_eq!(ids.last(), Some(&205));
     }
 }

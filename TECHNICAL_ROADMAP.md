@@ -5,7 +5,7 @@
 ## 1. 产品边界
 
 - 原始 PDF 保留在本地磁盘或网络共享中，软件只保存文件元数据、内容哈希、可检索文本和任务状态。
-- Windows OCR 与 PaddleOCR 在本机处理文件；选择 MinerU 时，PDF 会发送到用户配置的 MinerU 服务。
+- RapidOCR、Windows OCR 与 PaddleOCR 在本机处理文件；选择 MinerU 时，PDF 会发送到用户配置的 MinerU 服务。
 - 大模型智能搜索只发送用户输入的查询文本，用于生成候选关键词，不发送 PDF 文件或索引内容。
 - 搜索和浏览不能依赖大模型可用性。模型调用失败时，用户仍可直接执行普通全文搜索。
 
@@ -21,7 +21,7 @@ Tauri 2 + Rust command layer
         +-- Elasticsearch 8.17: primary full-text search
         +-- Tantivy: embedded fallback search index
         +-- Local/UNC filesystem: source PDFs and OCR output
-        +-- OCR adapters: Windows OCR / PaddleOCR / MinerU
+        +-- OCR adapters: RapidOCR / Windows OCR / PaddleOCR / MinerU
         +-- OpenAI-compatible API: query term extraction only
 ```
 
@@ -35,7 +35,7 @@ Tauri 2 + Rust command layer
 | 索引流水线 | `src-tauri/src/indexer` | 流式遍历、变更判断、哈希、批量写入和删除对账 |
 | 搜索引擎 | `src-tauri/src/search` | Elasticsearch/Tantivy 双后端、过滤、结果解析和智能查询 |
 | 数据库 | `src-tauri/src/db` | SQLite 建表、迁移、WAL 与中断任务恢复 |
-| OCR | `src-tauri/src/commands/ocr*.rs` | 三种 OCR 引擎、结果落盘、索引更新、进度和取消 |
+| OCR | `src-tauri/src/commands/ocr*.rs` | 四种 OCR 引擎、结果落盘、索引更新、进度和取消 |
 
 ## 3. 核心数据链路
 
@@ -46,7 +46,7 @@ Tauri 2 + Rust command layer
 3. SQLite 记录元数据和内容哈希，搜索变更按固定批次同步到 Tantivy 与 Elasticsearch。
 4. 只有目录完整遍历成功后才删除已消失文件的记录，避免临时断开的 SMB 子目录造成误删。
 5. 文件内容变化时，旧 OCR 文本会失效，该文件重新进入 OCR 候选列表。
-6. “索引并 OCR”在索引完成事件后按游标分页读取候选文件，每批 100 个，避免一次加载整个目录。
+6. “索引并 OCR”和 OCR 页面的“全部待处理文件”按 ID 游标持续读取候选文件，每批 100 个，直到查询返回空批次；批次大小只限制内存占用，不限制处理总数。
 
 当前限制：普通 PDF 的原生文本提取仍未实现。未执行 OCR 的文件主要按文件名和基础预览搜索；完整内容搜索目前依赖 OCR 结果。
 
@@ -54,8 +54,9 @@ Tauri 2 + Rust command layer
 
 | 引擎 | 处理位置 | 当前策略 | 主要限制 |
 | --- | --- | --- | --- |
+| RapidOCR（默认） | 本机 | 安装包内嵌私有 Python 3.11、完整平台 wheelhouse、RapidOCR 3.9.2 与 PP-OCRv6 small 模型，首次使用通过 `pip --no-index` 自动部署；自动模式在 Windows 使用 DirectML、macOS 使用 CoreML，并以检测、分类、识别三个实际 ONNX session 的 provider 判定是否加速，失败时回退 CPU；支持安装进度、逐页进度、日志和取消 | OCR 全流程可离线运行；支持 Windows x64 与 macOS 14+ arm64，其他平台需使用已有引擎 |
 | Windows OCR | 本机 | Windows Runtime 按页识别，最多 2 个并发任务 | 仅 Windows，依赖已安装语言包 |
-| PaddleOCR | 本机 | 软件托管的独立 Python Worker 单任务串行处理，支持安装进度、OCR 进度和取消 | 首次安装依赖与首次下载模型需要网络 |
+| PaddleOCR | 本机 | 软件托管的独立 Python Worker 单任务串行处理；支持自动、CPU、NVIDIA CUDA 12.6 三种执行模式，CPU/GPU 运行时隔离，自动模式优先使用已验证 GPU 并可回退 CPU；支持安装进度、OCR 进度和取消 | 首次安装依赖与首次下载模型需要网络；CUDA 仅支持 Windows x64、算力 7.5+ 的 NVIDIA GPU，并依赖兼容驱动 |
 | MinerU | 外部服务 | 异步提交和轮询，也支持单文件同步解析 | 文件会离开本机，依赖服务可用性 |
 
 识别结果写入用户配置的 OCR 输出目录，同时更新 SQLite 中的检索文本与 OCR 状态，并增量刷新两个搜索后端。任务中心展示排队、运行、进度、完成、失败和取消状态；“取消全部”会同时终止前端队列和已注册的后端任务。
@@ -91,7 +92,8 @@ PDF.js 在 WebView 中按页渲染文件。文件浏览和搜索共用预览组�
 
 ### P0：补齐本地处理闭环
 
-- [x] **软件托管 PaddleOCR 运行时**：Windows x64 与 macOS arm64 安装包携带经过 SHA-256 校验的独立 Python、pip、setuptools 和 wheel 引导资源；首次使用时在应用数据目录安装固定版本和完整约束的 PaddleOCR 依赖，采用临时目录、验证、原子切换和失败清理。界面展示安装阶段、当前组件和失败重试，普通用户不再安装或配置 Python。
+- [x] **RapidOCR 默认引擎、离线内嵌与自动 GPU 加速**：新增独立的 `rapidocr-runtime/directml-v2` 与 `coreml-v2` 私有运行时；Release 在构建阶段生成并校验完整平台 wheelhouse，固定 RapidOCR、ONNX Runtime、PyMuPDF、传递依赖与 PP-OCRv6 small 模型，首次使用只从安装包自动部署，不访问网络。Windows x64 使用 DirectML 覆盖 NVIDIA/AMD/Intel GPU，macOS 14+ arm64 使用 CoreML，CPU 为可靠回退。状态与日志读取三个真实 ONNX session 的 provider，结果写入 `_rapid.md` 并同步搜索索引。一次性数据库迁移把历史默认 MinerU 切换到 RapidOCR，迁移完成后不覆盖用户后续选择。
+- [x] **软件托管 PaddleOCR 运行时**：Windows x64 与 macOS arm64 安装包携带经过 SHA-256 校验的独立 Python、pip、setuptools 和 wheel 引导资源；首次使用时在应用数据目录安装固定版本和完整约束的 PaddleOCR 依赖，采用临时目录、验证、原子切换和失败清理。Windows x64 额外支持官方 `cu126` 的 PaddlePaddle GPU 包，CUDA 12.6、cuDNN、cuBLAS 等用户态运行库随 Python 依赖安装，无需系统 CUDA Toolkit；CPU 与 CUDA 环境分别使用 `cpu-v3`、`cu126-v3`，界面展示实际设备、GPU/驱动信息和回退原因。NVIDIA 驱动仍由用户安装。
 - **原生 PDF 文本提取**：集成稳定的 PDF 文本提取库，优先提取文本型 PDF，只把扫描页送入 OCR；保留页码与文本位置，改善搜索摘要和命中定位。
 - **OCR 队列持久化**：把队列所有权从前端内存迁移到 Rust/SQLite，支持应用重启后的中断恢复、重试和统一并发控制。
 - **运行时资源治理**：为 OCR 子进程、Elasticsearch 和文件读取增加磁盘空间检查、超时、并发上限与清晰的故障分类。
@@ -122,6 +124,6 @@ P0 剩余完成标准：中途退出不会丢失 OCR 任务状态；文本型 PD
 npm run test:all
 ```
 
-该命令覆盖前端单元测试与覆盖率、TypeScript/Vite 构建、Oxlint、Rust 测试，以及 PaddleOCR Worker 的 Python 语法和单元测试。发布标签由 GitHub Actions 构建 Windows NSIS 与 macOS arm64 DMG，并生成 SHA-256 校验文件。
+该命令覆盖前端单元测试与覆盖率、TypeScript/Vite 构建、Oxlint、Rust 测试，以及 RapidOCR/PaddleOCR Worker 的 Python 语法和单元测试。发布标签由 GitHub Actions 构建 Windows NSIS 与 macOS arm64 DMG，并生成 SHA-256 校验文件。
 
 对超大规模能力的声明必须附带可重复的基准数据；新增外部服务或网络传输必须在界面和文档中明确数据边界。

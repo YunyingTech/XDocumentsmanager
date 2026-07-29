@@ -52,6 +52,26 @@ describe('Tauri command bindings', () => {
     ]);
   });
 
+  it('forwards Paddle package index preferences to the installer', async () => {
+    invoke.mockResolvedValue({ available: true });
+    await api.installPaddleOcr('ustc', 'tsinghua', 'cuda12');
+    expect(invoke).toHaveBeenCalledWith('install_paddle_ocr', {
+      primaryIndex: 'ustc',
+      fallbackIndex: 'tsinghua',
+      deviceMode: 'cuda12',
+    });
+  });
+
+  it('forwards RapidOCR device mode and worker options', async () => {
+    invoke.mockResolvedValue({ available: true });
+    await api.installRapidOcr('auto');
+    await api.runRapidOcr(7, 'rapid-task', 'ch', 'PP-OCRv6_small');
+    expect(invoke.mock.calls).toEqual([
+      ['install_rapid_ocr', { deviceMode: 'auto' }],
+      ['run_rapid_ocr', { fileId: 7, taskId: 'rapid-task', language: 'ch', model: 'PP-OCRv6_small' }],
+    ]);
+  });
+
   it('keeps every exported backend binding connected to its registered command', async () => {
     invoke.mockResolvedValue(undefined);
     await api.listFiles(1, { field: 'file_name', direction: 'asc' }, 0, 25);
@@ -79,6 +99,9 @@ describe('Tauri command bindings', () => {
     await api.getPaddleOcrStatus();
     await api.installPaddleOcr();
     await api.runPaddleOcr(1, 'task', 'ch', 'mobile');
+    await api.getRapidOcrStatus();
+    await api.installRapidOcr();
+    await api.runRapidOcr(1, 'task', 'ch', 'PP-OCRv6_small');
     await api.cancelOcrTask('task');
     await api.getOcrOutputDir();
     await api.listOcrCandidates(1, 0, 25);
@@ -100,6 +123,7 @@ describe('Tauri command bindings', () => {
       'submit_ocr_task', 'query_ocr_task', 'get_ocr_result', 'sync_ocr_parse',
       'get_windows_ocr_status', 'run_windows_ocr', 'get_paddle_ocr_status',
       'install_paddle_ocr', 'run_paddle_ocr', 'cancel_ocr_task',
+      'get_rapid_ocr_status', 'install_rapid_ocr', 'run_rapid_ocr',
       'get_ocr_output_dir', 'list_ocr_candidates', 'get_setting', 'set_setting',
       'get_db_path', 'vacuum_database', 'get_openai_config', 'set_openai_config',
       'test_openai_connection', 'get_search_backend_status',

@@ -11,6 +11,9 @@ const mocks = vi.hoisted(() => ({
   getPaddleOcrStatus: vi.fn(),
   installPaddleOcr: vi.fn(),
   runPaddleOcr: vi.fn(),
+  getRapidOcrStatus: vi.fn(),
+  installRapidOcr: vi.fn(),
+  runRapidOcr: vi.fn(),
   cancelOcrTask: vi.fn(),
   cancelAllOcrTasks: vi.fn(),
   listOcrCandidates: vi.fn(),
@@ -47,9 +50,12 @@ describe('OCR store', () => {
       health: null,
       windowsStatus: null,
       paddleStatus: null,
+      rapidStatus: null,
       healthChecking: false,
       paddleInstallProgress: null,
       isInstallingPaddle: false,
+      rapidInstallProgress: null,
+      isInstallingRapid: false,
       candidates: [],
       loadingCandidates: false,
       page: 0,
@@ -59,6 +65,8 @@ describe('OCR store', () => {
       selectedFileIds: new Set(),
       tasks: [],
       isSubmitting: false,
+      bulkOcrRunning: false,
+      bulkOcrQueued: 0,
       polling: false,
       pollTimer: null,
       apiUrl: 'http://127.0.0.1:8000',
@@ -67,6 +75,14 @@ describe('OCR store', () => {
       windowsLanguage: 'auto',
       paddleLanguage: 'ch',
       paddleModel: 'PP-OCRv5_mobile',
+      paddleDeviceMode: 'auto',
+      paddlePypiPrimary: 'ustc',
+      paddlePypiFallback: 'tsinghua',
+      rapidLanguage: 'ch',
+      rapidModel: 'PP-OCRv6_small',
+      rapidDeviceMode: 'auto',
+      rapidPypiPrimary: 'ustc',
+      rapidPypiFallback: 'tsinghua',
     });
   });
 
@@ -94,6 +110,43 @@ describe('OCR store', () => {
 
     expect(useOcrStore.getState().tasks.map((task) => task.status)).toEqual(['completed', 'completed', 'completed']);
     expect(useOcrStore.getState().isSubmitting).toBe(false);
+  });
+
+  it('runs RapidOCR sequentially and keeps every queued file visible', async () => {
+    const first = deferred<string>();
+    mocks.runRapidOcr.mockReturnValueOnce(first.promise).mockResolvedValueOnce('two_rapid.md');
+    useOcrStore.setState({ engine: 'rapid' });
+
+    const submission = useOcrStore.getState().submitFileBatch([
+      { id: 1, file_name: 'one.pdf' },
+      { id: 2, file_name: 'two.pdf' },
+    ]);
+    await vi.waitFor(() => expect(mocks.runRapidOcr).toHaveBeenCalledOnce());
+    expect(useOcrStore.getState().tasks.map((task) => task.status)).toEqual(['running', 'queued']);
+    expect(mocks.runRapidOcr).toHaveBeenCalledWith(1, expect.any(String), 'ch', 'PP-OCRv6_small');
+
+    first.resolve('one_rapid.md');
+    await submission;
+    expect(mocks.runRapidOcr).toHaveBeenCalledTimes(2);
+    expect(useOcrStore.getState().tasks.map((task) => task.status)).toEqual(['completed', 'completed']);
+  });
+
+  it('uses RapidOCR as the settings fallback and routes its health check', async () => {
+    await useOcrStore.getState().loadSettings();
+    expect(useOcrStore.getState().engine).toBe('rapid');
+
+    mocks.getRapidOcrStatus.mockResolvedValue({
+      available: true,
+      active_provider: 'DmlExecutionProvider',
+      accelerated: true,
+    });
+    await useOcrStore.getState().checkHealth();
+    expect(mocks.getRapidOcrStatus).toHaveBeenCalledOnce();
+    expect(useOcrStore.getState().rapidStatus).toMatchObject({
+      available: true,
+      active_provider: 'DmlExecutionProvider',
+      accelerated: true,
+    });
   });
 
   it('cancels running and queued Windows OCR tasks without starting the remaining queue', async () => {
@@ -176,10 +229,12 @@ describe('OCR store', () => {
       windows_ocr_language: 'zh-Hans-CN',
     };
     mocks.getSetting.mockImplementation((key: string) => Promise.resolve(settings[key] ?? null));
-    mocks.listOcrCandidateRefs.mockResolvedValue([
-      { id: 4, file_name: 'four.pdf' },
-      { id: 5, file_name: 'five.pdf' },
-    ]);
+    mocks.listOcrCandidateRefs
+      .mockResolvedValueOnce([
+        { id: 4, file_name: 'four.pdf' },
+        { id: 5, file_name: 'five.pdf' },
+      ])
+      .mockResolvedValueOnce([]);
     mocks.runWindowsOcr.mockResolvedValue('result.md');
 
     await expect(useOcrStore.getState().queueFolderOcr(12)).resolves.toBe(2);
@@ -193,7 +248,9 @@ describe('OCR store', () => {
   it('does not start a duplicate automatic OCR pass for the same folder', async () => {
     const running = deferred<string>();
     mocks.getSetting.mockImplementation((key: string) => Promise.resolve(key === 'ocr_engine' ? 'windows' : null));
-    mocks.listOcrCandidateRefs.mockResolvedValue([{ id: 8, file_name: 'eight.pdf' }]);
+    mocks.listOcrCandidateRefs
+      .mockResolvedValueOnce([{ id: 8, file_name: 'eight.pdf' }])
+      .mockResolvedValueOnce([]);
     mocks.runWindowsOcr.mockReturnValue(running.promise);
 
     const firstPass = useOcrStore.getState().queueFolderOcr(21);
@@ -201,7 +258,58 @@ describe('OCR store', () => {
     await expect(useOcrStore.getState().queueFolderOcr(21)).resolves.toBe(0);
     running.resolve('eight.md');
     await expect(firstPass).resolves.toBe(1);
+    expect(mocks.listOcrCandidateRefs).toHaveBeenCalledTimes(2);
+  });
+
+  it('streams every pending OCR file beyond the 100-file batch size', async () => {
+    const files = Array.from({ length: 205 }, (_, index) => ({
+      id: index + 1,
+      file_name: `${index + 1}.pdf`,
+    }));
+    mocks.getSetting.mockImplementation((key: string) =>
+      Promise.resolve(key === 'ocr_engine' ? 'windows' : null)
+    );
+    mocks.listOcrCandidateRefs.mockImplementation(
+      (_folderId: number | undefined, afterId: number, limit: number) =>
+        Promise.resolve(files.filter((file) => file.id > afterId).slice(0, limit))
+    );
+    mocks.runWindowsOcr.mockResolvedValue('result.md');
+    mocks.listOcrCandidates.mockResolvedValue({ ...emptyCandidates, total: 205 });
+
+    await expect(useOcrStore.getState().queueAllOcr()).resolves.toBe(205);
+
+    expect(mocks.runWindowsOcr).toHaveBeenCalledTimes(205);
+    expect(mocks.listOcrCandidateRefs).toHaveBeenNthCalledWith(1, undefined, 0, 100);
+    expect(mocks.listOcrCandidateRefs).toHaveBeenNthCalledWith(2, undefined, 100, 100);
+    expect(mocks.listOcrCandidateRefs).toHaveBeenNthCalledWith(3, undefined, 200, 100);
+    expect(mocks.listOcrCandidateRefs).toHaveBeenNthCalledWith(4, undefined, 205, 100);
+    expect(useOcrStore.getState()).toMatchObject({
+      bulkOcrRunning: false,
+      bulkOcrQueued: 205,
+    });
+  });
+
+  it('stops a bulk OCR run before fetching the next 100-file batch when cancelled', async () => {
+    const first = deferred<string>();
+    const second = deferred<string>();
+    mocks.getSetting.mockImplementation((key: string) =>
+      Promise.resolve(key === 'ocr_engine' ? 'windows' : null)
+    );
+    mocks.listOcrCandidateRefs.mockResolvedValue(
+      Array.from({ length: 100 }, (_, index) => ({ id: index + 1, file_name: `${index + 1}.pdf` }))
+    );
+    mocks.runWindowsOcr.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+
+    const bulkRun = useOcrStore.getState().queueAllOcr();
+    await vi.waitFor(() => expect(mocks.runWindowsOcr).toHaveBeenCalledTimes(2));
+    await useOcrStore.getState().cancelAllTasks();
+    first.resolve('one.md');
+    second.resolve('two.md');
+
+    await expect(bulkRun).resolves.toBe(100);
     expect(mocks.listOcrCandidateRefs).toHaveBeenCalledOnce();
+    expect(mocks.runWindowsOcr).toHaveBeenCalledTimes(2);
+    expect(useOcrStore.getState().bulkOcrRunning).toBe(false);
   });
 
   it('routes health checks to the selected engine and reports backend failures', async () => {
@@ -227,6 +335,7 @@ describe('OCR store', () => {
     mocks.installPaddleOcr.mockReturnValue(installation.promise);
 
     const pending = useOcrStore.getState().installPaddle();
+    expect(mocks.installPaddleOcr).toHaveBeenCalledWith('ustc', 'tsinghua', 'auto');
     expect(useOcrStore.getState()).toMatchObject({
       isInstallingPaddle: true,
       paddleInstallProgress: { stage: 'preparing', progress: 0 },
@@ -248,16 +357,52 @@ describe('OCR store', () => {
       managed: true,
       install_supported: true,
       install_required: false,
-      runtime_version: '2',
+      runtime_version: '3',
       paddle_version: '3.3.1',
       paddleocr_version: '3.3.1',
+      requested_device_mode: 'auto',
+      active_device: 'gpu:0',
+      runtime_profile: 'cu126',
+      gpu_detected: true,
+      gpu_compatible: true,
+      gpu_runtime_installed: true,
+      gpu_name: 'NVIDIA RTX 4070',
+      gpu_compute_capability: '8.9',
+      gpu_driver_version: '580.88',
+      cuda_version: '12.6',
+      cudnn_version: '9.5',
+      fallback_reason: null,
       error: null,
     });
     await pending;
     expect(useOcrStore.getState()).toMatchObject({
       isInstallingPaddle: false,
-      paddleStatus: { available: true, managed: true, runtime_version: '2' },
+      paddleStatus: { available: true, managed: true, runtime_version: '3', active_device: 'gpu:0' },
     });
+  });
+
+  it('loads and saves Paddle runtime and package source preferences', async () => {
+    const settings: Record<string, string> = {
+      paddle_device_mode: 'cuda12',
+      paddle_pypi_primary: 'tsinghua',
+      paddle_pypi_fallback: 'official',
+    };
+    mocks.getSetting.mockImplementation((key: string) => Promise.resolve(settings[key] ?? null));
+
+    await useOcrStore.getState().loadSettings();
+    expect(useOcrStore.getState()).toMatchObject({
+      paddlePypiPrimary: 'tsinghua',
+      paddlePypiFallback: 'official',
+      paddleDeviceMode: 'cuda12',
+    });
+
+    await useOcrStore.getState().savePaddlePypiPrimary('ustc');
+    await useOcrStore.getState().savePaddlePypiFallback('tsinghua');
+    useOcrStore.setState({ engine: 'mineru' });
+    await useOcrStore.getState().savePaddleDeviceMode('cpu');
+    expect(mocks.setSetting).toHaveBeenCalledWith('paddle_pypi_primary', 'ustc');
+    expect(mocks.setSetting).toHaveBeenCalledWith('paddle_pypi_fallback', 'tsinghua');
+    expect(mocks.setSetting).toHaveBeenCalledWith('paddle_device_mode', 'cpu');
   });
 
   it('loads, paginates, selects, and clears OCR candidates', async () => {

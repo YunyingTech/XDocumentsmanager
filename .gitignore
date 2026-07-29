@@ -22,6 +22,8 @@ src-tauri/resources/elasticsearch.part*
 src-tauri/resources/.elasticsearch-extract/
 src-tauri/resources/paddle-runtime/*
 !src-tauri/resources/paddle-runtime/README.txt
+src-tauri/resources/rapidocr-runtime/*
+!src-tauri/resources/rapidocr-runtime/README.txt
 src-tauri/OCR_result/
 
 # Editor directories and files

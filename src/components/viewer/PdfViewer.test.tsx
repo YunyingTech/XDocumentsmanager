@@ -65,7 +65,7 @@ describe('PDF viewer', () => {
 
     expect(await screen.findByText('1 / 2')).toBeInTheDocument();
     await user.keyboard('{ArrowRight}');
-    expect(screen.getByText('2 / 2')).toBeInTheDocument();
+    expect(await screen.findByText('2 / 2')).toBeInTheDocument();
     await user.keyboard('{Escape}');
     expect(onClose).toHaveBeenCalledOnce();
   });

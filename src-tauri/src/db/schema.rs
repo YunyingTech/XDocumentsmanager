@@ -32,6 +32,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error
 
     // Insert default settings
     conn.execute_batch(INSERT_DEFAULT_SETTINGS)?;
+    migrate_rapidocr_default_engine(conn)?;
     conn.execute(
         "UPDATE settings SET value = '', updated_at = datetime('now')
          WHERE key = 'paddle_python_path' AND value = 'python'",
@@ -42,6 +43,27 @@ pub fn run_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error
     conn.execute_batch("DROP TABLE IF EXISTS file_tags;")?;
     conn.execute_batch("DROP TABLE IF EXISTS tags;")?;
 
+    Ok(())
+}
+
+fn migrate_rapidocr_default_engine(conn: &Connection) -> Result<(), Box<dyn std::error::Error>> {
+    let migration_applied: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM settings WHERE key = 'rapidocr_default_engine_v1')",
+        [],
+        |row| row.get(0),
+    )?;
+    if migration_applied {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE settings SET value = 'rapid', updated_at = datetime('now')
+         WHERE key = 'ocr_engine' AND value = 'mineru'",
+        [],
+    )?;
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES ('rapidocr_default_engine_v1', 'complete')",
+        [],
+    )?;
     Ok(())
 }
 
@@ -238,11 +260,19 @@ INSERT OR IGNORE INTO settings (key, value) VALUES
     ('default_view', 'table'),
     ('ocr_enabled', 'false'),
     ('ocr_languages', 'eng'),
-    ('ocr_engine', 'mineru'),
+    ('ocr_engine', 'rapid'),
     ('windows_ocr_language', 'auto'),
     ('paddle_python_path', ''),
     ('paddle_ocr_language', 'ch'),
     ('paddle_ocr_model', 'PP-OCRv5_mobile'),
+    ('paddle_device_mode', 'auto'),
+    ('paddle_pypi_primary', 'ustc'),
+    ('paddle_pypi_fallback', 'tsinghua'),
+    ('rapidocr_device_mode', 'auto'),
+    ('rapidocr_language', 'ch'),
+    ('rapidocr_model', 'PP-OCRv6_small'),
+    ('rapidocr_pypi_primary', 'ustc'),
+    ('rapidocr_pypi_fallback', 'tsinghua'),
     ('ocr_api_url', 'http://127.0.0.1:8000'),
     ('ocr_output_dir', ''),
     ('openai_endpoint', 'https://api.openai.com/v1'),
@@ -312,6 +342,16 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        let paddle_settings: (String, String, String) = conn
+            .query_row(
+                "SELECT
+                    (SELECT value FROM settings WHERE key = 'paddle_device_mode'),
+                    (SELECT value FROM settings WHERE key = 'paddle_pypi_primary'),
+                    (SELECT value FROM settings WHERE key = 'paddle_pypi_fallback')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
         let composite_index: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_files_folder_status'",
@@ -328,9 +368,53 @@ mod tests {
             .unwrap();
 
         assert_eq!(foreign_keys, 1);
-        assert_eq!(engine, "mineru");
+        assert_eq!(engine, "rapid");
+        assert_eq!(
+            paddle_settings,
+            (
+                "auto".to_string(),
+                "ustc".to_string(),
+                "tsinghua".to_string()
+            )
+        );
         assert_eq!(composite_index, 1);
         assert_eq!(pending_ocr_index, 1);
+    }
+
+    #[test]
+    fn rapidocr_default_migration_runs_only_once() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(CREATE_SETTINGS).unwrap();
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('ocr_engine', 'mineru')",
+            [],
+        )
+        .unwrap();
+
+        migrate_rapidocr_default_engine(&conn).unwrap();
+        let first: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'ocr_engine'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(first, "rapid");
+
+        conn.execute(
+            "UPDATE settings SET value = 'mineru' WHERE key = 'ocr_engine'",
+            [],
+        )
+        .unwrap();
+        migrate_rapidocr_default_engine(&conn).unwrap();
+        let selected_after_migration: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'ocr_engine'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(selected_after_migration, "mineru");
     }
 
     #[test]
