@@ -1,5 +1,5 @@
 use std::collections::{HashSet, VecDeque};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -7,6 +7,9 @@ use std::sync::{mpsc, Mutex, OnceLock};
 use std::time::Duration;
 
 use flate2::read::GzDecoder;
+use reqwest::blocking::Client;
+use reqwest::header::{CONTENT_LENGTH, CONTENT_RANGE, RANGE};
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
@@ -22,6 +25,11 @@ pub const RAPID_ORT_VERSION: &str = "1.24.4";
 const PYMUPDF_VERSION: &str = "1.24.14";
 pub const CUDA_VERSION: &str = "12.6";
 const CUDA_PACKAGE_INDEX: &str = "https://www.paddlepaddle.org.cn/packages/stable/cu126/";
+const CUDA_WHEEL_NAME: &str =
+    "paddlepaddle_gpu-3.3.1-cp311-cp311-win_amd64.whl";
+const CUDA_WHEEL_URL: &str = "https://paddle-whl.bj.bcebos.com/stable/cu126/paddlepaddle-gpu/paddlepaddle_gpu-3.3.1-cp311-cp311-win_amd64.whl";
+const CUDA_WHEEL_SIZE: u64 = 579_365_132;
+const CUDA_DOWNLOAD_ATTEMPTS: usize = 8;
 const PIP_WHEEL: &str = "pip-25.1.1-py3-none-any.whl";
 const PIP_WHEEL_SHA256: &str = "2913a38a2abf4ea6b64ab507bd9e967f3b53dc1ede74b01b0931e1ce548751af";
 const SETUPTOOLS_WHEEL: &str = "setuptools-80.9.0-py3-none-any.whl";
@@ -758,8 +766,49 @@ fn install_dependencies(
             app,
             "installing",
             40,
-            "Installing the PaddlePaddle CUDA 12.6 runtime from the official CUDA repository",
+            "Preparing the PaddlePaddle CUDA 12.6 runtime",
         );
+        let cuda_wheel = download_cuda_wheel(paths, app)?;
+        install_cuda_wheel(
+            python,
+            paths,
+            constraints,
+            package_indexes,
+            &cuda_wheel,
+            app,
+        )?;
+    }
+
+    install_requirements(
+        python,
+        paths,
+        requirements,
+        constraints,
+        package_indexes,
+        app,
+        "paddle-install:progress",
+        "PaddleOCR",
+    )
+}
+
+fn install_cuda_wheel(
+    python: &Path,
+    paths: &RuntimePaths,
+    constraints: &Path,
+    package_indexes: &[String],
+    wheel: &Path,
+    app: &AppHandle,
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for (attempt, index) in package_indexes.iter().enumerate() {
+        if attempt > 0 {
+            emit_progress(
+                app,
+                "installing",
+                74,
+                &format!("The package mirror was unavailable. Retrying with backup index: {index}"),
+            );
+        }
         let mut install = hidden_command(python);
         configure_python_command(&mut install, paths);
         install.args([
@@ -777,37 +826,288 @@ fn install_dependencies(
             "--timeout",
             "120",
             "--retries",
-            "3",
+            "10",
             "--upgrade",
             "--index-url",
-            CUDA_PACKAGE_INDEX,
+            index.as_str(),
+            "--constraint",
         ]);
-        if let Some(extra_index) = package_indexes.first() {
-            install.args(["--extra-index-url", extra_index]);
+        install.arg(constraints).arg(wheel);
+        match run_install_command(install, app, "paddle-install:progress", "PaddleOCR") {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                log::warn!(
+                    "PaddleOCR CUDA wheel installation through {index} failed: {error}"
+                );
+                errors.push(error);
+            }
         }
-        install
-            .arg("--constraint")
-            .arg(constraints)
-            .arg(format!("paddlepaddle-gpu=={PADDLE_VERSION}"));
-        run_install_command(install, app, "paddle-install:progress", "PaddleOCR").map_err(
-            |error| {
-            format!(
-                "PaddlePaddle CUDA {CUDA_VERSION} could not be installed from {CUDA_PACKAGE_INDEX}: {error}"
-            )
-        },
-        )?;
+    }
+    Err(format!(
+        "PaddlePaddle CUDA {CUDA_VERSION} could not be installed with either package index: {}",
+        errors.join("\n---\n")
+    ))
+}
+
+fn download_cuda_wheel(paths: &RuntimePaths, app: &AppHandle) -> Result<PathBuf, String> {
+    let download_dir = paths.pip_cache.join("xdocuments-downloads");
+    fs::create_dir_all(&download_dir)
+        .map_err(|error| format!("Cannot create PaddleOCR download cache: {error}"))?;
+    let completed = download_dir.join(CUDA_WHEEL_NAME);
+    let partial = download_dir.join(format!("{CUDA_WHEEL_NAME}.part"));
+
+    if valid_wheel_file(&completed, CUDA_WHEEL_SIZE) {
+        emit_progress(
+            app,
+            "installing",
+            74,
+            "Using the cached PaddlePaddle CUDA package",
+        );
+        log::info!(
+            "PaddleOCR installer is using cached CUDA package '{}'",
+            completed.display()
+        );
+        return Ok(completed);
+    }
+    if completed.exists() {
+        log::warn!(
+            "Removing incomplete PaddleOCR CUDA package cache '{}'",
+            completed.display()
+        );
+        let _ = fs::remove_file(&completed);
+    }
+    if partial
+        .metadata()
+        .is_ok_and(|metadata| metadata.len() > CUDA_WHEEL_SIZE)
+    {
+        let _ = fs::remove_file(&partial);
     }
 
-    install_requirements(
-        python,
-        paths,
-        requirements,
-        constraints,
-        package_indexes,
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(2 * 60 * 60))
+        .user_agent(format!("XDocuments/{RUNTIME_VERSION}"))
+        .build()
+        .map_err(|error| format!("Cannot initialize PaddleOCR downloader: {error}"))?;
+    let mut last_error = String::new();
+
+    for attempt in 1..=CUDA_DOWNLOAD_ATTEMPTS {
+        let attempt_result = if partial
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() == CUDA_WHEEL_SIZE)
+        {
+            finalize_cuda_wheel(&partial, &completed)
+        } else {
+            download_cuda_wheel_attempt(&client, &partial, app)
+                .and_then(|_| finalize_cuda_wheel(&partial, &completed))
+        };
+        match attempt_result {
+            Ok(()) => {
+                return Ok(completed);
+            }
+            Err(error) => {
+                last_error = error;
+                log::warn!(
+                    "PaddleOCR CUDA package download attempt {attempt}/{CUDA_DOWNLOAD_ATTEMPTS} failed: {last_error}"
+                );
+                if attempt < CUDA_DOWNLOAD_ATTEMPTS {
+                    let delay = (attempt as u64 * 3).min(15);
+                    let downloaded = partial.metadata().map(|value| value.len()).unwrap_or(0);
+                    emit_progress(
+                        app,
+                        "installing",
+                        download_install_progress(downloaded, CUDA_WHEEL_SIZE),
+                        &format!(
+                            "Network interrupted at {:.1} MB. Retrying in {delay} seconds; the download will resume automatically.",
+                            downloaded as f64 / 1_000_000.0
+                        ),
+                    );
+                    std::thread::sleep(Duration::from_secs(delay));
+                }
+            }
+        }
+    }
+
+    Err(format!(
+        "PaddlePaddle CUDA package download failed after {CUDA_DOWNLOAD_ATTEMPTS} attempts. The partial download was kept and will resume the next time installation is retried. Last error: {last_error}"
+    ))
+}
+
+fn download_cuda_wheel_attempt(
+    client: &Client,
+    partial: &Path,
+    app: &AppHandle,
+) -> Result<(), String> {
+    let mut downloaded = partial.metadata().map(|value| value.len()).unwrap_or(0);
+    let mut response = client
+        .get(CUDA_WHEEL_URL)
+        .header(RANGE, format!("bytes={downloaded}-"))
+        .send()
+        .map_err(|error| format!("Cannot connect to {CUDA_PACKAGE_INDEX}: {error}"))?;
+
+    let append = match response.status() {
+        StatusCode::PARTIAL_CONTENT => {
+            let content_range = response
+                .headers()
+                .get(CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_content_range)
+                .ok_or_else(|| "CUDA package server returned an invalid Content-Range".to_string())?;
+            if content_range.0 != downloaded
+                || content_range.1 < content_range.0
+                || content_range.2 != CUDA_WHEEL_SIZE
+            {
+                return Err(format!(
+                    "CUDA package server returned an unexpected range: bytes {}-{}/{} (expected offset {downloaded}, total {CUDA_WHEEL_SIZE})",
+                    content_range.0, content_range.1, content_range.2
+                ));
+            }
+            if let Some(length) = response
+                .headers()
+                .get(CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+            {
+                let expected_length = content_range.1 - content_range.0 + 1;
+                if length != expected_length {
+                    return Err(format!(
+                        "CUDA package server returned Content-Length {length}, expected {expected_length}"
+                    ));
+                }
+            }
+            true
+        }
+        StatusCode::OK => {
+            if let Some(length) = response.content_length() {
+                if length != CUDA_WHEEL_SIZE {
+                    return Err(format!(
+                        "CUDA package server returned {length} bytes, expected {CUDA_WHEEL_SIZE}"
+                    ));
+                }
+            }
+            downloaded = 0;
+            false
+        }
+        status => {
+            return Err(format!(
+                "CUDA package server returned HTTP {}",
+                status.as_u16()
+            ));
+        }
+    };
+
+    let mut file = if append {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(partial)
+    } else {
+        OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(partial)
+    }
+    .map_err(|error| format!("Cannot open PaddleOCR download cache: {error}"))?;
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut last_percent = downloaded.saturating_mul(100) / CUDA_WHEEL_SIZE;
+    emit_download_progress(app, downloaded, last_percent);
+
+    loop {
+        let read = response
+            .read(&mut buffer)
+            .map_err(|error| format!("CUDA package download was interrupted: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        file.write_all(&buffer[..read])
+            .map_err(|error| format!("Cannot write PaddleOCR download cache: {error}"))?;
+        downloaded = downloaded.saturating_add(read as u64);
+        if downloaded > CUDA_WHEEL_SIZE {
+            return Err(format!(
+                "CUDA package download exceeded the expected size of {CUDA_WHEEL_SIZE} bytes"
+            ));
+        }
+        let percent = downloaded.saturating_mul(100) / CUDA_WHEEL_SIZE;
+        if percent > last_percent || downloaded == CUDA_WHEEL_SIZE {
+            last_percent = percent;
+            emit_download_progress(app, downloaded, percent);
+        }
+    }
+    file.flush()
+        .map_err(|error| format!("Cannot flush PaddleOCR download cache: {error}"))?;
+    if downloaded != CUDA_WHEEL_SIZE {
+        return Err(format!(
+            "CUDA package download stopped at {downloaded} of {CUDA_WHEEL_SIZE} bytes"
+        ));
+    }
+    file.sync_all()
+        .map_err(|error| format!("Cannot synchronize PaddleOCR download cache: {error}"))?;
+    Ok(())
+}
+
+fn emit_download_progress(app: &AppHandle, downloaded: u64, percent: u64) {
+    let message = format!(
+        "Downloading PaddlePaddle CUDA package: {:.1} / {:.1} MB ({}%). Interrupted downloads resume automatically.",
+        downloaded as f64 / 1_000_000.0,
+        CUDA_WHEEL_SIZE as f64 / 1_000_000.0,
+        percent.min(100)
+    );
+    log::info!("PaddleOCR installer: {message}");
+    emit_progress(
         app,
-        "paddle-install:progress",
-        "PaddleOCR",
-    )
+        "installing",
+        download_install_progress(downloaded, CUDA_WHEEL_SIZE),
+        &message,
+    );
+}
+
+fn download_install_progress(downloaded: u64, total: u64) -> u8 {
+    if total == 0 {
+        return 40;
+    }
+    40 + ((downloaded.saturating_mul(34) / total).min(34) as u8)
+}
+
+fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
+    let value = value.strip_prefix("bytes ")?;
+    let (range, total) = value.split_once('/')?;
+    let (start, end) = range.split_once('-')?;
+    Some((start.parse().ok()?, end.parse().ok()?, total.parse().ok()?))
+}
+
+fn valid_wheel_file(path: &Path, expected_size: u64) -> bool {
+    if !path
+        .metadata()
+        .is_ok_and(|metadata| metadata.len() == expected_size)
+    {
+        return false;
+    }
+    File::open(path)
+        .ok()
+        .and_then(|file| zip::ZipArchive::new(file).ok())
+        .is_some_and(|archive| !archive.is_empty())
+}
+
+fn finalize_cuda_wheel(partial: &Path, completed: &Path) -> Result<(), String> {
+    if !valid_wheel_file(partial, CUDA_WHEEL_SIZE) {
+        let _ = fs::remove_file(partial);
+        return Err(
+            "The downloaded PaddlePaddle CUDA wheel is incomplete or invalid; it will be downloaded again"
+                .to_string(),
+        );
+    }
+    if completed.exists() {
+        fs::remove_file(completed)
+            .map_err(|error| format!("Cannot replace cached PaddleOCR package: {error}"))?;
+    }
+    fs::rename(partial, completed)
+        .map_err(|error| format!("Cannot finalize cached PaddleOCR package: {error}"))?;
+    log::info!(
+        "PaddleOCR CUDA package download completed and cached at '{}'",
+        completed.display()
+    );
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -847,9 +1147,9 @@ fn install_requirements(
             "raw",
             "--prefer-binary",
             "--timeout",
-            "60",
+            "120",
             "--retries",
-            "3",
+            "10",
             "--upgrade",
             "--index-url",
             index.as_str(),
@@ -1518,12 +1818,12 @@ fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
 #[cfg(test)]
 mod tests {
     use super::{
-        configure_python_command, file_sha256, forward_install_output, install_line_progress,
-        install_supported, package_index_urls, profile_install_supported, promote_runtime,
-        rapid_probe_matches_profile, rapid_runtime_profile, raw_download_progress,
-        runtime_probe_matches_profile, verify_rapid_wheelhouse, RapidRuntimeProbe,
-        RapidRuntimeProfile, RuntimePaths, RuntimeProbe, RuntimeProfile, RAPIDOCR_VERSION,
-        RAPID_ORT_VERSION, RAPID_RUNTIME_VERSION, RUNTIME_VERSION,
+        configure_python_command, download_install_progress, file_sha256, forward_install_output,
+        install_line_progress, install_supported, package_index_urls, parse_content_range,
+        profile_install_supported, promote_runtime, rapid_probe_matches_profile,
+        rapid_runtime_profile, raw_download_progress, runtime_probe_matches_profile,
+        verify_rapid_wheelhouse, RapidRuntimeProbe, RapidRuntimeProfile, RuntimePaths, RuntimeProbe,
+        RuntimeProfile, RAPIDOCR_VERSION, RAPID_ORT_VERSION, RAPID_RUNTIME_VERSION, RUNTIME_VERSION,
     };
 
     #[test]
@@ -1717,6 +2017,26 @@ mod tests {
             78
         );
         assert_eq!(install_line_progress("Successfully installed paddle"), 85);
+    }
+
+    #[test]
+    fn parses_resumable_download_ranges_and_rejects_invalid_values() {
+        assert_eq!(
+            parse_content_range("bytes 298700000-579365131/579365132"),
+            Some((298_700_000, 579_365_131, 579_365_132))
+        );
+        assert_eq!(parse_content_range("bytes */579365132"), None);
+        assert_eq!(parse_content_range("items 0-1/2"), None);
+        assert_eq!(parse_content_range("bytes 0-1/*"), None);
+    }
+
+    #[test]
+    fn maps_cuda_download_progress_without_reaching_install_completion() {
+        assert_eq!(download_install_progress(0, 579_365_132), 40);
+        assert_eq!(download_install_progress(289_682_566, 579_365_132), 57);
+        assert_eq!(download_install_progress(579_365_132, 579_365_132), 74);
+        assert_eq!(download_install_progress(u64::MAX, 579_365_132), 74);
+        assert_eq!(download_install_progress(1, 0), 40);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # XDocuments Manager
 
-A Windows and macOS desktop PDF document manager designed for **60TB-scale** PDF collections across local drives and SMB network shares.
+A Windows and macOS desktop PDF document manager for PDF collections across local drives and SMB network shares.
 
 Files stay in place. Local indexing, RapidOCR, Windows OCR, and PaddleOCR do not upload documents. MinerU is an optional external OCR service and sends selected files to the configured endpoint. See [TECHNICAL_ROADMAP.md](TECHNICAL_ROADMAP.md) for the current architecture, privacy boundaries, known limits, and delivery plan.
 
