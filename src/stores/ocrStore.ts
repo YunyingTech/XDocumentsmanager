@@ -40,11 +40,15 @@ export interface OcrTask {
 }
 
 const WINDOWS_OCR_CONCURRENCY = 2;
+const DEFAULT_RAPID_OCR_WORKERS = 3;
+const MAX_RAPID_OCR_WORKERS = 8;
 const INCREMENTAL_OCR_BATCH_SIZE = 100;
 const OCR_TASK_HISTORY_LIMIT = 2_000;
 const pendingWindowsProgress = new Map<string, WindowsOcrProgress>();
 const activeBulkOcr = new Map<string, string>();
 const cancelledBulkOcr = new Set<string>();
+const bulkOcrRemaining = new Map<string, number>();
+const bulkTaskRuns = new Map<string, string>();
 let windowsProgressFrame: number | null = null;
 
 interface OcrStore {
@@ -93,6 +97,7 @@ interface OcrStore {
   rapidLanguage: string;
   rapidModel: string;
   rapidDeviceMode: RapidDeviceMode;
+  rapidWorkerCount: number;
   rapidPypiPrimary: PaddlePackageIndex;
   rapidPypiFallback: PaddlePackageIndex;
 
@@ -105,7 +110,7 @@ interface OcrStore {
   selectAll: () => void;
   deselectAll: () => void;
   submitTasks: () => Promise<void>;
-  submitFileBatch: (files: OcrCandidateRef[]) => Promise<void>;
+  submitFileBatch: (files: OcrCandidateRef[], bulkRunId?: string) => Promise<void>;
   queueAllOcr: () => Promise<number>;
   queueFolderOcr: (folderId: number) => Promise<number>;
   queuePendingOcr: (folderId?: number) => Promise<number>;
@@ -127,6 +132,7 @@ interface OcrStore {
   installPaddle: () => Promise<void>;
   saveRapidLanguage: (language: string) => Promise<void>;
   saveRapidDeviceMode: (mode: RapidDeviceMode) => Promise<void>;
+  saveRapidWorkerCount: (count: number) => Promise<void>;
   saveRapidPypiPrimary: (index: PaddlePackageIndex) => Promise<void>;
   saveRapidPypiFallback: (index: PaddlePackageIndex) => Promise<void>;
   installRapid: () => Promise<void>;
@@ -173,6 +179,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
   rapidLanguage: 'ch',
   rapidModel: 'PP-OCRv6_small',
   rapidDeviceMode: 'auto',
+  rapidWorkerCount: DEFAULT_RAPID_OCR_WORKERS,
   rapidPypiPrimary: 'ustc',
   rapidPypiFallback: 'tsinghua',
 
@@ -284,9 +291,9 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
     await get().submitFileBatch(files);
   },
 
-  submitFileBatch: async (files) => {
+  submitFileBatch: async (files, bulkRunId) => {
     if (get().isSubmitting || files.length === 0) return;
-    const { engine, windowsLanguage, paddleLanguage, paddleModel, rapidLanguage, rapidModel } = get();
+    const { engine, windowsLanguage, paddleLanguage, paddleModel, rapidLanguage, rapidModel, rapidWorkerCount } = get();
     const submittedAt = Date.now();
     const batch = files.map((file, index): OcrTask => ({
       taskId: crypto.randomUUID(),
@@ -298,6 +305,9 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
       submittedAt: submittedAt + index,
       engine,
     }));
+    if (bulkRunId) {
+      batch.forEach((task) => bulkTaskRuns.set(task.taskId, bulkRunId));
+    }
     const batchTaskIds = new Set(batch.map((task) => task.taskId));
     set((state) => ({
       tasks: [...state.tasks, ...batch],
@@ -327,6 +337,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
               : engine === 'windows'
                 ? await runWindowsOcr(task.fileId, task.taskId, windowsLanguage)
                 : await runPaddleOcr(task.fileId, task.taskId, paddleLanguage, paddleModel);
+            const bulkOcrQueued = settleBulkTask(task.taskId);
             set((state) => ({
               tasks: state.tasks.map((item) =>
                 item.taskId === task.taskId
@@ -335,8 +346,10 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
                     : { ...item, status: 'completed' as const, progress: 100, resultPath }
                   : item
               ),
+              bulkOcrQueued,
             }));
           } catch (error) {
+            const bulkOcrQueued = settleBulkTask(task.taskId);
             set((state) => ({
               tasks: state.tasks.map((item) =>
                 item.taskId === task.taskId
@@ -345,12 +358,22 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
                     : { ...item, status: 'failed' as const, error: String(error) }
                   : item
               ),
+              bulkOcrQueued,
             }));
           }
         }
       };
       await Promise.all(
-        Array.from({ length: Math.min(engine === 'paddle' || engine === 'rapid' ? 1 : WINDOWS_OCR_CONCURRENCY, batch.length) }, () => runWorker())
+        Array.from({
+          length: Math.min(
+            engine === 'rapid'
+              ? rapidWorkerCountValue(rapidWorkerCount)
+              : engine === 'windows'
+                ? WINDOWS_OCR_CONCURRENCY
+                : 1,
+            batch.length
+          ),
+        }, () => runWorker())
       );
       await get().loadCandidates();
       set({ isSubmitting: false });
@@ -363,6 +386,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
       }
       try {
         const resp = await submitOcrTask(task.fileId, true);
+        transferBulkTask(task.taskId, resp.task_id);
         set((s) => ({
           tasks: s.tasks.map((t) =>
             t.taskId === task.taskId && t.status !== 'cancelled'
@@ -371,12 +395,14 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
           ),
         }));
       } catch (error) {
+        const bulkOcrQueued = settleBulkTask(task.taskId);
         set((s) => ({
           tasks: s.tasks.map((t) =>
             t.taskId === task.taskId && t.status !== 'cancelled'
               ? { ...t, status: 'failed' as const, error: String(error) }
               : t
           ),
+          bulkOcrQueued,
         }));
       }
     }
@@ -406,18 +432,16 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
       return 0;
     }
     const runId = crypto.randomUUID();
-    const startsNewQueue = activeBulkOcr.size === 0;
     activeBulkOcr.set(scope, runId);
     let plannedTotal = 0;
-    set((state) => ({
+    set({
       bulkOcrRunning: true,
-      bulkOcrQueued: startsNewQueue ? 0 : state.bulkOcrQueued,
-    }));
+      bulkOcrQueued: bulkRemainingTotal(),
+    });
     try {
       plannedTotal = (await listOcrCandidates(folderId, 0, 1, true)).total;
-      set((state) => ({
-        bulkOcrQueued: startsNewQueue ? plannedTotal : state.bulkOcrQueued + plannedTotal,
-      }));
+      bulkOcrRemaining.set(runId, plannedTotal);
+      set({ bulkOcrQueued: bulkRemainingTotal() });
       await get().loadSettings();
       let afterId = 0;
       let queued = 0;
@@ -428,11 +452,12 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
           await new Promise((resolve) => window.setTimeout(resolve, 250));
         }
         if (cancelledBulkOcr.has(runId)) break;
-        const submission = get().submitFileBatch(files);
-        queued += files.length;
         if (plannedTotal === 0) {
-          set((state) => ({ bulkOcrQueued: state.bulkOcrQueued + files.length }));
+          bulkOcrRemaining.set(runId, (bulkOcrRemaining.get(runId) ?? 0) + files.length);
+          set({ bulkOcrQueued: bulkRemainingTotal() });
         }
+        const submission = get().submitFileBatch(files, runId);
+        queued += files.length;
         afterId = files[files.length - 1].id;
         await submission;
 
@@ -461,7 +486,11 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
     } finally {
       activeBulkOcr.delete(scope);
       cancelledBulkOcr.delete(runId);
-      set({ bulkOcrRunning: activeBulkOcr.size > 0 });
+      clearBulkRun(runId);
+      set({
+        bulkOcrRunning: activeBulkOcr.size > 0,
+        bulkOcrQueued: bulkRemainingTotal(),
+      });
     }
   },
 
@@ -518,6 +547,9 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
         const status: OcrTaskStatus = await queryOcrTask(task.taskId);
         const newStatus = mapApiStatus(status.status);
 
+        const bulkOcrQueued = isTerminalOcrStatus(newStatus)
+          ? settleBulkTask(task.taskId)
+          : bulkRemainingTotal();
         set((s) => ({
           tasks: s.tasks.map((t) =>
             t.taskId === task.taskId
@@ -530,6 +562,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
                 }
               : t
           ),
+          bulkOcrQueued,
         }));
 
         // Auto-download on completion
@@ -606,7 +639,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
   // ── Settings ──
   loadSettings: async () => {
     try {
-      const [apiUrl, outputDir, engine, windowsLanguage, paddleLanguage, paddleModel, paddleDeviceMode, paddlePypiPrimary, paddlePypiFallback, rapidLanguage, rapidModel, rapidDeviceMode, rapidPypiPrimary, rapidPypiFallback] = await Promise.all([
+      const [apiUrl, outputDir, engine, windowsLanguage, paddleLanguage, paddleModel, paddleDeviceMode, paddlePypiPrimary, paddlePypiFallback, rapidLanguage, rapidModel, rapidDeviceMode, rapidWorkerCount, rapidPypiPrimary, rapidPypiFallback] = await Promise.all([
         getSetting('ocr_api_url'),
         getSetting('ocr_output_dir'),
         getSetting('ocr_engine'),
@@ -619,6 +652,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
         getSetting('rapidocr_language'),
         getSetting('rapidocr_model'),
         getSetting('rapidocr_device_mode'),
+        getSetting('rapidocr_worker_count'),
         getSetting('rapidocr_pypi_primary'),
         getSetting('rapidocr_pypi_fallback'),
       ]);
@@ -635,6 +669,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
         rapidLanguage: rapidLanguage || 'ch',
         rapidModel: rapidModel || 'PP-OCRv6_small',
         rapidDeviceMode: rapidDeviceModeValue(rapidDeviceMode),
+        rapidWorkerCount: rapidWorkerCountValue(rapidWorkerCount),
         rapidPypiPrimary: packageIndex(rapidPypiPrimary, 'ustc'),
         rapidPypiFallback: packageIndex(rapidPypiFallback, 'tsinghua'),
       });
@@ -724,6 +759,12 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
     }
   },
 
+  saveRapidWorkerCount: async (count) => {
+    const rapidWorkerCount = rapidWorkerCountValue(count);
+    await setSetting('rapidocr_worker_count', String(rapidWorkerCount));
+    set({ rapidWorkerCount });
+  },
+
   saveRapidPypiPrimary: async (rapidPypiPrimary) => {
     await setSetting('rapidocr_pypi_primary', rapidPypiPrimary);
     set({ rapidPypiPrimary });
@@ -755,12 +796,14 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
   cancelTask: async (taskId: string) => {
     const task = get().tasks.find((item) => item.taskId === taskId);
     if (!task || !['submitting', 'queued', 'running'].includes(task.status)) return;
+    const bulkOcrQueued = settleBulkTask(taskId);
     set((state) => ({
       tasks: state.tasks.map((item) =>
         item.taskId === taskId
           ? { ...item, status: 'cancelled' as const, queuedAhead: null, error: undefined }
           : item
       ),
+      bulkOcrQueued,
     }));
     if (task.status === 'running' && task.engine !== 'mineru') {
       try {
@@ -778,12 +821,15 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
     const bulkRuns = [...activeBulkOcr.values()];
     if (activeTasks.length === 0 && bulkRuns.length === 0) return;
     bulkRuns.forEach((runId) => cancelledBulkOcr.add(runId));
+    bulkOcrRemaining.clear();
+    bulkTaskRuns.clear();
     set((state) => ({
       tasks: state.tasks.map((task) =>
         ['submitting', 'queued', 'running'].includes(task.status)
           ? { ...task, status: 'cancelled' as const, queuedAhead: null, error: undefined }
           : task
       ),
+      bulkOcrQueued: 0,
     }));
     get().stopPolling();
     pendingWindowsProgress.clear();
@@ -830,6 +876,8 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
     if (activeBulkOcr.size > 0) return;
     get().stopPolling();
     pendingWindowsProgress.clear();
+    bulkOcrRemaining.clear();
+    bulkTaskRuns.clear();
     if (windowsProgressFrame !== null) {
       window.cancelAnimationFrame(windowsProgressFrame);
       windowsProgressFrame = null;
@@ -858,6 +906,42 @@ function mapApiStatus(apiStatus: string): OcrTask['status'] {
     default:
       return 'queued';
   }
+}
+
+function isTerminalOcrStatus(status: OcrTask['status']): boolean {
+  return status === 'completed' || status === 'failed' || status === 'cancelled';
+}
+
+function bulkRemainingTotal(): number {
+  return [...bulkOcrRemaining.values()].reduce((total, count) => total + count, 0);
+}
+
+function settleBulkTask(taskId: string): number {
+  const runId = bulkTaskRuns.get(taskId);
+  if (!runId) return bulkRemainingTotal();
+  bulkTaskRuns.delete(taskId);
+  bulkOcrRemaining.set(runId, Math.max(0, (bulkOcrRemaining.get(runId) ?? 0) - 1));
+  return bulkRemainingTotal();
+}
+
+function transferBulkTask(previousTaskId: string, nextTaskId: string) {
+  const runId = bulkTaskRuns.get(previousTaskId);
+  if (!runId) return;
+  bulkTaskRuns.delete(previousTaskId);
+  bulkTaskRuns.set(nextTaskId, runId);
+}
+
+function clearBulkRun(runId: string) {
+  bulkOcrRemaining.delete(runId);
+  for (const [taskId, taskRunId] of bulkTaskRuns) {
+    if (taskRunId === runId) bulkTaskRuns.delete(taskId);
+  }
+}
+
+function rapidWorkerCountValue(value: string | number | null | undefined): number {
+  const count = typeof value === 'number' ? value : Number.parseInt(value ?? '', 10);
+  if (!Number.isFinite(count)) return DEFAULT_RAPID_OCR_WORKERS;
+  return Math.min(MAX_RAPID_OCR_WORKERS, Math.max(1, Math.trunc(count)));
 }
 
 function failedPaddleStatus(error: unknown): PaddleOcrStatus {

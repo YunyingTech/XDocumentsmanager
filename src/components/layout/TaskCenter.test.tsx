@@ -89,6 +89,37 @@ describe('task center', () => {
     expect(screen.getByText('205 tasks running')).toBeInTheDocument();
   });
 
+  it('uses the remaining bulk count after completed tasks are settled', () => {
+    state.bulkOcrRunning = true;
+    state.bulkOcrQueued = 2;
+    state.tasks = [{
+      taskId: 'task-1',
+      fileId: 1,
+      fileName: 'one.pdf',
+      status: 'completed',
+      queuedAhead: null,
+      progress: 100,
+      submittedAt: 1,
+      engine: 'rapid',
+    }, {
+      taskId: 'task-2',
+      fileId: 2,
+      fileName: 'two.pdf',
+      status: 'running',
+      queuedAhead: null,
+      progress: 50,
+      submittedAt: 2,
+      engine: 'rapid',
+    }];
+
+    const { rerender } = render(<TaskCenter />);
+    expect(screen.getByText('2 tasks running')).toBeInTheDocument();
+
+    state.bulkOcrQueued = 1;
+    rerender(<TaskCenter />);
+    expect(screen.getByText('1 task running')).toBeInTheDocument();
+  });
+
   it('shows that an index task will continue with OCR', async () => {
     state.folders = [{ id: 3, display_name: 'Archive' }];
     state.indexProgress = {

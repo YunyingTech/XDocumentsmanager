@@ -45,6 +45,7 @@ export function SettingsPanel() {
   const [paddleInstalling, setPaddleInstalling] = useState(false);
   const [rapidLanguage, setRapidLanguage] = useState('ch');
   const [rapidDeviceMode, setRapidDeviceMode] = useState<RapidDeviceMode>('auto');
+  const [rapidWorkerCount, setRapidWorkerCount] = useState(3);
   const [rapidStatus, setRapidStatus] = useState<RapidOcrStatus | null>(null);
   const [rapidInstallProgress, setRapidInstallProgress] = useState<RapidInstallProgress | null>(null);
   const [rapidInstalling, setRapidInstalling] = useState(false);
@@ -72,7 +73,7 @@ export function SettingsPanel() {
       const keys = [
         'max_file_size_mb', 'ocr_api_url', 'ocr_output_dir', 'ocr_engine', 'windows_ocr_language',
         'paddle_ocr_language', 'paddle_ocr_model', 'paddle_device_mode', 'paddle_pypi_primary', 'paddle_pypi_fallback',
-        'rapidocr_language', 'rapidocr_device_mode'
+        'rapidocr_language', 'rapidocr_device_mode', 'rapidocr_worker_count'
       ];
       for (const key of keys) {
         const val = await getSetting(key);
@@ -90,6 +91,7 @@ export function SettingsPanel() {
             case 'paddle_pypi_fallback': setPaddlePypiFallback(packageIndex(val, 'tsinghua')); break;
             case 'rapidocr_language': setRapidLanguage(val); break;
             case 'rapidocr_device_mode': setRapidDeviceMode(rapidDeviceModeValue(val)); break;
+            case 'rapidocr_worker_count': setRapidWorkerCount(rapidWorkerCountValue(val)); break;
           }
         }
       }
@@ -402,9 +404,27 @@ export function SettingsPanel() {
                     </select>
                   </div>
                   <div>
-                    <span className="mb-1.5 block text-sm text-surface-600 dark:text-surface-400">{t('ocr.rapidDevice')}</span>
-                    <RapidDeviceModeControl value={rapidDeviceMode} onChange={(value) => void selectRapidDeviceMode(value)} disabled={ocrChecking || rapidInstalling} t={t} />
+                    <label htmlFor="setting-rapid-workers" className="mb-1.5 block text-sm text-surface-600 dark:text-surface-400">{t('ocr.rapidWorkers')}</label>
+                    <input
+                      id="setting-rapid-workers"
+                      name="rapidocr_worker_count"
+                      type="number"
+                      min={1}
+                      max={8}
+                      step={1}
+                      className="input"
+                      value={rapidWorkerCount}
+                      onChange={(event) => {
+                        const count = rapidWorkerCountValue(event.currentTarget.value);
+                        setRapidWorkerCount(count);
+                        void save('rapidocr_worker_count', String(count));
+                      }}
+                    />
                   </div>
+                </div>
+                <div>
+                  <span className="mb-1.5 block text-sm text-surface-600 dark:text-surface-400">{t('ocr.rapidDevice')}</span>
+                  <RapidDeviceModeControl value={rapidDeviceMode} onChange={(value) => void selectRapidDeviceMode(value)} disabled={ocrChecking || rapidInstalling} t={t} />
                 </div>
                 <div className="flex min-w-0 items-center gap-2">
                   <button type="button" className="btn-secondary inline-flex h-8 shrink-0 items-center gap-1.5 px-2.5 text-xs disabled:opacity-50" onClick={() => void installRapid()} disabled={ocrChecking || rapidInstalling || rapidStatus?.install_supported === false}>
@@ -833,6 +853,12 @@ function deviceMode(value: string): PaddleDeviceMode {
 
 function rapidDeviceModeValue(value: string): RapidDeviceMode {
   return value === 'cpu' ? 'cpu' : 'auto';
+}
+
+function rapidWorkerCountValue(value: string): number {
+  const count = Number.parseInt(value, 10);
+  if (!Number.isFinite(count)) return 3;
+  return Math.min(8, Math.max(1, count));
 }
 
 function PaddlePackageIndexOptions({ t }: { t: ReturnType<typeof useI18n>['t'] }) {

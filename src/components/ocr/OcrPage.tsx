@@ -279,6 +279,7 @@ function SettingsCard() {
   const isInstallingRapid = useOcrStore((s) => s.isInstallingRapid);
   const rapidLanguage = useOcrStore((s) => s.rapidLanguage);
   const rapidDeviceMode = useOcrStore((s) => s.rapidDeviceMode);
+  const rapidWorkerCount = useOcrStore((s) => s.rapidWorkerCount);
   const paddleInstallProgress = useOcrStore((s) => s.paddleInstallProgress);
   const isInstallingPaddle = useOcrStore((s) => s.isInstallingPaddle);
   const paddleLanguage = useOcrStore((s) => s.paddleLanguage);
@@ -296,6 +297,7 @@ function SettingsCard() {
   const installPaddle = useOcrStore((s) => s.installPaddle);
   const saveRapidLanguage = useOcrStore((s) => s.saveRapidLanguage);
   const saveRapidDeviceMode = useOcrStore((s) => s.saveRapidDeviceMode);
+  const saveRapidWorkerCount = useOcrStore((s) => s.saveRapidWorkerCount);
   const installRapid = useOcrStore((s) => s.installRapid);
   const healthChecking = useOcrStore((s) => s.healthChecking);
   const [apiUrlDraft, setApiUrlDraft] = useState(apiUrl);
@@ -379,9 +381,23 @@ function SettingsCard() {
               </select>
             </div>
             <div>
-              <span className="mb-1 block text-xs text-surface-500">{t('ocr.rapidDevice')}</span>
-              <RapidDeviceModeControl value={rapidDeviceMode} onChange={(value) => void saveRapidDeviceMode(value)} disabled={healthChecking || isInstallingRapid} t={t} />
+              <label htmlFor="ocr-rapid-workers" className="mb-1 block text-xs text-surface-500">{t('ocr.rapidWorkers')}</label>
+              <input
+                id="ocr-rapid-workers"
+                name="rapidocr_worker_count"
+                type="number"
+                min={1}
+                max={8}
+                step={1}
+                className="input text-sm"
+                value={rapidWorkerCount}
+                onChange={(event) => void saveRapidWorkerCount(event.currentTarget.valueAsNumber)}
+              />
             </div>
+          </div>
+          <div>
+            <span className="mb-1 block text-xs text-surface-500">{t('ocr.rapidDevice')}</span>
+            <RapidDeviceModeControl value={rapidDeviceMode} onChange={(value) => void saveRapidDeviceMode(value)} disabled={healthChecking || isInstallingRapid} t={t} />
           </div>
           <div className="flex min-w-0 items-center gap-2">
             <button type="button" className="btn-secondary flex h-8 shrink-0 items-center gap-1.5 px-2.5 text-xs disabled:opacity-50" onClick={() => void installRapid()} disabled={healthChecking || isInstallingRapid || rapidStatus?.install_supported === false}>

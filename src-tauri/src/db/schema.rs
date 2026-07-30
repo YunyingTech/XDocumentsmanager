@@ -269,6 +269,7 @@ INSERT OR IGNORE INTO settings (key, value) VALUES
     ('paddle_pypi_primary', 'ustc'),
     ('paddle_pypi_fallback', 'tsinghua'),
     ('rapidocr_device_mode', 'auto'),
+    ('rapidocr_worker_count', '3'),
     ('rapidocr_language', 'ch'),
     ('rapidocr_model', 'PP-OCRv6_small'),
     ('rapidocr_pypi_primary', 'ustc'),
@@ -342,6 +343,13 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        let rapid_worker_count: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'rapidocr_worker_count'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         let paddle_settings: (String, String, String) = conn
             .query_row(
                 "SELECT
@@ -369,6 +377,7 @@ mod tests {
 
         assert_eq!(foreign_keys, 1);
         assert_eq!(engine, "rapid");
+        assert_eq!(rapid_worker_count, "3");
         assert_eq!(
             paddle_settings,
             (

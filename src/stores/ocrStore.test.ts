@@ -81,6 +81,7 @@ describe('OCR store', () => {
       rapidLanguage: 'ch',
       rapidModel: 'PP-OCRv6_small',
       rapidDeviceMode: 'auto',
+      rapidWorkerCount: 3,
       rapidPypiPrimary: 'ustc',
       rapidPypiFallback: 'tsinghua',
     });
@@ -112,28 +113,62 @@ describe('OCR store', () => {
     expect(useOcrStore.getState().isSubmitting).toBe(false);
   });
 
-  it('runs RapidOCR sequentially and keeps every queued file visible', async () => {
+  it('runs three RapidOCR workers by default and keeps the remaining queue visible', async () => {
     const first = deferred<string>();
-    mocks.runRapidOcr.mockReturnValueOnce(first.promise).mockResolvedValueOnce('two_rapid.md');
+    const second = deferred<string>();
+    const third = deferred<string>();
+    mocks.runRapidOcr
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+      .mockReturnValueOnce(third.promise)
+      .mockResolvedValueOnce('four_rapid.md');
     useOcrStore.setState({ engine: 'rapid' });
 
     const submission = useOcrStore.getState().submitFileBatch([
       { id: 1, file_name: 'one.pdf' },
       { id: 2, file_name: 'two.pdf' },
+      { id: 3, file_name: 'three.pdf' },
+      { id: 4, file_name: 'four.pdf' },
     ]);
-    await vi.waitFor(() => expect(mocks.runRapidOcr).toHaveBeenCalledOnce());
-    expect(useOcrStore.getState().tasks.map((task) => task.status)).toEqual(['running', 'queued']);
+    await vi.waitFor(() => expect(mocks.runRapidOcr).toHaveBeenCalledTimes(3));
+    expect(useOcrStore.getState().tasks.map((task) => task.status)).toEqual(['running', 'running', 'running', 'queued']);
     expect(mocks.runRapidOcr).toHaveBeenCalledWith(1, expect.any(String), 'ch', 'PP-OCRv6_small');
 
     first.resolve('one_rapid.md');
+    await vi.waitFor(() => expect(mocks.runRapidOcr).toHaveBeenCalledTimes(4));
+    second.resolve('two_rapid.md');
+    third.resolve('three_rapid.md');
     await submission;
-    expect(mocks.runRapidOcr).toHaveBeenCalledTimes(2);
-    expect(useOcrStore.getState().tasks.map((task) => task.status)).toEqual(['completed', 'completed']);
+    expect(useOcrStore.getState().tasks.every((task) => task.status === 'completed')).toBe(true);
+  });
+
+  it('honors a lower configured RapidOCR worker count', async () => {
+    const first = deferred<string>();
+    const second = deferred<string>();
+    mocks.runRapidOcr
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+      .mockResolvedValueOnce('three_rapid.md');
+    useOcrStore.setState({ engine: 'rapid', rapidWorkerCount: 2 });
+
+    const submission = useOcrStore.getState().submitFileBatch([
+      { id: 1, file_name: 'one.pdf' },
+      { id: 2, file_name: 'two.pdf' },
+      { id: 3, file_name: 'three.pdf' },
+    ]);
+    await vi.waitFor(() => expect(mocks.runRapidOcr).toHaveBeenCalledTimes(2));
+    expect(useOcrStore.getState().tasks.map((task) => task.status)).toEqual(['running', 'running', 'queued']);
+
+    first.resolve('one_rapid.md');
+    await vi.waitFor(() => expect(mocks.runRapidOcr).toHaveBeenCalledTimes(3));
+    second.resolve('two_rapid.md');
+    await submission;
   });
 
   it('uses RapidOCR as the settings fallback and routes its health check', async () => {
     await useOcrStore.getState().loadSettings();
     expect(useOcrStore.getState().engine).toBe('rapid');
+    expect(useOcrStore.getState().rapidWorkerCount).toBe(3);
 
     mocks.getRapidOcrStatus.mockResolvedValue({
       available: true,
@@ -285,8 +320,33 @@ describe('OCR store', () => {
     expect(mocks.listOcrCandidateRefs).toHaveBeenNthCalledWith(4, undefined, 205, 100);
     expect(useOcrStore.getState()).toMatchObject({
       bulkOcrRunning: false,
-      bulkOcrQueued: 205,
+      bulkOcrQueued: 0,
     });
+  });
+
+  it('decrements the bulk task count as each OCR file completes', async () => {
+    const first = deferred<string>();
+    const second = deferred<string>();
+    mocks.listOcrCandidates.mockResolvedValue({ ...emptyCandidates, total: 2 });
+    mocks.listOcrCandidateRefs
+      .mockResolvedValueOnce([
+        { id: 1, file_name: 'one.pdf' },
+        { id: 2, file_name: 'two.pdf' },
+      ])
+      .mockResolvedValueOnce([]);
+    mocks.runRapidOcr
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+
+    const bulkRun = useOcrStore.getState().queueAllOcr();
+    await vi.waitFor(() => expect(mocks.runRapidOcr).toHaveBeenCalledTimes(2));
+    expect(useOcrStore.getState().bulkOcrQueued).toBe(2);
+
+    first.resolve('one.md');
+    await vi.waitFor(() => expect(useOcrStore.getState().bulkOcrQueued).toBe(1));
+    second.resolve('two.md');
+    await expect(bulkRun).resolves.toBe(2);
+    expect(useOcrStore.getState()).toMatchObject({ bulkOcrRunning: false, bulkOcrQueued: 0 });
   });
 
   it('stops a bulk OCR run before fetching the next 100-file batch when cancelled', async () => {
@@ -474,18 +534,21 @@ describe('OCR store', () => {
     await useOcrStore.getState().saveApiUrl('http://ocr.local');
     await useOcrStore.getState().saveOutputDir('C:\\OCR');
     await useOcrStore.getState().saveWindowsLanguage('en-US');
+    await useOcrStore.getState().saveRapidWorkerCount(99);
     await useOcrStore.getState().saveEngine('windows');
 
     expect(mocks.setSetting.mock.calls).toEqual([
       ['ocr_api_url', 'http://ocr.local'],
       ['ocr_output_dir', 'C:\\OCR'],
       ['windows_ocr_language', 'en-US'],
+      ['rapidocr_worker_count', '8'],
       ['ocr_engine', 'windows'],
     ]);
     expect(useOcrStore.getState()).toMatchObject({
       apiUrl: 'http://ocr.local',
       outputDir: 'C:\\OCR',
       windowsLanguage: 'en-US',
+      rapidWorkerCount: 8,
       engine: 'windows',
     });
   });
