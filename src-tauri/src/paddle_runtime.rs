@@ -310,6 +310,9 @@ pub fn rapid_runtime_profile() -> Result<RapidRuntimeProfile, String> {
 
 pub fn configure_python_command(command: &mut Command, paths: &RuntimePaths) {
     command
+        .args(["-X", "utf8"])
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONIOENCODING", "utf-8:backslashreplace")
         .env("PYTHONNOUSERSITE", "1")
         .env("PIP_DISABLE_PIP_VERSION_CHECK", "1")
         .env("PIP_NO_INPUT", "1")
@@ -598,6 +601,8 @@ fn install_offline_requirements(
         "--disable-pip-version-check",
         "--no-input",
         "--no-index",
+        "--progress-bar",
+        "raw",
         "--only-binary=:all:",
         "--no-warn-script-location",
         "--find-links",
@@ -766,6 +771,8 @@ fn install_dependencies(
             "--no-input",
             "--no-build-isolation",
             "--no-warn-script-location",
+            "--progress-bar",
+            "raw",
             "--prefer-binary",
             "--timeout",
             "120",
@@ -836,6 +843,8 @@ fn install_requirements(
             "--no-input",
             "--no-build-isolation",
             "--no-warn-script-location",
+            "--progress-bar",
+            "raw",
             "--prefer-binary",
             "--timeout",
             "60",
@@ -1003,14 +1012,10 @@ fn run_install_command(
     let (sender, receiver) = mpsc::channel::<(bool, String)>();
     let stdout_sender = sender.clone();
     let stdout_thread = std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            let _ = stdout_sender.send((false, line));
-        }
+        forward_install_output(stdout, false, stdout_sender);
     });
     let stderr_thread = std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            let _ = sender.send((true, line));
-        }
+        forward_install_output(stderr, true, sender);
     });
     let mut output_tail = VecDeque::with_capacity(80);
     let mut progress = 40;
@@ -1055,6 +1060,32 @@ fn run_install_command(
     Ok(())
 }
 
+fn forward_install_output<R: Read>(
+    reader: R,
+    is_error: bool,
+    sender: mpsc::Sender<(bool, String)>,
+) {
+    let mut reader = BufReader::new(reader);
+    let mut bytes = Vec::new();
+    loop {
+        bytes.clear();
+        match reader.read_until(b'\n', &mut bytes) {
+            Ok(0) => break,
+            Ok(_) => {
+                while matches!(bytes.last(), Some(b'\n' | b'\r')) {
+                    bytes.pop();
+                }
+                let line = String::from_utf8_lossy(&bytes).into_owned();
+                let _ = sender.send((is_error, line));
+            }
+            Err(error) => {
+                log::warn!("Python installer output pipe could not be read: {error}");
+                break;
+            }
+        }
+    }
+}
+
 fn record_install_line(
     app: &AppHandle,
     progress_event: &'static str,
@@ -1064,9 +1095,16 @@ fn record_install_line(
     output_tail: &mut VecDeque<String>,
     progress: &mut u8,
 ) {
-    let line = line.trim().to_string();
+    let mut line = line.trim().to_string();
     if line.is_empty() {
         return;
+    }
+    let next_progress = install_line_progress(&line);
+    if let Some((current, total)) = raw_download_progress(&line) {
+        if next_progress <= *progress && current < total {
+            return;
+        }
+        line = format_download_progress(current, total);
     }
     if is_error {
         log::warn!("{display_name} installer: {line}");
@@ -1077,7 +1115,7 @@ fn record_install_line(
         output_tail.pop_front();
     }
     output_tail.push_back(line.clone());
-    *progress = (*progress).max(install_line_progress(&line));
+    *progress = (*progress).max(next_progress);
     emit_runtime_progress(
         app,
         progress_event,
@@ -1088,6 +1126,12 @@ fn record_install_line(
 }
 
 fn install_line_progress(line: &str) -> u8 {
+    if let Some((current, total)) = raw_download_progress(line) {
+        if total == 0 {
+            return 56;
+        }
+        return 56 + ((current.saturating_mul(18) / total).min(18) as u8);
+    }
     if line.starts_with("Successfully installed") {
         85
     } else if line.starts_with("Installing collected packages") {
@@ -1101,6 +1145,28 @@ fn install_line_progress(line: &str) -> u8 {
     } else {
         40
     }
+}
+
+fn raw_download_progress(line: &str) -> Option<(u64, u64)> {
+    let values = line.strip_prefix("Progress ")?;
+    let (current, total) = values.split_once(" of ")?;
+    Some((current.parse().ok()?, total.parse().ok()?))
+}
+
+fn format_download_progress(current: u64, total: u64) -> String {
+    if total == 0 {
+        return format!(
+            "Downloading package: {:.1} MB",
+            current as f64 / 1_000_000.0
+        );
+    }
+    let percent = current.saturating_mul(100) / total;
+    format!(
+        "Downloading package: {:.1} / {:.1} MB ({}%)",
+        current as f64 / 1_000_000.0,
+        total as f64 / 1_000_000.0,
+        percent.min(100)
+    )
 }
 
 fn promote_runtime(final_dir: &Path, staging: &Path) -> Result<(), String> {
@@ -1452,12 +1518,12 @@ fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
 #[cfg(test)]
 mod tests {
     use super::{
-        file_sha256, install_line_progress, install_supported, package_index_urls,
-        profile_install_supported, promote_runtime, rapid_probe_matches_profile,
-        rapid_runtime_profile, runtime_probe_matches_profile, verify_rapid_wheelhouse,
-        RapidRuntimeProbe,
-        RapidRuntimeProfile, RuntimeProbe, RuntimeProfile, RAPIDOCR_VERSION, RAPID_ORT_VERSION,
-        RAPID_RUNTIME_VERSION, RUNTIME_VERSION,
+        configure_python_command, file_sha256, forward_install_output, install_line_progress,
+        install_supported, package_index_urls, profile_install_supported, promote_runtime,
+        rapid_probe_matches_profile, rapid_runtime_profile, raw_download_progress,
+        runtime_probe_matches_profile, verify_rapid_wheelhouse, RapidRuntimeProbe,
+        RapidRuntimeProfile, RuntimePaths, RuntimeProbe, RuntimeProfile, RAPIDOCR_VERSION,
+        RAPID_ORT_VERSION, RAPID_RUNTIME_VERSION, RUNTIME_VERSION,
     };
 
     #[test]
@@ -1636,12 +1702,72 @@ mod tests {
     fn installation_output_advances_but_never_completes_the_verification_stage() {
         assert_eq!(install_line_progress("Collecting paddleocr"), 46);
         assert_eq!(install_line_progress("  Downloading paddle.whl"), 56);
+        assert_eq!(
+            raw_download_progress("Progress 298700000 of 579400000"),
+            Some((298_700_000, 579_400_000))
+        );
+        assert_eq!(
+            install_line_progress("Progress 298700000 of 579400000"),
+            65
+        );
+        assert_eq!(install_line_progress("Progress 579400000 of 579400000"), 74);
         assert_eq!(install_line_progress("Building wheel for package"), 68);
         assert_eq!(
             install_line_progress("Installing collected packages: paddle"),
             78
         );
         assert_eq!(install_line_progress("Successfully installed paddle"), 85);
+    }
+
+    #[test]
+    fn installer_output_reader_keeps_draining_after_non_utf8_path_bytes() {
+        let output = b"Processing D:\\\xb2\xe2\xca\xd4\\rapidocr.whl\r\nSuccessfully installed rapidocr\r\n";
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        forward_install_output(&output[..], false, sender);
+        let lines = receiver.into_iter().collect::<Vec<_>>();
+
+        assert_eq!(lines.len(), 2);
+        assert!(!lines[0].0);
+        assert!(lines[0].1.starts_with("Processing D:\\"));
+        assert!(lines[0].1.ends_with("\\rapidocr.whl"));
+        assert_eq!(lines[1].1, "Successfully installed rapidocr");
+    }
+
+    #[test]
+    fn python_commands_force_utf8_for_the_process_and_its_children() {
+        let root = std::path::PathBuf::from("runtime");
+        let paths = RuntimePaths {
+            install_dir: root.join("install"),
+            python: root.join("python.exe"),
+            manifest: root.join("manifest.json"),
+            model_cache: root.join("models"),
+            pip_cache: root.join("pip-cache"),
+            root,
+        };
+        let mut command = std::process::Command::new("python");
+
+        configure_python_command(&mut command, &paths);
+
+        let args = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let env = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                Some((
+                    key.to_string_lossy().into_owned(),
+                    value?.to_string_lossy().into_owned(),
+                ))
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(args, ["-X", "utf8"]);
+        assert_eq!(env.get("PYTHONUTF8").map(String::as_str), Some("1"));
+        assert_eq!(
+            env.get("PYTHONIOENCODING").map(String::as_str),
+            Some("utf-8:backslashreplace")
+        );
     }
 
     #[test]
