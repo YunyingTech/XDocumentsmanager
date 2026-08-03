@@ -5,7 +5,14 @@ from io import BytesIO
 import fitz
 import pytest
 
-from core.pdf_loader import InvalidPdfError, ScannedPaperError, load_pdf
+from core.pdf_loader import (
+    EmptyPaperError,
+    InvalidPdfError,
+    PaperTooLargeError,
+    ScannedPaperError,
+    UnsupportedFileTypeError,
+    load_pdf,
+)
 
 
 def _pdf_bytes(*page_texts: str) -> bytes:
@@ -44,3 +51,13 @@ def test_load_pdf_rejects_non_pdf_and_missing_text_layer() -> None:
     blank.close()
     with pytest.raises(ScannedPaperError, match="OCR"):
         load_pdf(blank_bytes, filename="scan.pdf")
+
+
+def test_load_pdf_rejects_empty_wrong_extension_and_oversized_uploads() -> None:
+    with pytest.raises(EmptyPaperError, match="为空"):
+        load_pdf(b"", filename="empty.pdf")
+    with pytest.raises(UnsupportedFileTypeError, match="仅支持 PDF"):
+        load_pdf(b"%PDF-placeholder", filename="notes.txt")
+    paper = _pdf_bytes("Enough text. " * 20)
+    with pytest.raises(PaperTooLargeError, match="超过 0 MB"):
+        load_pdf(paper, filename="large.pdf", max_size_mb=0)

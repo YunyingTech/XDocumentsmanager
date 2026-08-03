@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -121,3 +122,6 @@ def test_compare_papers_builds_markdown_table_for_two_or_three_papers(tmp_path: 
     assert "Dense RAG" in table and "Graph RAG" in table
     assert "MS MARCO" in table and "HotpotQA" in table
     assert "MRR" in table and "F1" in table
+
+    with pytest.raises(ValueError, match="2 到 3"):
+        compare_papers(store, ["rag-a"])

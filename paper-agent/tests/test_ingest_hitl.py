@@ -95,3 +95,24 @@ def test_hitl_rejection_and_invalid_file_never_write(tmp_path: Path) -> None:
     )
     assert failed.status == "failed"
     assert "PDF" in failed.message
+
+
+def test_hitl_rejects_invalid_section_corrections(tmp_path: Path) -> None:
+    path = tmp_path / "paper.pdf"
+    data = _write_paper(path)
+    store = PaperVectorStore(tmp_path / "chroma", HashEmbedding())
+    workflow = PaperIngestionWorkflow(store, _settings(tmp_path), InMemorySaver())
+    paper_id = paper_id_for(data, path.name)
+    pending = workflow.start(
+        path, paper_id=paper_id, title="Invalid Edit", thread_id="ingest-edit"
+    )
+    edited = [dict(section) for section in pending.sections]
+    edited[0]["level"] = 9
+
+    failed = workflow.resume(
+        thread_id="ingest-edit", confirmed=True, sections=edited
+    )
+
+    assert failed.status == "failed"
+    assert "1 到 5" in failed.message
+    assert store.count_paper(paper_id) == 0

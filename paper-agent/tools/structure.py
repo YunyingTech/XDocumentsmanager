@@ -33,7 +33,7 @@ _CANONICAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "methods",
         re.compile(
-            r"^(?:methods?|methodology|approach|proposed\s+(?:method|approach)|model|architecture|方法|研究方法|方法论|模型|系统架构)$",
+            r"^(?:methods?|methodology|approach|proposed\s+(?:method|approach)|model|(?:model\s+)?architecture|方法|研究方法|方法论|模型|系统架构)$",
             re.I,
         ),
     ),
@@ -63,7 +63,7 @@ _CANONICAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 _NUMBERED_HEADING = re.compile(
-    r"^\s*(?P<number>(?:\d+(?:\.\d+){0,4}|[IVXLC]+))[.)]?\s+(?P<title>.+?)\s*$",
+    r"^\s*(?P<number>(?:\d+(?:\.\d+){0,4}|[IVX]{1,5}))[.)]?\s+(?P<title>.+?)\s*$",
     re.I,
 )
 _CHINESE_NUMBERED_HEADING = re.compile(
@@ -102,6 +102,8 @@ def extract_paper_structure(text: str) -> list[Section]:
                 number=number,
             )
         )
+        if canonical == "references":
+            break
     return _deduplicate_headings(sections)
 
 
@@ -152,7 +154,7 @@ def _looks_like_heading(line: str) -> bool:
         return False
     if re.search(r"\.{3,}\s*\d+\s*$", line):
         return False
-    if line.endswith(("。", "?", "!", ";")):
+    if line.endswith((".", "。", "?", "!", ";")):
         return False
     return len(line.split()) <= 16
 
@@ -161,6 +163,14 @@ def _looks_like_generic_numbered_title(number: str | None, title: str) -> bool:
     if number is None or len(title) < 2 or len(title) > 80:
         return False
     if re.search(r"[=<>]|\b(?:et\s+al|doi)\b", title, re.I):
+        return False
+    if number and number[0].isdigit():
+        try:
+            if int(number.split(".", 1)[0]) > 20:
+                return False
+        except ValueError:
+            return False
+    if re.search(r"\b(?:university|institute|laboratory|research\s+center|@)\b", title, re.I):
         return False
     words = re.findall(r"[A-Za-z][A-Za-z'-]*", title)
     if not words:

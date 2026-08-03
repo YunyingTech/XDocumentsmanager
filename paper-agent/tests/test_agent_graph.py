@@ -9,8 +9,9 @@ from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResu
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from pydantic import Field, PrivateAttr
+import pytest
 
-from agent.graph import PaperAgentService
+from agent.graph import AgentUnavailableError, PaperAgentService
 from core.config import AppSettings
 from core.store import HashEmbedding, PaperVectorStore
 from tools.chunking import chunk_with_placeholders
@@ -75,6 +76,18 @@ class StreamingChatModel(BaseChatModel):
                 usage_metadata={"input_tokens": 6, "output_tokens": 2, "total_tokens": 8},
             )
         )
+
+
+class FailingChatModel(BaseChatModel):
+    @property
+    def _llm_type(self) -> str:
+        return "failing-test-model"
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> "FailingChatModel":
+        return self
+
+    def _generate(self, messages: list[BaseMessage], **kwargs: Any) -> ChatResult:
+        raise RuntimeError("secret backend traceback detail")
 
 
 def _settings(tmp_path: Path) -> AppSettings:
@@ -241,3 +254,18 @@ def test_stream_ask_emits_model_tokens_and_done_event(tmp_path: Path) -> None:
     assert "".join(event.text for event in events if event.kind == "token") == "streamed answer"
     assert events[-1].kind == "done"
     assert service.token_usage("stream").total_tokens == 8
+
+
+def test_model_failures_are_sanitized(tmp_path: Path) -> None:
+    service = PaperAgentService(
+        _settings(tmp_path),
+        vector_store=_indexed_store(tmp_path),
+        model=FailingChatModel(),
+        checkpointer=InMemorySaver(),
+        memory_store=InMemoryStore(),
+    )
+
+    with pytest.raises(AgentUnavailableError, match="检查模型服务配置") as exc_info:
+        service.ask("question", thread_id="failure", user_id="u")
+
+    assert "secret backend" not in str(exc_info.value)
