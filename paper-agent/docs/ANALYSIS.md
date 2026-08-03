@@ -42,12 +42,13 @@ RAG、REALM、DPR 是同主题检索增强样本，可用于方法演进对比�
 
 | 指标 | 当前结果 | 说明 |
 |---|---:|---|
-| 自动化测试 | 29 passed | 不依赖外部模型/API；另用真实双栏 PDF 验证 MineU OCR |
-| 核心模块语句覆盖率 | 88% | agent/core/tools 合计 |
+| 自动化测试 | 34 passed | 不依赖外部模型/API；另用真实双栏 PDF 验证 MineU OCR |
+| 核心模块语句覆盖率 | 85% | agent/core/tools 合计 |
 | RAG 核心章节准确率 | 100% (8/8) | 测试定义见 DESIGN |
 | Transformer 核心章节准确率 | 100% (7/7) | Background 归一为 Related Work |
 | HITL 未确认写入数 | 0 | 自动化断言 Chroma count |
 | 空检索幻觉泄漏 | 0 | 服务层覆盖测试模型的幻觉文本 |
+| MineU 图片可读率 | 100% (16/16) | 2607.28702v1 的结构化图片清单 |
 
 测试覆盖不是答案正确率。真实 LLM 的语言质量仍应通过人工问题集评估，但事实范围由检索 artifact 和拒答逻辑约束。
 

@@ -19,6 +19,7 @@ def test_streamlit_app_starts_with_all_workspaces(
     assert [tab.label for tab in app.tabs] == [
         "论文入库",
         "阅读问答",
+        "图片点评",
         "质量评估",
         "批量对比",
         "参考文献",

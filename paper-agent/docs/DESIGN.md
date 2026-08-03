@@ -12,7 +12,10 @@ flowchart LR
     SEC --> HITL[interrupt: Section Review]
     HITL --> CHUNK[Chunk + Placeholders]
     CHUNK --> DB[(Chroma)]
+    HITL --> FIG[(Confirmed Figure Manifests)]
     UI --> AGENT[LangChain create_agent]
+    UI --> VISION[Figure Agent]
+    VISION --> FIG
     AGENT --> RET[Retrieval Tool]
     AGENT --> QA[Quality Sub-Agent]
     AGENT --> CMP[Compare Tool]
@@ -48,7 +51,7 @@ LLM 只负责：理解自然语言查询、选择工具、依据检索证据组�
 5. 删除 soft hyphen；仅对“行末 `-` + 下一行小写字母”做断词合并，避免破坏编号和公式。
 6. 页面之间保留 `\f`，章节和 chunk 可由字符位置反推页码。
 
-文本层仍不足 80 字符时返回扫描件提示，不把 OCR 职责隐式塞入 Agent。
+原生文本不足或章节结构明显不完整时，入库工作流调用 MineU CPU OCR；结果按 PDF SHA-256 缓存到 `runtime/mineru/`。MineU 的页码、bbox、图片路径、图注和文本位置会进入 HITL 状态。
 
 ## 4. 章节识别 B1
 
@@ -79,6 +82,8 @@ LLM 只负责：理解自然语言查询、选择工具、依据检索证据组�
 - PyMuPDF image block → `[FIGURE:pN-imgM]`。
 
 `ObjectPlaceholder` 单独保存 `kind/page/char_start/raw_text/bbox`，因此对象不是丢弃，而是文本检索与视觉内容之间的稳定引用点。
+
+MineU 图片另外写入 `runtime/figures/<paper_id>.json`，记录真实资产路径、类型、完整图注、所属章节和前后正文。清单仅接受 `runtime/mineru/` 下的 JPG/PNG/WebP，避免被篡改后读取任意本地文件；公式截图进入图片清单，但分片继续使用公式文本占位，避免重复内容。
 
 ## 6. Chroma 与检索 B3
 
@@ -111,6 +116,8 @@ create_agent(
 
 Quality Agent 是另一个独立 `create_agent` 图。确定性代码先计算 methodology/data_support/innovation/clarity 的 1-5 分；子 Agent 只能根据 `[Q#]` 证据解释分数，不能改分。综合分是四项算术平均并保留两位小数。
 
+Figure Agent 接收选定 MineU 图片、图注、章节和相邻正文。它先发送 OpenAI 兼容多模态消息；若供应商拒绝视觉输入，自动用同一文本证据重试，并把证据模式标为 `text_only`。两次失败才返回脱敏后的用户错误。
+
 ## 8. HITL 状态机
 
 ```mermaid
@@ -125,7 +132,7 @@ stateDiagram-v2
     Completed --> [*]
 ```
 
-`PaperIngestionWorkflow` 用 Checkpointer 保存全文、章节和图片 metadata。`start()` 必然在 review 节点暂停；前端编辑后调用 `resume(Command(...))`。`ingest_paper` 本身还要求 `confirmed=True`，形成图级和函数级双重保护。
+`PaperIngestionWorkflow` 用 Checkpointer 保存全文、章节和图片 metadata。`start()` 必然在 review 节点暂停；前端编辑后调用 `resume(Command(...))`。`ingest_paper` 本身还要求 `confirmed=True`；图片清单也只在 ingest 节点落盘，拒绝或未确认状态均为 0。
 
 ## 9. 多轮、会话与长期记忆
 
@@ -152,6 +159,6 @@ stateDiagram-v2
 ## 12. 已知限制
 
 - 双栏 PDF 的阅读顺序依赖 PyMuPDF `sort=True`，复杂排版可能需要版面模型。
-- 图片仅保存 bbox 和占位符，当前不做图像理解。
+- 图片像素点评依赖供应商的视觉能力；文本模型会明确降级为 MineU 图注、章节和相邻正文证据。
 - 参考文献字段解析是规则启发式，不等同于 Crossref/GROBID 的完整书目解析。
 - 默认 Store 是内存索引 + JSON 持久副本，适合单机课程项目；多进程部署应换成共享数据库 Store。

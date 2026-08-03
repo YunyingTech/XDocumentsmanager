@@ -7,8 +7,8 @@
 
 | 检查项 | 命令 | 实际结果 |
 |---|---|---|
-| Python 测试 | `.venv\Scripts\python.exe -m pytest -q` | 29 passed |
-| 核心模块覆盖率 | `.venv\Scripts\python.exe -m pytest --cov=agent --cov=core --cov=tools --cov-report=term-missing -q` | 1659 条语句，85% 覆盖率 |
+| Python 测试 | `.venv\Scripts\python.exe -m pytest -q` | 34 passed |
+| 核心模块覆盖率 | `.venv\Scripts\python.exe -m pytest --cov=agent --cov=core --cov=tools --cov-report=term-missing -q` | 1885 条语句，85% 覆盖率 |
 | Python 语法编译 | `.venv\Scripts\python.exe -m compileall agent core tools app.py` | 通过 |
 | 框架 API 兼容性 | 检查已安装版本中 `create_agent`、`@wrap_model_call`、`@dynamic_prompt`、Checkpointer、Store 与 `interrupt`/`Command` 的导入和签名 | 通过 |
 | 依赖一致性 | `.venv\\Scripts\\python.exe -m pip check` | No broken requirements found |
@@ -20,6 +20,7 @@
 - arXiv 2005.11401（RAG）：8/8 个预期核心章节识别正确，准确率 100%。
 - arXiv 1706.03762（Transformer）：7/7 个预期核心章节识别正确，准确率 100%。
 - 语料还包含 REALM（2002.08909）、DPR（2004.04906）和 BERT（1810.04805）；来源、SHA-256、页数与清洗方法记录在 `data/CLEANING.md`。
+- arXiv 2607.28702v1 经 MineU OCR 识别 8 个章节，确认后写入 41 个分片；16/16 个结构化图片资产可读取并在浏览器渲染。
 - RAG、HITL、多轮隔离、质量子 Agent、批量对比、参考文献检查和 Streamlit 启动均有自动化用例；完整输入、预期和实际结果见 `tests/TEST_RESULTS.md`。
 
 ## 交付约束核对

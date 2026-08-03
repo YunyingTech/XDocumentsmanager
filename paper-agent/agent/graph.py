@@ -17,6 +17,7 @@ from langgraph.store.base import BaseStore
 from langgraph.store.memory import InMemoryStore
 
 from agent.prompts import PAPER_AGENT_SYSTEM_PROMPT
+from agent.subagents.figure_agent import FigureAgent
 from agent.subagents.quality_agent import QualityAgent
 from agent.middleware import (
     TokenUsage,
@@ -25,6 +26,7 @@ from agent.middleware import (
     create_token_stats_middleware,
 )
 from core.config import AppSettings, create_chat_model, create_embedding, load_settings
+from core.figure_store import FigureStore
 from core.store import LongTermMemory, PaperVectorStore, memory_user_id
 from tools.compare import compare_papers
 from tools.references import extract_references, report_as_markdown
@@ -174,6 +176,10 @@ class PaperAgentService:
         self.checkpointer = checkpointer
         self.memory_store = memory_store or InMemoryStore()
         self.long_term_memory = LongTermMemory(self.memory_store, self.settings.memory_file)
+        self.figure_store = FigureStore(
+            self.settings.root_dir / "runtime" / "figures",
+            asset_root=self.settings.root_dir / "runtime" / "mineru",
+        )
         self.token_tracker = TokenUsageTracker()
         if middleware is None:
             middleware = (
@@ -181,6 +187,7 @@ class PaperAgentService:
                 create_token_stats_middleware(self.token_tracker),
             )
         self.quality_agent = QualityAgent(self.model)
+        self.figure_agent = FigureAgent(self.model)
         self.tools = build_agent_tools(self.vector_store, self.settings, self.quality_agent)
         self.graph = create_agent(
             self.model,

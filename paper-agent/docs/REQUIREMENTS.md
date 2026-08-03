@@ -11,6 +11,7 @@
 | A1 | 独立质量子 Agent，固定分数 + LLM 理由 | `agent/subagents/quality_agent.py` | `test_advanced_tools.py` |
 | A2 | 2-3 篇论文方法/数据/指标 Markdown 对比 | `tools/compare.py` | `test_advanced_tools.py` |
 | A3 | 参考文献切分、字段解析、格式问题 | `tools/references.py` | `test_advanced_tools.py` |
+| A4 | MineU 原图展示与证据受限图片点评 | `core/figure_store.py`、`agent/subagents/figure_agent.py`、`app.py` | `test_mineru_loader.py`、`test_figure_store.py`、`test_figure_agent.py` |
 
 ## 优秀档技术需求
 
@@ -37,4 +38,4 @@
 
 ## 验收用例摘要
 
-完整表见 `tests/TEST_RESULTS.md`。自动化结果为 29 passed、核心模块语句覆盖率 85%。外部 LLM 的答案质量取决于所选模型，不纳入离线 pytest；API 合约、工具调用、流式事件和错误降级使用可注入伪模型验证。
+完整表见 `tests/TEST_RESULTS.md`。自动化结果为 34 passed、核心模块语句覆盖率 85%。外部 LLM 的答案质量取决于所选模型，不纳入离线 pytest；API 合约、工具调用、流式事件和错误降级使用可注入伪模型验证。

@@ -46,6 +46,10 @@ class ImageRegion:
     image_id: str
     page: int
     bbox: tuple[float, float, float, float]
+    asset_path: str | None = None
+    caption: str = ""
+    kind: str = "figure"
+    char_start: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

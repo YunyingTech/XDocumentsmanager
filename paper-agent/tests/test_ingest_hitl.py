@@ -6,7 +6,8 @@ import fitz
 from langgraph.checkpoint.memory import InMemorySaver
 
 from core.config import AppSettings
-from core.pdf_loader import PageContent, PaperDocument
+from core.figure_store import FigureStore
+from core.pdf_loader import ImageRegion, PageContent, PaperDocument
 from core.store import HashEmbedding, PaperVectorStore
 from tools.ingest import PaperIngestionWorkflow, paper_id_for
 
@@ -140,10 +141,28 @@ def test_ingestion_uses_mineru_when_native_structure_is_empty(
         "Model—Deterministic method details.\n\n"
         "References\n[1] Example reference."
     )
+    asset = tmp_path / "runtime" / "mineru" / "cached" / "ocr" / "images" / "method.jpg"
+    asset.parent.mkdir(parents=True)
+    asset.write_bytes(b"image")
     mineru_document = PaperDocument(
         filename=path.name,
         text=mineru_text,
-        pages=(PageContent(page=1, text=mineru_text),),
+        pages=(
+            PageContent(
+                page=1,
+                text=mineru_text,
+                images=(
+                    ImageRegion(
+                        "mineru-p1-image-1",
+                        1,
+                        (1.0, 2.0, 3.0, 4.0),
+                        asset_path=str(asset),
+                        caption="Figure 1. Model flow.",
+                        char_start=mineru_text.index("Model"),
+                    ),
+                ),
+            ),
+        ),
         page_offsets=(0,),
         extractor="mineru-pipeline-ocr",
     )
@@ -153,14 +172,16 @@ def test_ingestion_uses_mineru_when_native_structure_is_empty(
 
     store = PaperVectorStore(tmp_path / "chroma", HashEmbedding())
     workflow = PaperIngestionWorkflow(store, _settings(tmp_path), InMemorySaver())
+    paper_id = paper_id_for(data, path.name)
     pending = workflow.start(
         path,
-        paper_id=paper_id_for(data, path.name),
+        paper_id=paper_id,
         title="Compact Paper",
         thread_id="ingest-mineru",
     )
 
     assert pending.status == "awaiting_confirmation"
+    assert not (tmp_path / "runtime" / "figures" / f"{paper_id}.json").exists()
     assert "MineU OCR" in pending.message
     assert {section["canonical"] for section in pending.sections} >= {
         "abstract",
@@ -168,3 +189,16 @@ def test_ingestion_uses_mineru_when_native_structure_is_empty(
         "methods",
         "references",
     }
+
+    completed = workflow.resume(
+        thread_id="ingest-mineru", confirmed=True, sections=pending.sections
+    )
+    figures = FigureStore(
+        tmp_path / "runtime" / "figures",
+        asset_root=tmp_path / "runtime" / "mineru",
+    ).list_for_paper(paper_id)
+
+    assert completed.status == "completed"
+    assert completed.figure_count == 1
+    assert len(figures) == 1
+    assert figures[0].caption == "Figure 1. Model flow."

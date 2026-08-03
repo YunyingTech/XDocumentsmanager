@@ -90,7 +90,18 @@ def chunk_with_placeholders(
             section_text,
             base_offset=start,
             first_page=section.page,
-            image_regions=(image for image in images if section.page <= image.page <= _page_at(text, end)),
+            image_regions=(
+                image
+                for image in images
+                if (
+                    image.char_start is not None
+                    and start <= image.char_start < end
+                )
+                or (
+                    image.char_start is None
+                    and section.page <= image.page <= _page_at(text, end)
+                )
+            ),
         )
         paragraphs = _paragraphs(transformed, section.page)
         for paragraph_group in _window_paragraphs(paragraphs, chunk_size, overlap):
@@ -213,17 +224,19 @@ def _replace_objects(
         if placeholder_id in existing_ids:
             continue
         existing_ids.add(placeholder_id)
+        object_kind = "table" if image.kind == "table" else "figure"
         objects.append(
             ObjectPlaceholder(
                 placeholder_id=placeholder_id,
-                kind="figure",
+                kind=object_kind,
                 page=image.page,
-                char_start=base_offset,
-                raw_text="PDF image block",
+                char_start=image.char_start if image.char_start is not None else base_offset,
+                raw_text=image.caption or "PDF image block",
                 bbox=image.bbox,
             )
         )
-        image_lines.append(f"[FIGURE:{placeholder_id}]")
+        marker = "TABLE" if object_kind == "table" else "FIGURE"
+        image_lines.append(f"[{marker}:{placeholder_id}]")
     if image_lines:
         transformed = transformed.rstrip() + "\n\n" + "\n".join(image_lines)
     return transformed, tuple(objects)

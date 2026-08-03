@@ -6,13 +6,14 @@ import hashlib
 import importlib.util
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 import re
 import subprocess
 import sys
 from typing import Any
 
-from core.pdf_loader import PageContent, PaperDocument, PaperLoadError
+from core.pdf_loader import ImageRegion, PageContent, PaperDocument, PaperLoadError
 
 
 class MinerUExtractionError(PaperLoadError):
@@ -75,8 +76,10 @@ def document_from_mineru_content(
 
     abstract_regions = _abstract_regions(path)
     pages: dict[int, list[str]] = {}
+    page_images: dict[int, list[ImageRegion]] = {}
     references_started = False
     visual_sequence = 0
+    equation_sequence = 0
     ordered_items = sorted(
         enumerate(payload),
         key=lambda entry: (
@@ -87,7 +90,8 @@ def document_from_mineru_content(
             entry[0],
         ),
     )
-    for _, item in ordered_items:
+    ordered_payload = [item for _, item in ordered_items]
+    for ordered_index, item in enumerate(ordered_payload):
         if not isinstance(item, dict):
             continue
         page_index = max(0, _as_int(item.get("page_idx"), 0))
@@ -99,6 +103,7 @@ def document_from_mineru_content(
         if _matches_region(item, page_index, abstract_regions):
             page_parts.append("Abstract")
 
+        caption = ""
         if item_type == "list" and item.get("sub_type") == "ref_text":
             if not references_started:
                 page_parts.append("References")
@@ -110,19 +115,40 @@ def document_from_mineru_content(
             )
         elif item_type in {"image", "chart"}:
             visual_sequence += 1
-            caption = _caption_text(item, "image_caption", "chart_caption")
+            caption = _resolved_visual_caption(ordered_payload, ordered_index)
             text = f"Figure mineru-{visual_sequence}: {caption}".rstrip()
         elif item_type == "table":
             visual_sequence += 1
-            caption = _caption_text(item, "table_caption")
+            caption = _resolved_visual_caption(ordered_payload, ordered_index)
             table_body = _plain_html(str(item.get("table_body", "")))
             text = f"Table mineru-{visual_sequence}: {caption or table_body}".rstrip()
         elif item_type == "equation":
             equation = str(item.get("text", "")).strip()
+            caption = equation
             text = f"$$\n{equation}\n$$" if equation else ""
+            if item.get("img_path"):
+                equation_sequence += 1
         else:
             text = str(item.get("text", "")).strip()
 
+        if item_type in {"image", "chart", "table", "equation"}:
+            asset_path = _resolve_asset_path(path.parent, item.get("img_path"))
+            if asset_path is not None:
+                asset_kind = "formula" if item_type == "equation" else item_type
+                asset_sequence = (
+                    equation_sequence if item_type == "equation" else visual_sequence
+                )
+                page_images.setdefault(page_index, []).append(
+                    ImageRegion(
+                        image_id=f"mineru-p{page_index + 1}-{asset_kind}-{asset_sequence}",
+                        page=page_index + 1,
+                        bbox=_bbox_tuple(item.get("bbox")),
+                        asset_path=str(asset_path),
+                        caption=caption,
+                        kind=asset_kind,
+                        char_start=_page_char_length(page_parts),
+                    )
+                )
         if text:
             page_parts.append(text)
 
@@ -138,7 +164,17 @@ def document_from_mineru_content(
         filename=filename,
         text=full_text,
         pages=tuple(
-            PageContent(page=index + 1, text=text)
+            PageContent(
+                page=index + 1,
+                text=text,
+                images=tuple(
+                    replace(
+                        image,
+                        char_start=offsets[index] + (image.char_start or 0),
+                    )
+                    for image in page_images.get(index, [])
+                ),
+            )
             for index, text in enumerate(page_texts)
         ),
         page_offsets=offsets,
@@ -264,6 +300,62 @@ def _caption_text(item: dict[str, Any], *keys: str) -> str:
         elif str(raw).strip():
             values.append(str(raw).strip())
     return " ".join(values)
+
+
+def _resolved_visual_caption(items: list[Any], index: int) -> str:
+    item = items[index]
+    if not isinstance(item, dict):
+        return ""
+    own = _caption_text(item, "image_caption", "chart_caption", "table_caption")
+    if _is_full_caption(own):
+        return own
+    page_index = _as_int(item.get("page_idx"), 0)
+    group_caption = ""
+    for following in items[index + 1 : index + 8]:
+        if not isinstance(following, dict):
+            continue
+        if _as_int(following.get("page_idx"), 0) != page_index:
+            break
+        if str(following.get("type", "")).casefold() not in {
+            "image",
+            "chart",
+            "table",
+        }:
+            break
+        candidate = _caption_text(
+            following, "image_caption", "chart_caption", "table_caption"
+        )
+        if _is_full_caption(candidate):
+            group_caption = candidate
+            break
+    if own and group_caption:
+        return f"{own} · {group_caption}"
+    return group_caption or own
+
+
+def _is_full_caption(value: str) -> bool:
+    return bool(re.search(r"\b(?:fig(?:ure)?|table)\.?\s*\d+", value, re.IGNORECASE))
+
+
+def _resolve_asset_path(root: Path, raw_path: Any) -> Path | None:
+    value = str(raw_path or "").strip()
+    if not value:
+        return None
+    candidate = (root / value).resolve()
+    return candidate if candidate.is_file() else None
+
+
+def _bbox_tuple(value: Any) -> tuple[float, float, float, float]:
+    if isinstance(value, list) and len(value) == 4:
+        try:
+            return tuple(float(item) for item in value)  # type: ignore[return-value]
+        except (TypeError, ValueError):
+            pass
+    return (0.0, 0.0, 0.0, 0.0)
+
+
+def _page_char_length(parts: list[str]) -> int:
+    return sum(len(part) for part in parts) + max(0, len(parts) - 1) * 2
 
 
 def _is_reference_item(item: Any) -> bool:

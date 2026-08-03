@@ -7,6 +7,7 @@
 - 中英文标准章节、编号标题和层级树识别，不使用 LLM 猜章节。
 - PyMuPDF 主抽取、pdfplumber 兜底；原生章节为空或紧凑行内章节明显不完整时自动使用 MineU 3.4.4 CPU OCR，并按文件哈希缓存版面结果。
 - 章节感知滑窗分片，图、表、公式转为可追溯占位符，原始 caption/bbox 单独存储。
+- MineU 导出图片持久清单；确认入库后可浏览原图，并结合像素、图注、章节和相邻正文点评。模型不支持视觉输入时自动降级为文本证据模式。
 - Chroma 持久向量库，可选本地 sentence-transformers 或 OpenAI 兼容 embedding API。
 - `create_agent` 主 Agent、多工具 RAG、SQLite Checkpointer、多会话隔离和流式 token 输出。
 - LangGraph `interrupt()` 章节确认：未经人工确认不能写入 Chroma。
@@ -78,7 +79,7 @@ EMBED_API_KEY=your-key
 4. 点击“确认并入库”。此按钮触发 `Command(resume=...)`；确认前向量库条目数保持为 0。
 5. 进入“阅读问答”，选择当前论文，提问其方法、实验或结论。
 6. 回答会逐 token 出现；回答下方展开来源，核对论文、章节、页码和段落号。
-7. 使用“质量评估”“批量对比”“参考文献”完成进阶分析。
+7. 使用“图片点评”查看 MineU 原图及证据边界，再用“质量评估”“批量对比”“参考文献”完成进阶分析。
 
 检索没有达到阈值时，固定返回：
 
@@ -91,7 +92,7 @@ EMBED_API_KEY=your-key
 .\.venv\Scripts\python.exe -m pytest --cov=agent --cov=core --cov=tools --cov-report=term-missing -q
 ```
 
-当前实测：29 项测试通过，核心模块语句覆盖率 85%。两篇真实公开论文的标准章节类别识别率均为 100%。详细输入、预期和实际结果见 [tests/TEST_RESULTS.md](tests/TEST_RESULTS.md)。
+当前实测：34 项测试通过，核心模块语句覆盖率 85%。两篇真实公开论文的标准章节类别识别率均为 100%。详细输入、预期和实际结果见 [tests/TEST_RESULTS.md](tests/TEST_RESULTS.md)。
 
 ## 真实测试论文
 
@@ -106,9 +107,13 @@ paper-agent/
 │   ├── graph.py
 │   ├── middleware.py
 │   ├── prompts.py
-│   └── subagents/quality_agent.py
+│   └── subagents/
+│       ├── figure_agent.py
+│       └── quality_agent.py
 ├── core/
 │   ├── config.py
+│   ├── figure_store.py
+│   ├── mineru_loader.py
 │   ├── pdf_loader.py
 │   └── store.py
 ├── tools/
@@ -137,6 +142,7 @@ paper-agent/
 - TODO(提交者补充)：上传与章节 HITL 确认截图。
 - TODO(提交者补充)：流式问答与来源片段截图。
 - TODO(提交者补充)：质量评估和批量对比截图。
+- TODO(提交者补充)：MineU 图片浏览与图片点评截图。
 
 ## 组员分工
 

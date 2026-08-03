@@ -10,6 +10,7 @@ from uuid import uuid4
 import streamlit as st
 
 from agent.graph import AgentUnavailableError, PaperAgentService
+from agent.subagents.figure_agent import FigureCritiqueError
 from core.config import AppSettings, load_settings
 from core.pdf_loader import PaperLoadError, load_pdf
 from tools.compare import compare_papers
@@ -28,7 +29,12 @@ class AppRuntime:
 def get_runtime() -> AppRuntime:
     settings = load_settings()
     agent = PaperAgentService(settings)
-    ingestion = PaperIngestionWorkflow(agent.vector_store, settings, agent.checkpointer)
+    ingestion = PaperIngestionWorkflow(
+        agent.vector_store,
+        settings,
+        agent.checkpointer,
+        figure_store=agent.figure_store,
+    )
     return AppRuntime(settings, agent, ingestion)
 
 
@@ -45,13 +51,15 @@ def main() -> None:
     session = st.session_state.sessions[session_id]
 
     st.title("论文阅读辅助 Agent")
-    upload_tab, chat_tab, quality_tab, compare_tab, references_tab = st.tabs(
-        ["论文入库", "阅读问答", "质量评估", "批量对比", "参考文献"]
+    upload_tab, chat_tab, figure_tab, quality_tab, compare_tab, references_tab = st.tabs(
+        ["论文入库", "阅读问答", "图片点评", "质量评估", "批量对比", "参考文献"]
     )
     with upload_tab:
         _render_upload(runtime, session_id, user_id)
     with chat_tab:
         _render_chat(runtime, session_id, user_id, session)
+    with figure_tab:
+        _render_figures(runtime, session_id)
     with quality_tab:
         _render_quality(runtime, session_id)
     with compare_tab:
@@ -73,6 +81,7 @@ def _initialize_state() -> None:
         st.session_state.current_session_id = session_id
     st.session_state.setdefault("user_id", "local-user")
     st.session_state.setdefault("pending_ingestion", None)
+    st.session_state.setdefault("figure_critiques", {})
 
 
 def _render_sidebar(runtime: AppRuntime) -> tuple[str, str]:
@@ -288,6 +297,89 @@ def _render_quality(runtime: AppRuntime, session_id: str) -> None:
             st.error(str(exc))
         except Exception:
             st.error("质量评估失败，请检查模型服务。")
+
+
+def _render_figures(runtime: AppRuntime, session_id: str) -> None:
+    indexed_papers = runtime.agent.vector_store.list_papers()
+    figures_by_paper = {
+        paper["paper_id"]: runtime.agent.figure_store.list_for_paper(paper["paper_id"])
+        for paper in indexed_papers
+    }
+    papers = [paper for paper in indexed_papers if figures_by_paper[paper["paper_id"]]]
+    if not papers:
+        st.info("暂无可点评的 MineU 图片。请先用 MineU 提取论文并确认入库。")
+        return
+
+    title_by_id = {paper["paper_id"]: paper["title"] for paper in papers}
+    paper_id = st.selectbox(
+        "选择论文",
+        list(title_by_id),
+        format_func=title_by_id.get,
+        key="figure-paper",
+    )
+    figures = figures_by_paper[paper_id]
+    figure_by_id = {figure.figure_id: figure for figure in figures}
+
+    def figure_label(identifier: str) -> str:
+        figure = figure_by_id[identifier]
+        summary = figure.caption.strip() or f"{figure.kind}（无图注）"
+        return f"p.{figure.page} · {summary[:72]}"
+
+    figure_id = st.selectbox(
+        "选择图片",
+        list(figure_by_id),
+        format_func=figure_label,
+        key="figure-item",
+    )
+    figure = figure_by_id[figure_id]
+    image_col, evidence_col = st.columns([1.25, 1])
+    with image_col:
+        st.image(
+            figure.asset_path,
+            caption=f"{figure.kind} · p.{figure.page} · {figure.section}",
+            width="stretch",
+        )
+    with evidence_col:
+        st.markdown(f"**章节**：{figure.section}")
+        st.markdown(f"**页码**：{figure.page}")
+        st.markdown(f"**类型**：{figure.kind}")
+        st.markdown("**MineU 图注**")
+        caption = figure.caption or "未提取到图注。"
+        st.write(caption[:420] + ("…" if len(caption) > 420 else ""))
+        if len(caption) > 420:
+            with st.expander("完整图注"):
+                st.write(caption)
+        with st.expander("相邻正文证据"):
+            st.write(figure.context or "未提取到相邻正文。")
+
+    focus = st.text_input(
+        "点评关注点（可选）",
+        placeholder="例如：图表是否足以支持正文结论",
+        key=f"figure-focus-{paper_id}-{figure_id}",
+    )
+    critique_key = f"{session_id}:{paper_id}:{figure_id}"
+    if st.button("生成图片点评", type="primary", key="critique-figure"):
+        try:
+            with st.spinner("正在结合图片、图注和相邻正文进行点评…"):
+                critique = runtime.agent.figure_agent.critique(figure, focus=focus)
+            st.session_state.figure_critiques[critique_key] = {
+                "text": critique.text,
+                "evidence_mode": critique.evidence_mode,
+            }
+        except FigureCritiqueError as exc:
+            st.error(str(exc))
+        except Exception:
+            st.error("图片点评失败，请稍后重试。")
+
+    saved = st.session_state.figure_critiques.get(critique_key)
+    if saved:
+        mode = saved["evidence_mode"]
+        st.caption(
+            "证据模式：图片像素 + MineU 文本证据"
+            if mode == "pixels_and_text"
+            else "证据模式：仅 MineU 图注、章节和相邻正文（模型未读取图片像素）"
+        )
+        st.markdown(saved["text"])
 
 
 def _render_compare(runtime: AppRuntime) -> None:

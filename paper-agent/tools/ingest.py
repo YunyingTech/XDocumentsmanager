@@ -15,6 +15,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from core.config import AppSettings
+from core.figure_store import FigureStore
 from core.mineru_loader import MinerUExtractionError, load_pdf_with_mineru
 from core.pdf_loader import ImageRegion, PaperLoadError, ScannedPaperError, load_pdf
 from core.store import PaperVectorStore
@@ -53,6 +54,7 @@ class IngestionState(TypedDict):
     status: NotRequired[str]
     message: NotRequired[str]
     chunk_count: NotRequired[int]
+    figure_count: NotRequired[int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +66,7 @@ class IngestionResult:
     sections: tuple[dict[str, Any], ...] = ()
     structure_tree: tuple[dict[str, Any], ...] = ()
     chunk_count: int = 0
+    figure_count: int = 0
     requires_confirmation: bool = False
 
 
@@ -75,9 +78,14 @@ class PaperIngestionWorkflow:
         store: PaperVectorStore,
         settings: AppSettings,
         checkpointer: BaseCheckpointSaver[Any],
+        figure_store: FigureStore | None = None,
     ) -> None:
         self.store = store
         self.settings = settings
+        self.figure_store = figure_store or FigureStore(
+            settings.root_dir / "runtime" / "figures",
+            asset_root=settings.root_dir / "runtime" / "mineru",
+        )
         builder = StateGraph(IngestionState)
         builder.add_node("extract", self._extract)
         builder.add_node("review", self._review)
@@ -198,6 +206,10 @@ class PaperIngestionWorkflow:
                 "image_id": image.image_id,
                 "page": image.page,
                 "bbox": list(image.bbox),
+                "asset_path": image.asset_path,
+                "caption": image.caption,
+                "kind": image.kind,
+                "char_start": image.char_start,
             }
             for page in document.pages
             for image in page.images
@@ -252,13 +264,23 @@ class PaperIngestionWorkflow:
                 image_id=str(record["image_id"]),
                 page=int(record["page"]),
                 bbox=tuple(float(value) for value in record["bbox"]),  # type: ignore[arg-type]
+                asset_path=(
+                    str(record["asset_path"]) if record.get("asset_path") else None
+                ),
+                caption=str(record.get("caption", "")),
+                kind=str(record.get("kind", "figure")),
+                char_start=(
+                    int(record["char_start"])
+                    if record.get("char_start") is not None
+                    else None
+                ),
             )
             for record in state.get("image_regions", [])
         ]
         chunks = chunk_with_placeholders(
             sections,
             state.get("text", ""),
-            image_regions=images,
+            image_regions=(image for image in images if image.kind != "formula"),
             chunk_size=self.settings.chunk_size,
             overlap=self.settings.chunk_overlap,
         )
@@ -269,10 +291,18 @@ class PaperIngestionWorkflow:
             chunks,
             confirmed=True,
         )
+        figure_count = self.figure_store.save_paper(
+            state["paper_id"],
+            state["title"],
+            images,
+            sections,
+            state.get("text", ""),
+        )
         return {
             "status": "completed",
-            "message": f"已确认并写入 {count} 个分片。",
+            "message": f"已确认并写入 {count} 个分片、{figure_count} 张 MineU 图片。",
             "chunk_count": count,
+            "figure_count": figure_count,
         }
 
     @staticmethod
@@ -299,6 +329,7 @@ class PaperIngestionWorkflow:
             sections=records,
             structure_tree=tuple(_tree_from_records(records)),
             chunk_count=int(result.get("chunk_count", 0)),
+            figure_count=int(result.get("figure_count", 0)),
         )
 
 
