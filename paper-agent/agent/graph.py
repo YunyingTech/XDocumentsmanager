@@ -18,8 +18,14 @@ from langgraph.store.memory import InMemoryStore
 
 from agent.prompts import PAPER_AGENT_SYSTEM_PROMPT
 from agent.subagents.quality_agent import QualityAgent
+from agent.middleware import (
+    TokenUsage,
+    TokenUsageTracker,
+    create_skill_prompt_middleware,
+    create_token_stats_middleware,
+)
 from core.config import AppSettings, create_chat_model, create_embedding, load_settings
-from core.store import PaperVectorStore
+from core.store import LongTermMemory, PaperVectorStore, memory_user_id
 from tools.compare import compare_papers
 from tools.references import extract_references, report_as_markdown
 from tools.retrieval import (
@@ -84,6 +90,14 @@ def build_agent_tools(
             return "当前没有已入库论文。"
         return "\n".join(f"- {paper['paper_id']}: {paper['title']}" for paper in papers)
 
+    @tool("get_reading_history")
+    def reading_history_tool(runtime: ToolRuntime[AgentContext]) -> dict[str, Any]:
+        """Return this user's long-term paper history and reading preferences."""
+        if runtime.store is None:
+            return {"read_papers": {}, "preferences": {}, "history": []}
+        item = runtime.store.get(("users", memory_user_id(runtime.context.user_id)), "profile")
+        return item.value if item else {"read_papers": {}, "preferences": {}, "history": []}
+
     @tool("assess_quality")
     def assess_quality_tool(
         paper_id: str,
@@ -120,6 +134,7 @@ def build_agent_tools(
     return [
         retrieve_tool,
         list_papers_tool,
+        reading_history_tool,
         assess_quality_tool,
         compare_papers_tool,
         check_references_tool,
@@ -135,7 +150,7 @@ class PaperAgentService:
         model: BaseChatModel | None = None,
         checkpointer: BaseCheckpointSaver[Any] | None = None,
         memory_store: BaseStore | None = None,
-        middleware: tuple[Any, ...] = (),
+        middleware: tuple[Any, ...] | None = None,
     ) -> None:
         self.settings = settings or load_settings()
         self.vector_store = vector_store or PaperVectorStore(
@@ -151,6 +166,13 @@ class PaperAgentService:
             checkpointer = SqliteSaver(self._checkpoint_connection)
         self.checkpointer = checkpointer
         self.memory_store = memory_store or InMemoryStore()
+        self.long_term_memory = LongTermMemory(self.memory_store, self.settings.memory_file)
+        self.token_tracker = TokenUsageTracker()
+        if middleware is None:
+            middleware = (
+                create_skill_prompt_middleware(self.settings.root_dir / "skills"),
+                create_token_stats_middleware(self.token_tracker),
+            )
         self.quality_agent = QualityAgent(self.model)
         self.tools = build_agent_tools(self.vector_store, self.settings, self.quality_agent)
         self.graph = create_agent(
@@ -191,7 +213,23 @@ class PaperAgentService:
             answer = UNKNOWN_ANSWER
         if not answer:
             answer = UNKNOWN_ANSWER if retrieval_was_empty else "模型未返回可显示的回答。"
+        self.long_term_memory.record_question(
+            user_id,
+            session_id=thread_id,
+            question=question.strip(),
+            paper_id=active_paper_id,
+        )
+        if active_paper_id:
+            paper = next(
+                (item for item in self.vector_store.list_papers() if item["paper_id"] == active_paper_id),
+                None,
+            )
+            if paper:
+                self.long_term_memory.remember_paper(user_id, active_paper_id, paper["title"])
         return AgentAnswer(answer, sources, len(messages))
+
+    def token_usage(self, session_id: str) -> TokenUsage:
+        return self.token_tracker.snapshot(session_id)
 
     def close(self) -> None:
         if self._checkpoint_connection is not None:

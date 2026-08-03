@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
@@ -141,7 +141,11 @@ def test_checkpointer_keeps_turns_isolated_by_thread(tmp_path: Path) -> None:
     service.ask("New conversation.", thread_id="other", user_id="u", active_paper_id="rag")
 
     second_call_text = " ".join(str(message.content) for message in model.calls[1])
-    third_call_text = " ".join(str(message.content) for message in model.calls[2])
+    third_call_text = " ".join(
+        str(message.content)
+        for message in model.calls[2]
+        if not isinstance(message, SystemMessage)
+    )
     assert "Describe this paper." in second_call_text
     assert "First answer." in second_call_text
     assert "Describe this paper." not in third_call_text

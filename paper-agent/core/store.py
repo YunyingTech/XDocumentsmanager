@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from copy import deepcopy
+from datetime import UTC, datetime
 import hashlib
 import json
 import math
 from pathlib import Path
 import re
+from threading import RLock
 from typing import Any, Protocol
 
 import chromadb
 from chromadb.config import Settings
+from langgraph.store.base import BaseStore
 
 from tools.chunking import Chunk
 
@@ -207,3 +211,109 @@ def _tokens(text: str) -> list[str]:
     cjk = re.findall(r"[\u3400-\u9fff]", normalized)
     cjk_bigrams = ["".join(cjk[index : index + 2]) for index in range(len(cjk) - 1)]
     return word_tokens + cjk + cjk_bigrams
+
+
+class LongTermMemory:
+    """Durable user profiles mirrored into a LangGraph Store."""
+
+    def __init__(self, store: BaseStore, persistence_file: str | Path) -> None:
+        self.store = store
+        self.persistence_file = Path(persistence_file)
+        self._lock = RLock()
+        self._profiles = self._load()
+        for user_id, profile in self._profiles.items():
+            self.store.put(("users", user_id), "profile", deepcopy(profile))
+
+    def profile(self, user_id: str) -> dict[str, Any]:
+        normalized = memory_user_id(user_id)
+        with self._lock:
+            return deepcopy(self._profiles.get(normalized, _empty_profile()))
+
+    def remember_paper(self, user_id: str, paper_id: str, title: str) -> None:
+        normalized = memory_user_id(user_id)
+        now = datetime.now(UTC).isoformat()
+        with self._lock:
+            profile = self._profiles.setdefault(normalized, _empty_profile())
+            papers = profile["read_papers"]
+            previous = papers.get(paper_id, {})
+            papers[paper_id] = {
+                "paper_id": paper_id,
+                "title": title,
+                "first_read_at": previous.get("first_read_at", now),
+                "last_read_at": now,
+                "read_count": int(previous.get("read_count", 0)) + 1,
+            }
+            self._sync(normalized, profile)
+
+    def record_question(
+        self,
+        user_id: str,
+        *,
+        session_id: str,
+        question: str,
+        paper_id: str | None,
+    ) -> None:
+        normalized = memory_user_id(user_id)
+        with self._lock:
+            profile = self._profiles.setdefault(normalized, _empty_profile())
+            profile["history"].append(
+                {
+                    "session_id": session_id,
+                    "paper_id": paper_id,
+                    "question": question[:500],
+                    "created_at": datetime.now(UTC).isoformat(),
+                }
+            )
+            profile["history"] = profile["history"][-100:]
+            self._sync(normalized, profile)
+
+    def set_preference(self, user_id: str, key: str, value: str) -> None:
+        normalized = memory_user_id(user_id)
+        clean_key = key.strip()[:80]
+        if not clean_key:
+            raise ValueError("偏好名称不能为空。")
+        with self._lock:
+            profile = self._profiles.setdefault(normalized, _empty_profile())
+            profile["preferences"][clean_key] = value.strip()[:500]
+            self._sync(normalized, profile)
+
+    def _sync(self, user_id: str, profile: dict[str, Any]) -> None:
+        self.store.put(("users", user_id), "profile", deepcopy(profile))
+        self.persistence_file.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"version": 1, "users": self._profiles}
+        temporary = self.persistence_file.with_suffix(self.persistence_file.suffix + ".tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(self.persistence_file)
+
+    def _load(self) -> dict[str, dict[str, Any]]:
+        if not self.persistence_file.exists():
+            return {}
+        try:
+            payload = json.loads(self.persistence_file.read_text(encoding="utf-8"))
+            users = payload.get("users", {})
+            if isinstance(users, dict):
+                return {
+                    memory_user_id(str(user_id)): _normalize_profile(profile)
+                    for user_id, profile in users.items()
+                    if isinstance(profile, dict)
+                }
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return {}
+
+
+def _empty_profile() -> dict[str, Any]:
+    return {"read_papers": {}, "preferences": {}, "history": []}
+
+
+def _normalize_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "read_papers": dict(profile.get("read_papers", {})),
+        "preferences": dict(profile.get("preferences", {})),
+        "history": list(profile.get("history", []))[-100:],
+    }
+
+
+def memory_user_id(value: str) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9._-]+", "-", value.strip()).strip("-.").lower()
+    return normalized or "anonymous"
