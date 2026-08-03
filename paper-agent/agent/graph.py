@@ -17,8 +17,11 @@ from langgraph.store.base import BaseStore
 from langgraph.store.memory import InMemoryStore
 
 from agent.prompts import PAPER_AGENT_SYSTEM_PROMPT
+from agent.subagents.quality_agent import QualityAgent
 from core.config import AppSettings, create_chat_model, create_embedding, load_settings
 from core.store import PaperVectorStore
+from tools.compare import compare_papers
+from tools.references import extract_references, report_as_markdown
 from tools.retrieval import (
     UNKNOWN_ANSWER,
     Passage,
@@ -48,6 +51,7 @@ class AgentAnswer:
 def build_agent_tools(
     vector_store: PaperVectorStore,
     settings: AppSettings,
+    quality_agent: QualityAgent,
 ) -> list[Any]:
     @tool("retrieve_paper_passages", response_format="content_and_artifact")
     def retrieve_tool(
@@ -80,7 +84,46 @@ def build_agent_tools(
             return "当前没有已入库论文。"
         return "\n".join(f"- {paper['paper_id']}: {paper['title']}" for paper in papers)
 
-    return [retrieve_tool, list_papers_tool]
+    @tool("assess_quality")
+    def assess_quality_tool(
+        paper_id: str,
+        runtime: ToolRuntime[AgentContext],
+    ) -> dict[str, Any]:
+        """Run the independent quality sub-agent for one indexed paper."""
+        selected_paper = paper_id.strip() or runtime.context.active_paper_id
+        if not selected_paper:
+            return {"error": "请先选择要评估的论文。"}
+        return quality_agent.assess(
+            vector_store,
+            selected_paper,
+            thread_id=runtime.context.session_id,
+        ).to_dict()
+
+    @tool("compare_indexed_papers")
+    def compare_papers_tool(paper_ids: list[str]) -> str:
+        """Compare methods, datasets, and metrics across two or three indexed papers."""
+        return compare_papers(vector_store, paper_ids)
+
+    @tool("check_reference_format")
+    def check_references_tool(paper_id: str) -> str:
+        """Extract and check the reference list of an indexed paper."""
+        records = vector_store.records_for_paper(paper_id)
+        reference_text = "\n\n".join(
+            str(record["document"])
+            for record in records
+            if str(record["metadata"].get("section_canonical")) == "references"
+        )
+        if not reference_text:
+            return "未识别到参考文献章节。"
+        return report_as_markdown(extract_references("References\n" + reference_text))
+
+    return [
+        retrieve_tool,
+        list_papers_tool,
+        assess_quality_tool,
+        compare_papers_tool,
+        check_references_tool,
+    ]
 
 
 class PaperAgentService:
@@ -108,7 +151,8 @@ class PaperAgentService:
             checkpointer = SqliteSaver(self._checkpoint_connection)
         self.checkpointer = checkpointer
         self.memory_store = memory_store or InMemoryStore()
-        self.tools = build_agent_tools(self.vector_store, self.settings)
+        self.quality_agent = QualityAgent(self.model)
+        self.tools = build_agent_tools(self.vector_store, self.settings, self.quality_agent)
         self.graph = create_agent(
             self.model,
             tools=self.tools,

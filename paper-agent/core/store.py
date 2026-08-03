@@ -152,6 +152,34 @@ class PaperVectorStore:
         result = self.collection.get(where={"paper_id": paper_id}, include=[])
         return len(result.get("ids") or [])
 
+    def records_for_paper(self, paper_id: str) -> list[dict[str, Any]]:
+        result = self.collection.get(
+            where={"paper_id": paper_id},
+            include=["documents", "metadatas"],
+        )
+        records = [
+            {
+                "id": identifier,
+                "document": document,
+                "metadata": metadata or {},
+            }
+            for identifier, document, metadata in zip(
+                result.get("ids") or [],
+                result.get("documents") or [],
+                result.get("metadatas") or [],
+                strict=True,
+            )
+        ]
+        return sorted(
+            records,
+            key=lambda record: (
+                int(record["metadata"].get("page", 1)),
+                int(record["metadata"].get("char_start", 0)),
+                int(record["metadata"].get("para_idx", 0)),
+                str(record["id"]),
+            ),
+        )
+
     @staticmethod
     def _chunk_metadata(paper_id: str, title: str, chunk: Chunk) -> dict[str, Any]:
         return {
