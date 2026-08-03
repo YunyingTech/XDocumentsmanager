@@ -29,6 +29,10 @@ class InvalidPdfError(PaperLoadError):
     """Raised when an upload is not a readable PDF."""
 
 
+class UnsupportedFileTypeError(PaperLoadError):
+    """Raised when the uploaded filename is not a PDF."""
+
+
 class PaperTooLargeError(PaperLoadError):
     """Raised when an upload exceeds the configured size limit."""
 
@@ -78,6 +82,8 @@ def load_pdf(
     data, resolved_name = _read_source(source, filename)
     if not data:
         raise EmptyPaperError("上传文件为空，请选择包含内容的 PDF。")
+    if Path(resolved_name).suffix.casefold() != ".pdf":
+        raise UnsupportedFileTypeError("仅支持 PDF 文件，请重新选择。")
     if len(data) > max_size_mb * 1024 * 1024:
         raise PaperTooLargeError(f"PDF 超过 {max_size_mb} MB 限制，请压缩或拆分后重试。")
     if not data.lstrip().startswith(b"%PDF-"):
