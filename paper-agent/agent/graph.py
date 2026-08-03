@@ -5,12 +5,12 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from pathlib import Path
 import sqlite3
-from typing import Any, Iterator
+from typing import Any, Iterator, Literal
 
 from langchain.agents import create_agent
 from langchain.tools import ToolRuntime, tool
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.store.base import BaseStore
@@ -52,6 +52,13 @@ class AgentAnswer:
     text: str
     sources: tuple[Passage, ...]
     message_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class AgentStreamEvent:
+    kind: Literal["token", "replace", "sources", "done"]
+    text: str = ""
+    sources: tuple[Passage, ...] = ()
 
 
 def build_agent_tools(
@@ -213,23 +220,87 @@ class PaperAgentService:
             answer = UNKNOWN_ANSWER
         if not answer:
             answer = UNKNOWN_ANSWER if retrieval_was_empty else "模型未返回可显示的回答。"
+        self._record_interaction(user_id, thread_id, question, active_paper_id)
+        return AgentAnswer(answer, sources, len(messages))
+
+    def stream_ask(
+        self,
+        question: str,
+        *,
+        thread_id: str,
+        user_id: str,
+        active_paper_id: str | None = None,
+    ) -> Iterator[AgentStreamEvent]:
+        if not question.strip():
+            raise ValueError("问题不能为空。")
+        context = AgentContext(user_id=user_id, session_id=thread_id, active_paper_id=active_paper_id)
+        config = {"configurable": {"thread_id": thread_id}}
+        sources: tuple[Passage, ...] = ()
+        retrieval_was_empty = False
+        emitted_text = False
+        try:
+            events = self.graph.stream(
+                {"messages": [{"role": "user", "content": question.strip()}]},
+                config=config,
+                context=context,
+                stream_mode=["messages", "values"],
+            )
+            for mode, payload in events:
+                if mode == "values":
+                    messages = list(payload.get("messages", [])) if isinstance(payload, dict) else []
+                    current_sources, current_empty = _sources_from_messages(messages)
+                    if current_sources:
+                        sources = current_sources
+                    retrieval_was_empty = retrieval_was_empty or current_empty
+                    continue
+                if mode != "messages" or not isinstance(payload, tuple):
+                    continue
+                message = payload[0]
+                if not isinstance(message, (AIMessage, AIMessageChunk)):
+                    continue
+                if getattr(message, "tool_calls", None) or getattr(message, "tool_call_chunks", None):
+                    continue
+                token = _message_content_text(message)
+                if not token or (retrieval_was_empty and not sources):
+                    continue
+                emitted_text = True
+                yield AgentStreamEvent("token", text=token)
+        except Exception as exc:
+            raise AgentUnavailableError("模型调用失败，请检查模型服务配置后重试。") from exc
+
+        if retrieval_was_empty and not sources:
+            yield AgentStreamEvent("replace", text=UNKNOWN_ANSWER)
+        elif not emitted_text:
+            yield AgentStreamEvent("replace", text="模型未返回可显示的回答。")
+        if sources:
+            yield AgentStreamEvent("sources", sources=sources)
+        self._record_interaction(user_id, thread_id, question, active_paper_id)
+        yield AgentStreamEvent("done", sources=sources)
+
+    def token_usage(self, session_id: str) -> TokenUsage:
+        return self.token_tracker.snapshot(session_id)
+
+    def _record_interaction(
+        self,
+        user_id: str,
+        thread_id: str,
+        question: str,
+        active_paper_id: str | None,
+    ) -> None:
         self.long_term_memory.record_question(
             user_id,
             session_id=thread_id,
             question=question.strip(),
             paper_id=active_paper_id,
         )
-        if active_paper_id:
-            paper = next(
-                (item for item in self.vector_store.list_papers() if item["paper_id"] == active_paper_id),
-                None,
-            )
-            if paper:
-                self.long_term_memory.remember_paper(user_id, active_paper_id, paper["title"])
-        return AgentAnswer(answer, sources, len(messages))
-
-    def token_usage(self, session_id: str) -> TokenUsage:
-        return self.token_tracker.snapshot(session_id)
+        if not active_paper_id:
+            return
+        paper = next(
+            (item for item in self.vector_store.list_papers() if item["paper_id"] == active_paper_id),
+            None,
+        )
+        if paper:
+            self.long_term_memory.remember_paper(user_id, active_paper_id, paper["title"])
 
     def close(self) -> None:
         if self._checkpoint_connection is not None:
@@ -271,4 +342,16 @@ def _last_ai_text(messages: list[BaseMessage]) -> str:
                 if isinstance(part, dict) and part.get("type") in {"text", "output_text"}
             ]
             return "".join(parts).strip()
+    return ""
+
+
+def _message_content_text(message: AIMessage | AIMessageChunk) -> str:
+    if isinstance(message.content, str):
+        return message.content
+    if isinstance(message.content, list):
+        return "".join(
+            str(part.get("text", ""))
+            for part in message.content
+            if isinstance(part, dict) and part.get("type") in {"text", "output_text"}
+        )
     return ""

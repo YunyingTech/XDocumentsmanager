@@ -4,8 +4,8 @@ from pathlib import Path
 from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, SystemMessage
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from pydantic import Field, PrivateAttr
@@ -42,6 +42,39 @@ class ScriptedChatModel(BaseChatModel):
         response = self.responses[self._cursor]
         self._cursor += 1
         return ChatResult(generations=[ChatGeneration(message=response)])
+
+
+class StreamingChatModel(BaseChatModel):
+    @property
+    def _llm_type(self) -> str:
+        return "streaming-test-model"
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> "StreamingChatModel":
+        return self
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content="streamed answer"))])
+
+    def _stream(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ):
+        yield ChatGenerationChunk(message=AIMessageChunk(content="streamed "))
+        yield ChatGenerationChunk(
+            message=AIMessageChunk(
+                content="answer",
+                usage_metadata={"input_tokens": 6, "output_tokens": 2, "total_tokens": 8},
+            )
+        )
 
 
 def _settings(tmp_path: Path) -> AppSettings:
@@ -185,3 +218,26 @@ def test_empty_retrieval_is_forced_to_unknown(tmp_path: Path) -> None:
 
     assert answer.text == UNKNOWN_ANSWER
     assert answer.sources == ()
+
+
+def test_stream_ask_emits_model_tokens_and_done_event(tmp_path: Path) -> None:
+    service = PaperAgentService(
+        _settings(tmp_path),
+        vector_store=_indexed_store(tmp_path),
+        model=StreamingChatModel(),
+        checkpointer=InMemorySaver(),
+        memory_store=InMemoryStore(),
+    )
+
+    events = list(
+        service.stream_ask(
+            "Give a short greeting.",
+            thread_id="stream",
+            user_id="u",
+            active_paper_id=None,
+        )
+    )
+
+    assert "".join(event.text for event in events if event.kind == "token") == "streamed answer"
+    assert events[-1].kind == "done"
+    assert service.token_usage("stream").total_tokens == 8
