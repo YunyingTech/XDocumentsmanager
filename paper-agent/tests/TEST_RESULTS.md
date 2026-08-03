@@ -1,12 +1,12 @@
 # 测试结果
 
-测试环境：Windows 11、Python 3.12.10、PyMuPDF 1.28.0、LangChain 1.3.14、LangGraph 1.2.10、Chroma 1.5.9。执行命令：
+测试环境：Windows 11、Python 3.12.10、PyMuPDF 1.28.0、MineU 3.4.4、LangChain 1.3.14、LangGraph 1.2.10、Chroma 1.5.9。执行命令：
 
 ```powershell
 .venv\Scripts\python.exe -m pytest -q
 ```
 
-自动化结果：`26 passed`。`pytest --cov=agent --cov=core --cov=tools` 的语句覆盖率为 `88%`（1444 条语句，175 条未覆盖）。
+自动化结果：`29 passed`。`pytest --cov=agent --cov=core --cov=tools` 的语句覆盖率为 `85%`（1659 条语句，245 条未覆盖）。
 
 ## 核心流程
 
@@ -22,6 +22,7 @@
 | C8 | Quality Agent 评估含方法/数据/创新证据的论文 | 分数由规则固定，理由由独立 Agent 输出 | 四维分数保持确定性结果，理由含 `[Q1]` 证据 | 通过 |
 | C9 | RAG 与 Graph RAG 两篇论文 | 输出方法/数据集/指标 Markdown 表 | 正确列出 MS MARCO、HotpotQA、MRR、F1 及方法摘要 | 通过 |
 | C10 | Streamlit AppTest 启动应用 | 页面无异常并显示五个工作区 | 0 exception；入库/问答/质量/对比/参考文献标签均存在 | 通过 |
+| C11 | SHA-256 `8089ae8f...d62ee39` 的 arXiv 2607.28702v1 双栏 PDF | 原生结构不完整时自动 MineU OCR，HITL 非空并可入库检索 | 识别 7 个核心章节及 Acknowledgments；确认后 40 分片；检索返回章节/页码/段落来源；缓存命中 0.29s | 通过 |
 
 ## 边界与异常
 

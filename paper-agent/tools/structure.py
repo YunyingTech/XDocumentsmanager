@@ -33,7 +33,7 @@ _CANONICAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "methods",
         re.compile(
-            r"^(?:methods?|methodology|approach|proposed\s+(?:method|approach)|model|(?:model\s+)?architecture|方法|研究方法|方法论|模型|系统架构)$",
+            r"^(?:methods?|methodology|approach|proposed\s+(?:method|approach)|model|system|(?:model\s+)?architecture|方法|研究方法|方法论|模型|系统|系统架构)$",
             re.I,
         ),
     ),
@@ -52,7 +52,7 @@ _CANONICAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "conclusion",
         re.compile(
-            r"^(?:conclusions?|concluding\s+remarks|conclusion\s+and\s+future\s+work|future\s+work|结论|总结|结论与展望)$",
+            r"^(?:conclusions?|discussion\s+and\s+conclusions?|concluding\s+remarks|conclusion\s+and\s+future\s+work|future\s+work|结论|总结|讨论与结论|结论与展望)$",
             re.I,
         ),
     ),
@@ -70,6 +70,9 @@ _CHINESE_NUMBERED_HEADING = re.compile(
     r"^\s*(?:第)?(?P<number>[一二三四五六七八九十百]+)(?:章|节|、|[.．])\s*(?P<title>.+?)\s*$"
 )
 _CAPTION_PREFIX = re.compile(r"^(?:fig(?:ure)?|table|algorithm|equation|图|表|公式)\s*[.\d一二三四五六七八九十]", re.I)
+_RUN_IN_HEADING = re.compile(
+    r"(?:^|(?<=[.!?。])\s+)(?P<title>[A-Za-z][A-Za-z &/]{1,60}|[\u4e00-\u9fff]{2,20})\s*[—–]\s*(?=\S)"
+)
 
 
 def extract_paper_structure(text: str) -> list[Section]:
@@ -85,6 +88,20 @@ def extract_paper_structure(text: str) -> list[Section]:
             continue
         page += raw_line.count("\f")
         line = re.sub(r"\s+", " ", raw_line.replace("\f", " ")).strip()
+        run_ins = _run_in_headings(line)
+        if run_ins:
+            line_start = match.start() + max(0, raw_line.find(line))
+            for title, canonical, relative_start in run_ins:
+                sections.append(
+                    Section(
+                        title=title,
+                        level=1,
+                        char_start=line_start + relative_start,
+                        page=page,
+                        canonical=canonical,
+                    )
+                )
+            continue
         if not _looks_like_heading(line):
             continue
         number, title = _split_heading(line)
@@ -147,6 +164,22 @@ def _canonical_name(title: str) -> str | None:
         if pattern.fullmatch(normalized):
             return canonical
     return None
+
+
+def _run_in_headings(line: str) -> list[tuple[str, str, int]]:
+    headings: list[tuple[str, str, int]] = []
+    for match in _RUN_IN_HEADING.finditer(line):
+        title = match.group("title").strip()
+        canonical = _canonical_name(title)
+        if canonical is None and title.casefold() in {
+            "acknowledgments",
+            "acknowledgements",
+            "致谢",
+        }:
+            canonical = "other"
+        if canonical is not None:
+            headings.append((title, canonical, match.start("title")))
+    return headings
 
 
 def _looks_like_heading(line: str) -> bool:

@@ -89,3 +89,30 @@ Body sentence.
     sections = extract_paper_structure(text)
 
     assert [(section.canonical, section.page) for section in sections] == [("introduction", 1)]
+
+
+def test_extracts_run_in_headings_used_by_compact_journal_papers() -> None:
+    text = """Abstract
+Compact abstract.
+Introduction—The paper introduces its motivation in the same paragraph.
+Model—The engine model is defined here.
+System—The experimental apparatus is described here.
+Result—Measurements support the model.
+Discussion and Conclusion—The implications are summarized here.
+Acknowledgments—The authors acknowledge funding.
+References
+[1] Example reference.
+"""
+
+    sections = extract_paper_structure(text)
+
+    assert [section.canonical for section in sections] == [
+        "abstract",
+        "introduction",
+        "methods",
+        "methods",
+        "results",
+        "conclusion",
+        "other",
+        "references",
+    ]

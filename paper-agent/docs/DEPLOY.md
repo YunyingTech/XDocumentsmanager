@@ -31,6 +31,14 @@ cp .env.example .env
 
 依赖文件中的所有直接依赖均固定版本。本实现已真实安装该文件，未发生依赖降级。
 
+复杂双栏或扫描 PDF 在原生章节为空、或紧凑行内章节明显不完整时会自动调用 MineU CPU pipeline。MineU 首次运行会下载布局、OCR 和公式模型，建议至少 16 GB 内存、20 GB 可用磁盘。结果缓存于 `runtime/mineru/`，相同 PDF 会直接复用。
+
+```dotenv
+MINERU_ENABLED=true
+MINERU_LANGUAGE=en
+MINERU_TIMEOUT_SECONDS=1800
+```
+
 ## 3. LM Studio 本地配置
 
 1. 在 LM Studio 加载支持工具调用的 instruct 模型。

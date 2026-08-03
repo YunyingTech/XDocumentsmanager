@@ -6,6 +6,7 @@ import fitz
 from langgraph.checkpoint.memory import InMemorySaver
 
 from core.config import AppSettings
+from core.pdf_loader import PageContent, PaperDocument
 from core.store import HashEmbedding, PaperVectorStore
 from tools.ingest import PaperIngestionWorkflow, paper_id_for
 
@@ -116,3 +117,54 @@ def test_hitl_rejects_invalid_section_corrections(tmp_path: Path) -> None:
     assert failed.status == "failed"
     assert "1 到 5" in failed.message
     assert store.count_paper(paper_id) == 0
+
+
+def test_ingestion_uses_mineru_when_native_structure_is_empty(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / "compact.pdf"
+    document = fitz.open()
+    page = document.new_page()
+    page.insert_textbox(
+        fitz.Rect(72, 72, 520, 760),
+        "Unstructured body text without standalone headings. " * 20,
+        fontsize=10,
+    )
+    data = document.tobytes()
+    document.close()
+    path.write_bytes(data)
+
+    mineru_text = (
+        "Abstract\nEvidence summary.\n\n"
+        "Introduction—Motivation and context.\n\n"
+        "Model—Deterministic method details.\n\n"
+        "References\n[1] Example reference."
+    )
+    mineru_document = PaperDocument(
+        filename=path.name,
+        text=mineru_text,
+        pages=(PageContent(page=1, text=mineru_text),),
+        page_offsets=(0,),
+        extractor="mineru-pipeline-ocr",
+    )
+    monkeypatch.setattr(
+        "tools.ingest.load_pdf_with_mineru", lambda *args, **kwargs: mineru_document
+    )
+
+    store = PaperVectorStore(tmp_path / "chroma", HashEmbedding())
+    workflow = PaperIngestionWorkflow(store, _settings(tmp_path), InMemorySaver())
+    pending = workflow.start(
+        path,
+        paper_id=paper_id_for(data, path.name),
+        title="Compact Paper",
+        thread_id="ingest-mineru",
+    )
+
+    assert pending.status == "awaiting_confirmation"
+    assert "MineU OCR" in pending.message
+    assert {section["canonical"] for section in pending.sections} >= {
+        "abstract",
+        "introduction",
+        "methods",
+        "references",
+    }

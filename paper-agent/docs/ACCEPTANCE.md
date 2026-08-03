@@ -7,8 +7,8 @@
 
 | 检查项 | 命令 | 实际结果 |
 |---|---|---|
-| Python 测试 | `.venv\Scripts\python.exe -m pytest -q` | 26 passed |
-| 核心模块覆盖率 | `.venv\Scripts\python.exe -m pytest --cov=agent --cov=core --cov=tools --cov-report=term-missing -q` | 1444 条语句，88% 覆盖率 |
+| Python 测试 | `.venv\Scripts\python.exe -m pytest -q` | 29 passed |
+| 核心模块覆盖率 | `.venv\Scripts\python.exe -m pytest --cov=agent --cov=core --cov=tools --cov-report=term-missing -q` | 1659 条语句，85% 覆盖率 |
 | Python 语法编译 | `.venv\Scripts\python.exe -m compileall agent core tools app.py` | 通过 |
 | 框架 API 兼容性 | 检查已安装版本中 `create_agent`、`@wrap_model_call`、`@dynamic_prompt`、Checkpointer、Store 与 `interrupt`/`Command` 的导入和签名 | 通过 |
 | 依赖一致性 | `.venv\\Scripts\\python.exe -m pip check` | No broken requirements found |

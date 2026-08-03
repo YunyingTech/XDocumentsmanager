@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 import hashlib
+import os
 from pathlib import Path
 import re
 from typing import Any, Literal, NotRequired, TypedDict
@@ -14,7 +15,8 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from core.config import AppSettings
-from core.pdf_loader import ImageRegion, PaperLoadError, load_pdf
+from core.mineru_loader import MinerUExtractionError, load_pdf_with_mineru
+from core.pdf_loader import ImageRegion, PaperLoadError, ScannedPaperError, load_pdf
 from core.store import PaperVectorStore
 from tools.chunking import Chunk, chunk_with_placeholders
 from tools.structure import Section, build_section_tree, extract_paper_structure
@@ -151,12 +153,46 @@ class PaperIngestionWorkflow:
         return self._as_result(dict(snapshot.values))
 
     def _extract(self, state: IngestionState) -> dict[str, Any]:
-        document = load_pdf(
-            state["file_path"],
-            filename=state["filename"],
-            max_size_mb=self.settings.max_upload_mb,
-        )
-        sections = extract_paper_structure(document.text)
+        document = None
+        sections: list[Section] = []
+        native_error: ScannedPaperError | None = None
+        try:
+            document = load_pdf(
+                state["file_path"],
+                filename=state["filename"],
+                max_size_mb=self.settings.max_upload_mb,
+            )
+            sections = extract_paper_structure(document.text)
+        except ScannedPaperError as exc:
+            native_error = exc
+
+        if _needs_mineru(document, sections):
+            if not _mineru_enabled():
+                if native_error is not None:
+                    raise native_error
+            else:
+                try:
+                    mineru_document = load_pdf_with_mineru(
+                        state["file_path"],
+                        cache_dir=self.settings.root_dir / "runtime" / "mineru",
+                        timeout_seconds=_mineru_timeout_seconds(),
+                        language=os.getenv("MINERU_LANGUAGE", "en").strip() or "en",
+                    )
+                    mineru_sections = extract_paper_structure(mineru_document.text)
+                except MinerUExtractionError:
+                    if document is None or not sections:
+                        raise
+                else:
+                    if len(mineru_sections) >= len(sections):
+                        document = mineru_document
+                        sections = mineru_sections
+
+        if document is None:
+            raise native_error or PaperLoadError("PDF 没有可提取的文本。")
+        if not sections:
+            raise PaperLoadError(
+                "原生解析与 MineU OCR 均未识别到章节，请检查 PDF 版式或手动进行 OCR。"
+            )
         images = [
             {
                 "image_id": image.image_id,
@@ -172,7 +208,11 @@ class PaperIngestionWorkflow:
             "image_regions": images,
             "extractor": document.extractor,
             "status": "awaiting_confirmation",
-            "message": "请核对章节结构，确认后才会写入向量库。",
+            "message": (
+                "MineU OCR 与章节识别已完成，请核对后入库。"
+                if document.extractor.startswith("mineru")
+                else "章节识别已完成，请核对后入库。"
+            ),
         }
 
     def _review(
@@ -184,7 +224,9 @@ class PaperIngestionWorkflow:
             "title": state["title"],
             "sections": state.get("sections", []),
             "structure_tree": _tree_from_records(state.get("sections", [])),
-            "message": "章节识别已完成。确认或修正后才能入库。",
+            "message": state.get(
+                "message", "章节识别已完成。确认或修正后才能入库。"
+            ),
         }
         decision = interrupt(payload)
         if not isinstance(decision, dict) or not decision.get("confirmed"):
@@ -325,3 +367,38 @@ def _section_from_record(record: dict[str, Any]) -> Section:
 
 def _tree_from_records(records: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     return build_section_tree(_section_from_record(record) for record in records)
+
+
+def _mineru_enabled() -> bool:
+    return os.getenv("MINERU_ENABLED", "true").strip().casefold() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _needs_mineru(document: Any, sections: Sequence[Section]) -> bool:
+    if document is None or not sections:
+        return True
+    canonical = {section.canonical for section in sections}
+    if "references" in canonical and len(canonical) >= 4:
+        return False
+    run_in_count = sum(
+        bool(
+            re.search(
+                rf"(?m)^\s*{re.escape(section.title)}\s*[—–]",
+                document.text,
+                re.IGNORECASE,
+            )
+        )
+        for section in sections
+    )
+    return run_in_count >= 1 and len(canonical) < 5
+
+
+def _mineru_timeout_seconds() -> int:
+    try:
+        return max(60, int(os.getenv("MINERU_TIMEOUT_SECONDS", "1800")))
+    except ValueError:
+        return 1800

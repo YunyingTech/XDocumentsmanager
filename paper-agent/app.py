@@ -145,7 +145,7 @@ def _render_upload(runtime: AppRuntime, session_id: str, user_id: str) -> None:
             path = runtime.settings.upload_dir / f"{paper_id}.pdf"
             path.write_bytes(data)
             ingest_thread = f"ingest:{session_id}:{paper_id}:{uuid4().hex[:8]}"
-            with st.spinner("正在抽取文本并识别章节…"):
+            with st.spinner("正在抽取文本并识别章节；复杂版式将自动使用 MineU OCR…"):
                 result = runtime.ingestion.start(
                     path,
                     paper_id=paper_id,

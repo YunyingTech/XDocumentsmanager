@@ -5,7 +5,7 @@
 ## 已实现能力
 
 - 中英文标准章节、编号标题和层级树识别，不使用 LLM 猜章节。
-- PyMuPDF 主抽取、pdfplumber 兜底，保留页码与图片块；扫描件无文本层时提示先 OCR。
+- PyMuPDF 主抽取、pdfplumber 兜底；原生章节为空或紧凑行内章节明显不完整时自动使用 MineU 3.4.4 CPU OCR，并按文件哈希缓存版面结果。
 - 章节感知滑窗分片，图、表、公式转为可追溯占位符，原始 caption/bbox 单独存储。
 - Chroma 持久向量库，可选本地 sentence-transformers 或 OpenAI 兼容 embedding API。
 - `create_agent` 主 Agent、多工具 RAG、SQLite Checkpointer、多会话隔离和流式 token 输出。
@@ -42,18 +42,21 @@ ${EDITOR:-vi} .env
 ./.venv/bin/python -m streamlit run app.py
 ```
 
-浏览器默认打开 `http://localhost:8501`。首次使用本地 embedding 会从 Hugging Face 下载模型并缓存，后续启动复用缓存。
+浏览器默认打开 `http://localhost:8501`。首次使用本地 embedding 会从 Hugging Face 下载模型并缓存，后续启动复用缓存。首次触发 MineU OCR 还会下载布局、公式和 OCR 模型；建议至少 16 GB 内存并预留 20 GB 磁盘，CPU 处理复杂论文通常需要数分钟。
 
 ## 模型配置
 
-所有 URL 和密钥只放在未跟踪的 `.env`。LM Studio 示例：
+所有 URL 和密钥只放在未跟踪的 `.env`。默认 DeepSeek 配置：
 
 ```dotenv
-LLM_BASE_URL=http://127.0.0.1:1234/v1
-LLM_API_KEY=lm-studio
-LLM_MODEL=qwen3-8b
+LLM_BASE_URL=https://api.deepseek.com/v1
+LLM_API_KEY=your-deepseek-api-key
+LLM_MODEL=deepseek-v4-pro
 EMBED_BACKEND=local
 EMBED_MODEL=BAAI/bge-small-zh-v1.5
+MINERU_ENABLED=true
+MINERU_LANGUAGE=en
+MINERU_TIMEOUT_SECONDS=1800
 ```
 
 云端 OpenAI 兼容服务只需替换 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL`。Embedding 切 API 时：
@@ -88,7 +91,7 @@ EMBED_API_KEY=your-key
 .\.venv\Scripts\python.exe -m pytest --cov=agent --cov=core --cov=tools --cov-report=term-missing -q
 ```
 
-当前实测：26 项测试通过，核心模块语句覆盖率 88%。两篇真实公开论文的标准章节类别识别率均为 100%。详细输入、预期和实际结果见 [tests/TEST_RESULTS.md](tests/TEST_RESULTS.md)。
+当前实测：29 项测试通过，核心模块语句覆盖率 85%。两篇真实公开论文的标准章节类别识别率均为 100%。详细输入、预期和实际结果见 [tests/TEST_RESULTS.md](tests/TEST_RESULTS.md)。
 
 ## 真实测试论文
 

@@ -48,9 +48,9 @@ def load_settings(env_file: str | Path | None = None) -> AppSettings:
 
     settings = AppSettings(
         root_dir=root,
-        llm_base_url=os.getenv("LLM_BASE_URL", "http://127.0.0.1:1234/v1").strip(),
-        llm_api_key=os.getenv("LLM_API_KEY", "lm-studio").strip(),
-        llm_model=os.getenv("LLM_MODEL", "qwen3-8b").strip(),
+        llm_base_url=os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1").strip(),
+        llm_api_key=os.getenv("LLM_API_KEY", "").strip(),
+        llm_model=os.getenv("LLM_MODEL", "deepseek-v4-pro").strip(),
         llm_temperature=_float_env("LLM_TEMPERATURE", 0.1, minimum=0.0),
         llm_timeout_seconds=_float_env("LLM_TIMEOUT_SECONDS", 90.0, minimum=1.0),
         embed_backend=os.getenv("EMBED_BACKEND", "local").strip().casefold(),

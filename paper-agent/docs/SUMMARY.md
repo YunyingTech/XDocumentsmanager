@@ -4,7 +4,7 @@
 
 项目交付了一个独立 Python 论文阅读 Agent，覆盖 PDF 抽取、双语章节、占位分片、Chroma、带来源 RAG、HITL、质量子 Agent、批量对比、参考文献、Checkpointer、Store、流式 UI、Token 中间件和动态 Skill。现有 Tauri/Rust/React 文件未修改。
 
-自动化测试为 26 passed，核心模块语句覆盖率 88%；两篇真实 arXiv 论文的核心章节类别识别率均为 100%。
+自动化测试为 29 passed，核心模块语句覆盖率 85%；两篇基准 arXiv 论文的核心章节类别识别率均为 100%，额外双栏论文通过 MineU OCR 识别 7 个核心章节和致谢，并写入 40 个分片。
 
 ## 2. 真实技术踩坑
 
