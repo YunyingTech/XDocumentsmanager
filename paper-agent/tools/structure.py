@@ -58,7 +58,7 @@ _CANONICAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
     (
         "references",
-        re.compile(r"^(?:references|bibliography|works\s+cited|参考文献|引用文献)$", re.I),
+        re.compile(r"^(?:references(?:\s+(?:and\s+)?notes?)?|bibliography|works\s+cited|参考文献|引用文献)$", re.I),
     ),
 )
 

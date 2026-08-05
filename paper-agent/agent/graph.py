@@ -137,6 +137,15 @@ def build_agent_tools(
             if str(record["metadata"].get("section_canonical")) == "references"
         )
         if not reference_text:
+            # Fallback: load from local PDF if available
+            path = settings.upload_dir / f"{paper_id}.pdf"
+            if path.exists():
+                try:
+                    from core.pdf_loader import load_pdf
+                    document = load_pdf(path, max_size_mb=settings.max_upload_mb)
+                    return report_as_markdown(extract_references(document.text))
+                except Exception:
+                    pass
             return "未识别到参考文献章节。"
         return report_as_markdown(extract_references("References\n" + reference_text))
 

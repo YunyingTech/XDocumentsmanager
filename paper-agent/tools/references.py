@@ -49,9 +49,14 @@ class ReferenceReport:
 
 
 _ENTRY_START = re.compile(
-    r"(?m)^\s*(?:(?P<bracket>\[(?P<bracket_num>\d+)\])|(?P<paren>\((?P<paren_num>\d+)\))|(?P<plain>(?P<plain_num>\d+)[.)]))\s+"
+    r"(?m)(?:^|\f)\s*(?:(?P<bracket>\[(?P<bracket_num>\d+)\])|(?P<paren>\((?P<paren_num>\d+)\))|(?P<plain>(?P<plain_num>\d+)[.)]))\s*"
+)
+_ENTRY_INLINE = re.compile(
+    r"(?<=[^\w])(?:(?P<bracket>\[(?P<bracket_num>\d+)\])|(?P<paren>\((?P<paren_num>\d+)\))|(?P<plain>(?P<plain_num>\d+)[.)]))(?=\s|$)"
 )
 _YEAR = re.compile(r"\b((?:18|19|20)\d{2}[a-z]?)\b", re.I)
+_PROTECTED_AL = re.compile(r"\bet al\.", re.I)
+_PROTECTED_AL_PLACEHOLDER = "\x00ETAL\x00"
 
 
 def extract_references(
@@ -63,6 +68,8 @@ def extract_references(
         (section for section in detected if section.canonical == "references"), None
     )
     if reference_section is None:
+        reference_section = _detect_reference_section(text)
+    if reference_section is None:
         return ReferenceReport(
             (),
             (FormatIssue(None, "references_missing", "未识别到参考文献章节。", "error"),),
@@ -70,23 +77,112 @@ def extract_references(
         )
     body = text[reference_section.char_start :]
     first_newline = body.find("\n")
-    body = body[first_newline + 1 :] if first_newline >= 0 else ""
-    matches = list(_ENTRY_START.finditer(body))
+    candidate = body[first_newline + 1 :] if first_newline >= 0 else ""
+    matches = [m for m in _ENTRY_START.finditer(candidate) if _is_valid_marker_index(_marker(m)[0])]
+    if not matches:
+        matches = [m for m in _ENTRY_START.finditer(body) if _is_valid_marker_index(_marker(m)[0])]
+    body = candidate if matches else body
+
+    # Also look for inline markers (e.g. right-column entries in two-column layouts)
+    line_markers: list[tuple[int, int, int, str]] = []
+    for m in matches:
+        idx, style = _marker(m)
+        line_markers.append((m.start(), m.end(), idx, style))
+
+    # Search between line-start markers for inline entries
+    inline_markers: list[tuple[int, int, int, str]] = []
+    for i in range(len(line_markers)):
+        gap_start = line_markers[i][1]
+        gap_end = line_markers[i + 1][0] if i + 1 < len(line_markers) else len(body)
+        for m in _ENTRY_INLINE.finditer(body[gap_start:gap_end]):
+            idx, style = _marker(m)
+            # Skip year-like numbers (1800+) to avoid splitting on in-text years
+            if idx >= 1800:
+                continue
+            # Only treat as a reference entry if the number is larger than the
+            # previous line-start marker (avoids truncating on in-text citations like [1])
+            if idx > line_markers[i][2]:
+                inline_markers.append((gap_start + m.start(), gap_start + m.end(), idx, style))
+
+    # Combine and sort by position
+    all_markers = sorted(line_markers + inline_markers, key=lambda x: x[0])
+    # Deduplicate by index, keeping the first occurrence
+    seen: set[int] = set()
+    deduped: list[tuple[int, int, int, str]] = []
+    for start, end, idx, style in all_markers:
+        if idx in seen:
+            continue
+        seen.add(idx)
+        deduped.append((start, end, idx, style))
+
     entries: list[ReferenceEntry] = []
-    for position, match in enumerate(matches):
-        end = matches[position + 1].start() if position + 1 < len(matches) else len(body)
-        raw = re.sub(r"\s+", " ", body[match.end() : end]).strip()
-        index, style = _marker(match)
-        entries.append(_parse_reference(index, style, raw))
+    for position, (start, end, idx, style) in enumerate(deduped):
+        next_start = deduped[position + 1][0] if position + 1 < len(deduped) else len(body)
+        raw = re.sub(r"\s+", " ", body[end:next_start]).strip()
+        entries.append(_parse_reference(idx, style, raw))
+    # Sort by index for consistent output; unnumbered entries keep their original order
+    entries.sort(key=lambda e: (e.index is None, e.index or 0))
     if not entries and body.strip():
-        for index, paragraph in enumerate(re.split(r"\n\s*\n", body), start=1):
-            raw = re.sub(r"\s+", " ", paragraph).strip()
-            if raw:
-                entries.append(_parse_reference(None, "unnumbered", raw))
+        paragraphs = re.split(r"\n\s*\n", body)
+        if len(paragraphs) == 1 and len(body.splitlines()) > 2:
+            for index, line in enumerate(body.splitlines(), start=1):
+                raw = re.sub(r"\s+", " ", line).strip()
+                if raw and len(raw) > 20 and not raw.lower().startswith("references"):
+                    entries.append(_parse_reference(None, "unnumbered", raw))
+        else:
+            for index, paragraph in enumerate(paragraphs, start=1):
+                raw = re.sub(r"\s+", " ", paragraph).strip()
+                if raw and not raw.lower().startswith("references"):
+                    entries.append(_parse_reference(None, "unnumbered", raw))
     issues = _format_issues(entries)
     if not entries:
         issues.append(FormatIssue(None, "references_empty", "参考文献章节中没有可解析条目。", "error"))
     return ReferenceReport(tuple(entries), tuple(issues), True)
+
+
+def _detect_reference_section(text: str) -> Section | None:
+    """Detect a reference list even without an explicit 'References' heading."""
+    all_matches = [m for m in _ENTRY_START.finditer(text) if _is_valid_marker_index(_marker(m)[0])]
+    if len(all_matches) < 2:
+        return None
+    indices = [
+        int(m.group("bracket_num") or m.group("paren_num") or m.group("plain_num"))
+        for m in all_matches
+    ]
+    # Find the longest consecutive sequence starting near 1
+    best_start = 0
+    best_len = 0
+    for i in range(len(indices)):
+        length = 1
+        for j in range(i + 1, len(indices)):
+            if indices[j] == indices[j - 1] + 1:
+                length += 1
+            else:
+                break
+        if length > best_len and indices[i] <= 3:
+            best_len = length
+            best_start = i
+    if best_len < 2:
+        return None
+    # Reject if the best sequence looks like in-text citations (very short gaps)
+    first_match = all_matches[best_start]
+    last_match = all_matches[best_start + best_len - 1]
+    avg_gap = (last_match.start() - first_match.start()) / max(1, best_len - 1)
+    if avg_gap < 30:
+        # Likely in-text citations like "[1] [2] [3]" rather than a reference list
+        return None
+    start_pos = first_match.start()
+    # Look backwards for a blank line to bound the section start
+    preceding = text[max(0, start_pos - 500) : start_pos]
+    last_double_newline = preceding.rfind("\n\n")
+    if last_double_newline >= 0:
+        start_pos = max(0, start_pos - 500) + last_double_newline + 2
+    else:
+        # Try a single form-feed or newline as boundary
+        last_break = max(preceding.rfind("\f"), preceding.rfind("\n"))
+        if last_break >= 0:
+            start_pos = max(0, start_pos - 500) + last_break + 1
+    return Section("References", 1, start_pos, 1, "references")
 
 
 def report_as_markdown(report: ReferenceReport) -> str:
@@ -119,16 +215,26 @@ def _marker(match: re.Match[str]) -> tuple[int, str]:
     return int(match.group("plain_num")), "plain"
 
 
+def _is_valid_marker_index(idx: int) -> bool:
+    """Reject year-like numbers that are accidentally matched as plain markers."""
+    return idx < 1800
+
+
 def _parse_reference(index: int | None, style: str, raw: str) -> ReferenceEntry:
-    year_match = _YEAR.search(raw)
+    # Truncate before any inline marker that was missed during pre-processing
+    inline = _ENTRY_INLINE.search(raw)
+    if inline:
+        raw = raw[: inline.start()].strip()
+    protected = _PROTECTED_AL.sub(_PROTECTED_AL_PLACEHOLDER, raw)
+    year_match = _YEAR.search(protected)
     year = year_match.group(1) if year_match else None
-    segments = [segment.strip(" ,;") for segment in re.split(r"\.\s+", raw) if segment.strip()]
+    segments = [segment.strip(" ,;") for segment in re.split(r"\.\s+", protected) if segment.strip()]
     authors: str | None = None
     title: str | None = None
     venue: str | None = None
     if year_match:
-        before = raw[: year_match.start()].strip(" .,:;()")
-        after = raw[year_match.end() :].strip(" .,:;()")
+        before = protected[: year_match.start()].strip(" .,:;()")
+        after = protected[year_match.end() :].strip(" .,:;()")
         authors = before or (segments[0] if segments else None)
         after_segments = [segment.strip(" ,;") for segment in re.split(r"\.\s+", after) if segment.strip()]
         title = after_segments[0] if after_segments else None
@@ -141,6 +247,13 @@ def _parse_reference(index: int | None, style: str, raw: str) -> ReferenceEntry:
         authors = None
     if title and len(title) < 4:
         title = None
+    # Restore protected placeholders
+    if authors:
+        authors = authors.replace(_PROTECTED_AL_PLACEHOLDER, "et al.")
+    if title:
+        title = title.replace(_PROTECTED_AL_PLACEHOLDER, "et al.")
+    if venue:
+        venue = venue.replace(_PROTECTED_AL_PLACEHOLDER, "et al.")
     return ReferenceEntry(index, style, raw, authors, year, title, venue)
 
 
