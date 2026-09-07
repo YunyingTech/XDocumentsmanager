@@ -1047,15 +1047,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(engine.backend_status().backend, "elasticsearch");
-        assert_eq!(
-            engine.search("unique-elastic-ocr-token", None, 10).unwrap()[0].file_id,
-            41
-        );
-        assert_eq!(
-            engine.search("供应商审计", None, 10).unwrap()[0].file_id,
-            41
-        );
-        assert_eq!(engine.search("中国", None, 10).unwrap()[0].file_id, 41);
+        for query in ["unique-elastic-ocr-token", "供应商审计", "中国"] {
+            let hits = engine.search(query, None, 10).unwrap();
+            assert_eq!(
+                hits.first().map(|hit| hit.file_id),
+                Some(41),
+                "OCR text must be searchable immediately after persistence: {query}"
+            );
+        }
         drop(engine);
         drop(database);
         let _ = std::fs::remove_dir_all(root);

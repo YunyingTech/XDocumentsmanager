@@ -1,3 +1,4 @@
+import { MAX_RAPID_OCR_WORKERS } from '../../lib/rapidOcrConfig';
 import { useEffect, useState } from 'react';
 import {
   ScanText,
@@ -387,7 +388,7 @@ function SettingsCard() {
                 name="rapidocr_worker_count"
                 type="number"
                 min={1}
-                max={8}
+                max={MAX_RAPID_OCR_WORKERS}
                 step={1}
                 className="input text-sm"
                 value={rapidWorkerCount}

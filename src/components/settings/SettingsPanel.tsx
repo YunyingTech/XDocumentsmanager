@@ -1,3 +1,4 @@
+import { DEFAULT_RAPID_OCR_WORKERS, MAX_RAPID_OCR_WORKERS, rapidWorkerCountValue } from '../../lib/rapidOcrConfig';
 import { useState, useEffect, useCallback } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { Wifi, Loader2, CheckCircle, XCircle, Save, Trash2, Monitor, Server, Boxes, Download, Zap } from 'lucide-react';
@@ -45,7 +46,7 @@ export function SettingsPanel() {
   const [paddleInstalling, setPaddleInstalling] = useState(false);
   const [rapidLanguage, setRapidLanguage] = useState('ch');
   const [rapidDeviceMode, setRapidDeviceMode] = useState<RapidDeviceMode>('auto');
-  const [rapidWorkerCount, setRapidWorkerCount] = useState(3);
+  const [rapidWorkerCount, setRapidWorkerCount] = useState(DEFAULT_RAPID_OCR_WORKERS);
   const [rapidStatus, setRapidStatus] = useState<RapidOcrStatus | null>(null);
   const [rapidInstallProgress, setRapidInstallProgress] = useState<RapidInstallProgress | null>(null);
   const [rapidInstalling, setRapidInstalling] = useState(false);
@@ -410,7 +411,7 @@ export function SettingsPanel() {
                       name="rapidocr_worker_count"
                       type="number"
                       min={1}
-                      max={8}
+                      max={MAX_RAPID_OCR_WORKERS}
                       step={1}
                       className="input"
                       value={rapidWorkerCount}
@@ -853,12 +854,6 @@ function deviceMode(value: string): PaddleDeviceMode {
 
 function rapidDeviceModeValue(value: string): RapidDeviceMode {
   return value === 'cpu' ? 'cpu' : 'auto';
-}
-
-function rapidWorkerCountValue(value: string): number {
-  const count = Number.parseInt(value, 10);
-  if (!Number.isFinite(count)) return 3;
-  return Math.min(8, Math.max(1, count));
 }
 
 function PaddlePackageIndexOptions({ t }: { t: ReturnType<typeof useI18n>['t'] }) {

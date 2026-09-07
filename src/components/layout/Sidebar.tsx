@@ -14,7 +14,10 @@ export function Sidebar() {
   const folders = useFolderStore((s) => s.folders);
   const selectedFolderId = useFolderStore((s) => s.selectedFolderId);
   const selectFolder = useFolderStore((s) => s.selectFolder);
-  const indexProgress = useFolderStore((s) => s.indexProgress);
+  const indexProgressByJob = useFolderStore((s) => s.indexProgressByJob);
+  const activeFolderIds = new Set(Object.values(indexProgressByJob)
+    .filter((progress) => progress.status === 'running' || progress.status === 'queued')
+    .map((progress) => progress.folder_id));
   return (
     <aside className="w-64 flex flex-col border-r border-surface-200 bg-white dark:bg-surface-950 dark:border-surface-800 select-none">
       {/* Header */}
@@ -121,7 +124,7 @@ export function Sidebar() {
             <span className="truncate text-left">
               {folder.display_name || folder.path.split('\\').pop() || folder.path}
             </span>
-            {indexProgress?.folder_id === folder.id && (
+            {activeFolderIds.has(folder.id) && (
               <Circle size={8} className="shrink-0 text-accent-500 fill-accent-500 animate-pulse" />
             )}
           </button>

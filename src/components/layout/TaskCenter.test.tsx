@@ -11,7 +11,7 @@ const state = vi.hoisted(() => ({
   bulkOcrRunning: false,
   bulkOcrQueued: 0,
   folders: [] as Array<Record<string, unknown>>,
-  indexProgress: null as Record<string, unknown> | null,
+  indexProgressByJob: {} as Record<number, Record<string, unknown>>,
 }));
 
 vi.mock('../../stores/ocrStore', () => ({
@@ -34,7 +34,7 @@ describe('task center', () => {
     state.bulkOcrRunning = false;
     state.bulkOcrQueued = 0;
     state.folders = [];
-    state.indexProgress = null;
+    state.indexProgressByJob = {};
     useUIStore.setState({ language: 'en' });
   });
 
@@ -122,7 +122,7 @@ describe('task center', () => {
 
   it('shows that an index task will continue with OCR', async () => {
     state.folders = [{ id: 3, display_name: 'Archive' }];
-    state.indexProgress = {
+    state.indexProgressByJob[4] = {
       job_id: 4,
       folder_id: 3,
       index_mode: 'incremental',
@@ -147,7 +147,7 @@ describe('task center', () => {
 
   it('labels explicit full re-index jobs separately', async () => {
     state.folders = [{ id: 3, display_name: 'Archive' }];
-    state.indexProgress = {
+    state.indexProgressByJob[5] = {
       job_id: 5,
       folder_id: 3,
       index_mode: 'full',

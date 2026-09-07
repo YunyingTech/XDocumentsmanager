@@ -22,7 +22,8 @@ export function TaskCenter() {
   const { t, plural } = useI18n();
   const [open, setOpen] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
-  const indexProgress = useFolderStore((s) => s.indexProgress);
+  const indexProgressByJob = useFolderStore((s) => s.indexProgressByJob);
+  const indexTasks = Object.values(indexProgressByJob);
   const folders = useFolderStore((s) => s.folders);
   const tasks = useOcrStore((s) => s.tasks);
   const bulkOcrRunning = useOcrStore((s) => s.bulkOcrRunning);
@@ -32,13 +33,13 @@ export function TaskCenter() {
   const cancelTask = useOcrStore((s) => s.cancelTask);
   const cancelAllTasks = useOcrStore((s) => s.cancelAllTasks);
 
-  const indexActive = indexProgress?.status === 'running' || indexProgress?.status === 'queued';
-  const indexFailed = indexProgress?.status === 'error';
+  const indexActive = indexTasks.filter((progress) => progress.status === 'running' || progress.status === 'queued').length;
+  const indexFailed = indexTasks.filter((progress) => progress.status === 'error').length;
   const activeOcr = tasks.filter((task) => activeOcrStatuses.includes(task.status)).length;
   const failedOcr = tasks.filter((task) => task.status === 'failed').length;
-  const activeCount = (bulkOcrRunning ? Math.max(activeOcr, bulkOcrQueued, 1) : activeOcr) + (indexActive ? 1 : 0);
-  const failedCount = failedOcr + (indexFailed ? 1 : 0);
-  const hasHistory = tasks.length > 0 || Boolean(indexProgress);
+  const activeCount = (bulkOcrRunning ? Math.max(activeOcr, bulkOcrQueued, 1) : activeOcr) + indexActive;
+  const failedCount = failedOcr + indexFailed;
+  const hasHistory = tasks.length > 0 || indexTasks.length > 0;
 
   useEffect(() => {
     if (!open) return;
@@ -98,11 +99,11 @@ export function TaskCenter() {
                 <p className="mt-1 text-xs text-surface-400">{t('tasks.emptyHint')}</p>
               </div>
             )}
-            {indexProgress && (
-              <IndexTask progress={indexProgress} folderName={folders.find((folder) => folder.id === indexProgress.folder_id)?.display_name} />
-            )}
+            {indexTasks.map((progress) => (
+              <IndexTask key={progress.job_id} progress={progress} folderName={folders.find((folder) => folder.id === progress.folder_id)?.display_name} />
+            ))}
             {tasks.length > 0 && (
-              <div className={indexProgress ? 'mt-2 border-t border-surface-200 pt-2 dark:border-surface-800' : ''}>
+              <div className={indexTasks.length > 0 ? 'mt-2 border-t border-surface-200 pt-2 dark:border-surface-800' : ''}>
                 <p className="px-2 pb-1.5 text-[11px] font-semibold text-surface-400">OCR</p>
                 <div className="space-y-1">
                   {[...tasks].reverse().map((task) => (

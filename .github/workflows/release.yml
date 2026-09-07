@@ -52,6 +52,9 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Run complete automated test suite
+        run: npm run test:all
+
       - name: Build release asset
         uses: tauri-apps/tauri-action@v0
         with:

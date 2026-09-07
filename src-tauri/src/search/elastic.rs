@@ -232,7 +232,7 @@ impl ElasticRuntime {
             append_bulk_line(&mut body, document)?;
         }
         if !body.is_empty() {
-            self.send_bulk(endpoint, body)?;
+            self.send_bulk(endpoint, body, true)?;
         }
         Ok(())
     }
@@ -294,7 +294,7 @@ impl ElasticRuntime {
             .map_err(|e| e.to_string())?;
             let source = serde_json::to_string(&document).map_err(|e| e.to_string())?;
             if !body.is_empty() && body.len() + action.len() + source.len() + 2 > 8 * 1024 * 1024 {
-                self.send_bulk(endpoint, std::mem::take(&mut body))?;
+                self.send_bulk(endpoint, std::mem::take(&mut body), false)?;
             }
             body.push_str(&action);
             body.push('\n');
@@ -303,7 +303,7 @@ impl ElasticRuntime {
             Ok(())
         })?;
         if !body.is_empty() {
-            self.send_bulk(endpoint, body)?;
+            self.send_bulk(endpoint, body, false)?;
         }
         let refresh = self
             .client
@@ -448,10 +448,18 @@ impl ElasticRuntime {
             .map_err(|e| e.to_string())
     }
 
-    fn send_bulk(&self, endpoint: &str, body: String) -> Result<(), String> {
+    fn send_bulk(
+        &self,
+        endpoint: &str,
+        body: String,
+        wait_for_refresh: bool,
+    ) -> Result<(), String> {
         let response = self
             .client
             .post(format!("{}/_bulk", endpoint))
+            // Incremental writes must be searchable before reporting completion.
+            // Full rebuilds perform a single explicit refresh after all batches.
+            .query(&[("refresh", if wait_for_refresh { "wait_for" } else { "false" })])
             .header("content-type", "application/x-ndjson")
             .body(body)
             .send()
@@ -698,6 +706,46 @@ mod tests {
             "errors": true,
             "items": [{ "index": { "status": 400 } }]
         })));
+    }
+
+    #[test]
+    fn incremental_bulk_waits_for_visibility_without_refreshing_each_rebuild_batch() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        use std::time::Duration;
+
+        for incremental in [true, false] {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+                let mut reader = BufReader::new(socket.try_clone().unwrap());
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line).unwrap();
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" || line.is_empty() { break; }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                reader.read_exact(&mut vec![0; length]).unwrap();
+                let body = r#"{"errors":false,"items":[]}"#;
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+                request_line
+            });
+            let runtime = ElasticRuntime::new().unwrap();
+            if incremental {
+                runtime.apply_changes_inner(&endpoint, &[], &[42]).unwrap();
+            } else {
+                runtime.send_bulk(&endpoint, "{}\n".to_string(), false).unwrap();
+            }
+            let refresh = if incremental { "wait_for" } else { "false" };
+            assert_eq!(server.join().unwrap(), format!("POST /_bulk?refresh={refresh} HTTP/1.1\r\n"));
+        }
     }
 
     #[test]

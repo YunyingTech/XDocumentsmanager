@@ -1,3 +1,4 @@
+import { DEFAULT_RAPID_OCR_WORKERS, rapidWorkerCountValue } from '../lib/rapidOcrConfig';
 import { create } from 'zustand';
 import {
   checkOcrHealth,
@@ -40,8 +41,6 @@ export interface OcrTask {
 }
 
 const WINDOWS_OCR_CONCURRENCY = 2;
-const DEFAULT_RAPID_OCR_WORKERS = 3;
-const MAX_RAPID_OCR_WORKERS = 8;
 const INCREMENTAL_OCR_BATCH_SIZE = 100;
 const OCR_TASK_HISTORY_LIMIT = 2_000;
 const pendingWindowsProgress = new Map<string, WindowsOcrProgress>();
@@ -446,7 +445,10 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
       let afterId = 0;
       let queued = 0;
       while (!cancelledBulkOcr.has(runId)) {
-        const files = await listOcrCandidateRefs(folderId, afterId, INCREMENTAL_OCR_BATCH_SIZE);
+        const batchSize = get().engine === 'rapid'
+          ? Math.max(INCREMENTAL_OCR_BATCH_SIZE, rapidWorkerCountValue(get().rapidWorkerCount))
+          : INCREMENTAL_OCR_BATCH_SIZE;
+        const files = await listOcrCandidateRefs(folderId, afterId, batchSize);
         if (files.length === 0) break;
         while (get().isSubmitting && !cancelledBulkOcr.has(runId)) {
           await new Promise((resolve) => window.setTimeout(resolve, 250));
@@ -936,12 +938,6 @@ function clearBulkRun(runId: string) {
   for (const [taskId, taskRunId] of bulkTaskRuns) {
     if (taskRunId === runId) bulkTaskRuns.delete(taskId);
   }
-}
-
-function rapidWorkerCountValue(value: string | number | null | undefined): number {
-  const count = typeof value === 'number' ? value : Number.parseInt(value ?? '', 10);
-  if (!Number.isFinite(count)) return DEFAULT_RAPID_OCR_WORKERS;
-  return Math.min(MAX_RAPID_OCR_WORKERS, Math.max(1, Math.trunc(count)));
 }
 
 function failedPaddleStatus(error: unknown): PaddleOcrStatus {

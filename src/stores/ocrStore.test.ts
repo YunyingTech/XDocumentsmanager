@@ -541,15 +541,65 @@ describe('OCR store', () => {
       ['ocr_api_url', 'http://ocr.local'],
       ['ocr_output_dir', 'C:\\OCR'],
       ['windows_ocr_language', 'en-US'],
-      ['rapidocr_worker_count', '8'],
+      ['rapidocr_worker_count', '99'],
       ['ocr_engine', 'windows'],
     ]);
     expect(useOcrStore.getState()).toMatchObject({
       apiUrl: 'http://ocr.local',
       outputDir: 'C:\\OCR',
       windowsLanguage: 'en-US',
-      rapidWorkerCount: 8,
+      rapidWorkerCount: 99,
       engine: 'windows',
     });
   });
+  it('runs 256 RapidOCR workers and queues the 257th file', async () => {
+    const first = deferred<string>();
+    const rest = deferred<string>();
+    mocks.runRapidOcr.mockReturnValueOnce(first.promise).mockReturnValue(rest.promise);
+    useOcrStore.setState({ engine: 'rapid', rapidWorkerCount: 256 });
+    const files = Array.from({ length: 257 }, (_, i) => ({ id: i + 1, file_name: `${i + 1}.pdf` }));
+    const submission = useOcrStore.getState().submitFileBatch(files);
+    try {
+      expect(mocks.runRapidOcr).toHaveBeenCalledTimes(256);
+      expect(useOcrStore.getState().tasks.filter((task) => task.status === 'queued')).toHaveLength(1);
+      first.resolve('first.md');
+      await vi.waitFor(() => expect(mocks.runRapidOcr).toHaveBeenCalledTimes(257));
+      expect(useOcrStore.getState().tasks.filter((task) => task.status === 'running')).toHaveLength(256);
+    } finally {
+      first.resolve('first.md');
+      rest.resolve('result.md');
+      await submission;
+    }
+    expect(useOcrStore.getState().tasks.every((task) => task.status === 'completed')).toBe(true);
+  });
+
+  it.each([[256, 256], [999, 256], [99, 99], [0, 1], [-1, 1], [3.9, 3], [NaN, 3]])(
+    'persists RapidOCR worker input %s as %s', async (input, expected) => {
+      await useOcrStore.getState().saveRapidWorkerCount(input);
+      expect(mocks.setSetting).toHaveBeenCalledWith('rapidocr_worker_count', String(expected));
+      expect(useOcrStore.getState().rapidWorkerCount).toBe(expected);
+    }
+  );
+
+  it('loads 256 workers and fetches enough files for automatic folder OCR', async () => {
+    const files = Array.from({ length: 257 }, (_, i) => ({ id: i + 1, file_name: `${i + 1}.pdf` }));
+    mocks.getSetting.mockImplementation((key: string) =>
+      Promise.resolve(key === 'rapidocr_worker_count' ? '256' : key === 'ocr_engine' ? 'rapid' : null));
+    mocks.listOcrCandidateRefs.mockImplementation((_folder: number, after: number, limit: number) =>
+      Promise.resolve(files.filter((file) => file.id > after).slice(0, limit)));
+    const running = deferred<string>();
+    mocks.runRapidOcr.mockReturnValue(running.promise);
+    const submission = useOcrStore.getState().queueFolderOcr(12);
+    try {
+      await vi.waitFor(() => expect(mocks.listOcrCandidateRefs).toHaveBeenCalled());
+      expect(mocks.listOcrCandidateRefs).toHaveBeenNthCalledWith(1, 12, 0, 256);
+      expect(useOcrStore.getState().rapidWorkerCount).toBe(256);
+      expect(mocks.runRapidOcr).toHaveBeenCalledTimes(256);
+    } finally {
+      running.resolve('result.md');
+      await submission;
+    }
+    expect(mocks.runRapidOcr).toHaveBeenCalledTimes(257);
+  });
+
 });

@@ -5,7 +5,7 @@ import { listFolders } from '../lib/tauri';
 interface FolderStore {
   folders: FolderInfo[];
   selectedFolderId: number | null;
-  indexProgress: IndexProgress | null;
+  indexProgressByJob: Record<number, IndexProgress>;
   isLoading: boolean;
 
   selectFolder: (id: number | null) => void;
@@ -16,7 +16,7 @@ interface FolderStore {
 export const useFolderStore = create<FolderStore>((set) => ({
   folders: [],
   selectedFolderId: null,
-  indexProgress: null,
+  indexProgressByJob: {},
   isLoading: false,
 
   selectFolder: (id) => set({ selectedFolderId: id }),
@@ -38,15 +38,24 @@ export const useFolderStore = create<FolderStore>((set) => ({
   },
 
   setIndexProgress: (progress) => {
-    set({ indexProgress: progress });
-    // Auto-reload folders when indexing completes or errors
-    if (progress && (progress.status === 'completed' || progress.status === 'error')) {
-      // Delay slightly so the user sees the "Done" state first
-      setTimeout(() => {
-        useFolderStore.getState().loadFolders();
-        // Clear progress after reload so the left side shows fresh persistent counts
+    if (!progress) {
+      set({ indexProgressByJob: {} });
+      return;
+    }
+    set((state) => ({
+      indexProgressByJob: { ...state.indexProgressByJob, [progress.job_id]: progress },
+    }));
+    if (progress.status === 'completed' || progress.status === 'error') {
+      // Each completion owns only its own snapshot, never another running job.
+      setTimeout(async () => {
+        await useFolderStore.getState().loadFolders();
         setTimeout(() => {
-          set({ indexProgress: null });
+          set((state) => {
+            if (state.indexProgressByJob[progress.job_id] !== progress) return state;
+            const remaining = { ...state.indexProgressByJob };
+            delete remaining[progress.job_id];
+            return { indexProgressByJob: remaining };
+          });
         }, 500);
       }, 2000);
     }

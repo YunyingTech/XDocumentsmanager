@@ -1,3 +1,4 @@
+import type { FolderInfo } from '../../types';
 import { useFolderStore } from '../../stores/folderStore';
 import { FolderStatusBadge } from './FolderStatusBadge';
 import { formatFileSize } from '../../lib/format';
@@ -14,6 +15,17 @@ interface FolderListProps {
 export function FolderList({ onAddFolder: _onAddFolder }: FolderListProps) {
   const { locale, t } = useI18n();
   const folders = useFolderStore((s) => s.folders);
+  const indexProgressByJob = useFolderStore((s) => s.indexProgressByJob);
+  const liveStatuses: Record<number, FolderInfo['last_scan_status']> = {};
+  // A restarted job takes precedence over the previous job's completion notice.
+  for (const progress of Object.values(indexProgressByJob).sort((a, b) => a.job_id - b.job_id)) {
+    if (progress.folder_id === null) continue;
+    if (progress.status === 'queued' || progress.status === 'running') {
+      liveStatuses[progress.folder_id] = 'running';
+    } else if (progress.status === 'completed' || progress.status === 'error') {
+      liveStatuses[progress.folder_id] = progress.status;
+    }
+  }
   const loadFolders = useFolderStore((s) => s.loadFolders);
   const [menuOpen, setMenuOpen] = useState<number | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
@@ -93,7 +105,7 @@ export function FolderList({ onAddFolder: _onAddFolder }: FolderListProps) {
               <h3 className="text-sm font-semibold text-surface-900 dark:text-surface-100 truncate">
                 {folder.display_name || folder.path.split('\\').pop() || folder.path}
               </h3>
-              <FolderStatusBadge status={folder.last_scan_status} />
+              <FolderStatusBadge status={liveStatuses[folder.id] ?? folder.last_scan_status} />
             </div>
             <p className="text-xs text-surface-400 mt-0.5 truncate">{folder.path}</p>
             <div className="flex items-center gap-4 mt-1.5 text-xs text-surface-500">
