@@ -1028,9 +1028,15 @@ mod tests {
             driver_version: Some("580.88".to_string()),
             error: None,
         };
-        assert!(install_profile(PaddleDeviceMode::Cuda12, &gpu)
-            .unwrap_err()
-            .contains("compute capability 7.5"));
+        let error = install_profile(PaddleDeviceMode::Cuda12, &gpu).unwrap_err();
+        if crate::paddle_runtime::profile_install_supported(RuntimeProfile::Cuda126) {
+            assert!(error.contains("compute capability 7.5"));
+        } else {
+            assert_eq!(
+                error,
+                crate::paddle_runtime::unsupported_profile_message(RuntimeProfile::Cuda126)
+            );
+        }
         assert_eq!(
             install_profile(PaddleDeviceMode::Auto, &gpu).unwrap(),
             RuntimeProfile::Cpu

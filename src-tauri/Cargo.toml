@@ -1,6 +1,6 @@
 [package]
 name = "xdocuments"
-version = "0.1.7"
+version = "0.1.8"
 description = "Desktop PDF document manager for local and SMB collections"
 authors = ["you"]
 license = "MIT"

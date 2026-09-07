@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.8 — 2026-09-07
+
+- Includes the multi-folder indexing, RapidOCR 256-worker and Elasticsearch visibility fixes prepared for 0.1.7.
+- Correct the PaddleOCR CUDA installation regression test to check hardware requirements on supported platforms and the platform-specific unsupported error on macOS. Product behavior is unchanged.
+- The 0.1.7 release attempt stopped at the macOS test gate and was not published. Its tag is preserved; 0.1.8 is the corrected release candidate.
+
 ## 0.1.7 — 2026-09-07
 
 ### Fixed
