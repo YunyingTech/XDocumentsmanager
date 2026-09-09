@@ -777,6 +777,7 @@ pub(crate) fn persist_ocr_text(
         return Err("OCR result did not contain Markdown text".to_string());
     }
     let document = {
+        engine.mark_elasticsearch_dirty();
         let conn = db.get_connection();
         conn.execute(
             "UPDATE files SET text_preview = ?1, text_length = ?2, ocr_applied = 1, indexed_at = datetime('now') WHERE id = ?3",
@@ -921,8 +922,8 @@ mod tests {
         assert!(text.contains("unique-embedded-ocr-token"));
         assert_eq!(
             engine
-                .search("unique-embedded-ocr-token", None, 10)
-                .unwrap()[0]
+                .search("unique-embedded-ocr-token", None, 0, 10)
+                .unwrap().hits[0]
                 .file_id,
             7
         );
@@ -1048,9 +1049,9 @@ mod tests {
 
         assert_eq!(engine.backend_status().backend, "elasticsearch");
         for query in ["unique-elastic-ocr-token", "供应商审计", "中国"] {
-            let hits = engine.search(query, None, 10).unwrap();
+            let hits = engine.search(query, None, 0, 10).unwrap();
             assert_eq!(
-                hits.first().map(|hit| hit.file_id),
+                hits.hits.first().map(|hit| hit.file_id),
                 Some(41),
                 "OCR text must be searchable immediately after persistence: {query}"
             );

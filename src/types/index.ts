@@ -80,6 +80,12 @@ export interface IndexProgress {
   files_errors: number;
   bytes_processed: number;
   current_file: string | null;
+  phase: 'discovering' | 'processing' | 'synchronizing' | 'completed' | 'failed';
+  files_discovered: number;
+  elapsed_ms: number;
+  estimated_remaining_ms: number | null;
+  files_per_second: number;
+  bytes_per_second: number;
 }
 
 export interface SearchResult {
@@ -89,6 +95,7 @@ export interface SearchResult {
   folder_path: string;
   absolute_path: string;
   matched_terms: string[];
+  highlight_terms: string[];
   match_model: string | null;
 }
 
@@ -102,6 +109,10 @@ export interface OcrCandidateRef {
 export interface SearchResponse {
   results: SearchResult[];
   elapsed_ms: number;
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
 }
 
 export interface SearchQueryAnalysis {

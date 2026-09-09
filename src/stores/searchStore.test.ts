@@ -35,6 +35,12 @@ describe('search store', () => {
       analysisError: null,
       searchElapsedMs: null,
       searchStartedAt: null,
+      page: 0,
+      pageSize: 25,
+      total: 0,
+      totalPages: 0,
+      activeTerms: [],
+      activeQueryModel: null,
     });
   });
 
@@ -49,6 +55,10 @@ describe('search store', () => {
     const response: SearchResponse = {
       results: [searchResultFixture(fileFixture({ id: 7 }))],
       elapsed_ms: 17,
+      total: 51,
+      page: 0,
+      page_size: 25,
+      total_pages: 3,
     };
     mocks.search.mockResolvedValue(response);
     useSearchStore.getState().setQuery('compliance report');
@@ -59,7 +69,8 @@ describe('search store', () => {
     expect(mocks.search).toHaveBeenCalledWith(
       'compliance report',
       { folder_id: 10 },
-      100,
+      0,
+      25,
       expect.any(Number),
       ['audit', 'risk'],
       'gpt-test',
@@ -82,9 +93,9 @@ describe('search store', () => {
     useSearchStore.getState().setQuery('second');
     const secondSearch = useSearchStore.getState().doSearch();
 
-    second.resolve({ results: [searchResultFixture(fileFixture({ id: 2 }))], elapsed_ms: 2 });
+    second.resolve({ results: [searchResultFixture(fileFixture({ id: 2 }))], elapsed_ms: 2, total: 1, page: 0, page_size: 25, total_pages: 1 });
     await secondSearch;
-    first.resolve({ results: [searchResultFixture(fileFixture({ id: 1 }))], elapsed_ms: 20 });
+    first.resolve({ results: [searchResultFixture(fileFixture({ id: 1 }))], elapsed_ms: 20, total: 1, page: 0, page_size: 25, total_pages: 1 });
     await firstSearch;
 
     expect(useSearchStore.getState().results[0].file.id).toBe(2);
@@ -94,7 +105,7 @@ describe('search store', () => {
   it('uses the latest analysis and searches selected terms with its model', async () => {
     const analysis: SearchQueryAnalysis = { terms: ['supplier', 'risk'], elapsed_ms: 3, model: 'gpt-test' };
     mocks.analyzeSearchQuery.mockResolvedValue(analysis);
-    mocks.search.mockResolvedValue({ results: [], elapsed_ms: 1 });
+    mocks.search.mockResolvedValue({ results: [], elapsed_ms: 1, total: 0, page: 0, page_size: 25, total_pages: 0 });
     useSearchStore.getState().setQuery('supplier review');
 
     await useSearchStore.getState().analyzeQuery();
@@ -105,10 +116,21 @@ describe('search store', () => {
     expect(mocks.search).toHaveBeenCalledWith(
       'supplier review',
       {},
-      100,
+      0,
+      25,
       expect.any(Number),
       ['risk'],
       'gpt-test',
     );
+  });
+
+  it('loads another page with the active AI terms and ignores stale page responses', async () => {
+    mocks.search.mockResolvedValue({ results: [searchResultFixture(fileFixture({ id: 26 }))], elapsed_ms: 4, total: 60, page: 1, page_size: 25, total_pages: 3 });
+    useSearchStore.setState({ query: 'risk', total: 60, totalPages: 3, activeTerms: ['audit'], activeQueryModel: 'gpt-test' });
+
+    await useSearchStore.getState().goToPage(1);
+
+    expect(mocks.search).toHaveBeenCalledWith('risk', {}, 1, 25, expect.any(Number), ['audit'], 'gpt-test');
+    expect(useSearchStore.getState()).toMatchObject({ page: 1, total: 60, totalPages: 3 });
   });
 });

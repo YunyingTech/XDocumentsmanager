@@ -38,6 +38,9 @@ export interface OcrTask {
   resultPath?: string;
   submittedAt: number;
   engine: OcrEngine;
+  startedAt?: number;
+  completedAt?: number;
+  estimatedRemainingMs?: number | null;
 }
 
 const WINDOWS_OCR_CONCURRENCY = 2;
@@ -324,7 +327,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
           set((state) => ({
             tasks: state.tasks.map((item) =>
               item.taskId === task.taskId
-                ? { ...item, status: 'running' as const, queuedAhead: null, progress: 0 }
+                ? { ...item, status: 'running' as const, queuedAhead: null, progress: 0, startedAt: Date.now(), estimatedRemainingMs: null }
                 : batchTaskIds.has(item.taskId) && item.status === 'queued' && item.queuedAhead !== null
                   ? { ...item, queuedAhead: Math.max(0, item.queuedAhead - 1) }
                   : item
@@ -342,7 +345,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
                 item.taskId === task.taskId
                   ? item.status === 'cancelled'
                     ? item
-                    : { ...item, status: 'completed' as const, progress: 100, resultPath }
+                    : { ...item, status: 'completed' as const, progress: 100, resultPath, completedAt: Date.now(), estimatedRemainingMs: 0 }
                   : item
               ),
               bulkOcrQueued,
@@ -354,7 +357,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
                 item.taskId === task.taskId
                   ? item.status === 'cancelled'
                     ? item
-                    : { ...item, status: 'failed' as const, error: String(error) }
+                    : { ...item, status: 'failed' as const, error: String(error), completedAt: Date.now(), estimatedRemainingMs: null }
                   : item
               ),
               bulkOcrQueued,
@@ -398,7 +401,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
         set((s) => ({
           tasks: s.tasks.map((t) =>
             t.taskId === task.taskId && t.status !== 'cancelled'
-              ? { ...t, status: 'failed' as const, error: String(error) }
+              ? { ...t, status: 'failed' as const, error: String(error), completedAt: Date.now(), estimatedRemainingMs: null }
               : t
           ),
           bulkOcrQueued,
@@ -511,6 +514,8 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
       progress: null,
       submittedAt: Date.now(),
       engine: 'mineru',
+      startedAt: Date.now(),
+      estimatedRemainingMs: null,
     };
     set((s) => ({ tasks: [...s.tasks, task] }));
 
@@ -519,7 +524,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
       set((s) => ({
         tasks: s.tasks.map((t) =>
           t.fileId === fileId && t.taskId === 'sync'
-            ? { ...t, status: 'completed' as const, resultPath }
+            ? { ...t, status: 'completed' as const, progress: 100, resultPath, completedAt: Date.now(), estimatedRemainingMs: 0 }
             : t
         ),
       }));
@@ -528,7 +533,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
       set((s) => ({
         tasks: s.tasks.map((t) =>
           t.fileId === fileId && t.taskId === 'sync'
-            ? { ...t, status: 'failed' as const, error: String(e) }
+            ? { ...t, status: 'failed' as const, error: String(e), completedAt: Date.now(), estimatedRemainingMs: null }
             : t
         ),
       }));
@@ -561,6 +566,9 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
                   queuedAhead: status.queued_ahead ?? null,
                   progress: status.progress ?? null,
                   error: status.error_message ?? t.error,
+                  startedAt: newStatus === 'running' ? (t.startedAt ?? Date.now()) : t.startedAt,
+                  completedAt: isTerminalOcrStatus(newStatus) ? Date.now() : t.completedAt,
+                  estimatedRemainingMs: newStatus === 'completed' ? 0 : t.estimatedRemainingMs,
                 }
               : t
           ),
@@ -580,7 +588,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
             set((s) => ({
               tasks: s.tasks.map((t) =>
                 t.taskId === task.taskId
-                  ? { ...t, status: 'failed' as const, error: translate(useUIStore.getState().language, 'tasks.resultDownloadFailed', { error: String(e) }) }
+                  ? { ...t, status: 'failed' as const, error: translate(useUIStore.getState().language, 'tasks.resultDownloadFailed', { error: String(e) }), completedAt: Date.now(), estimatedRemainingMs: null }
                   : t
               ),
             }));
@@ -624,7 +632,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
       const resultPath = await getOcrResult(taskId, fileId);
       set((s) => ({
         tasks: s.tasks.map((t) =>
-          t.taskId === taskId ? { ...t, resultPath, status: 'completed' as const } : t
+          t.taskId === taskId ? { ...t, resultPath, status: 'completed' as const, progress: 100, completedAt: Date.now(), estimatedRemainingMs: 0 } : t
         ),
       }));
     } catch (e: any) {
@@ -802,7 +810,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
     set((state) => ({
       tasks: state.tasks.map((item) =>
         item.taskId === taskId
-          ? { ...item, status: 'cancelled' as const, queuedAhead: null, error: undefined }
+          ? { ...item, status: 'cancelled' as const, queuedAhead: null, error: undefined, completedAt: Date.now(), estimatedRemainingMs: null }
           : item
       ),
       bulkOcrQueued,
@@ -828,7 +836,7 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
     set((state) => ({
       tasks: state.tasks.map((task) =>
         ['submitting', 'queued', 'running'].includes(task.status)
-          ? { ...task, status: 'cancelled' as const, queuedAhead: null, error: undefined }
+          ? { ...task, status: 'cancelled' as const, queuedAhead: null, error: undefined, completedAt: Date.now(), estimatedRemainingMs: null }
           : task
       ),
       bulkOcrQueued: 0,
@@ -852,9 +860,15 @@ export const useOcrStore = create<OcrStore>((set, get) => ({
       set((state) => ({
         tasks: state.tasks.map((task) => {
           const update = updates.get(task.taskId);
-          return update && (task.engine === 'rapid' || task.engine === 'windows' || task.engine === 'paddle') && task.status !== 'cancelled'
-            ? { ...task, status: 'running' as const, progress: update.progress }
-            : task;
+          if (!update || !['rapid', 'windows', 'paddle'].includes(task.engine) || task.status === 'cancelled') {
+            return task;
+          }
+          const startedAt = task.startedAt ?? Date.now();
+          const elapsed = Math.max(0, Date.now() - startedAt);
+          const estimatedRemainingMs = update.progress > 0 && update.progress < 100
+            ? Math.round(elapsed * (100 - update.progress) / update.progress)
+            : update.progress >= 100 ? 0 : null;
+          return { ...task, status: 'running' as const, progress: update.progress, startedAt, estimatedRemainingMs };
         }),
       }));
     });

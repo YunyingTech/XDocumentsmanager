@@ -11,6 +11,7 @@ mod watcher;
 use db::Database;
 use search::SearchEngine;
 use commands::ocr_control::OcrTaskManager;
+use commands::rapid_ocr::RapidOcrWorkerPool;
 use tauri::Manager;
 use std::path::{Path, PathBuf};
 
@@ -73,6 +74,7 @@ pub fn run() {
             app.manage(search_engine);
             app.manage(database);
             app.manage(OcrTaskManager::default());
+            app.manage(RapidOcrWorkerPool::default());
 
             let app_handle = app.handle().clone();
             std::thread::Builder::new()
@@ -84,10 +86,12 @@ pub fn run() {
                             Ok(()) => {
                                 let database = app_handle.state::<Database>();
                                 let conn = database.get_connection();
-                                if let Err(error) = engine.rebuild(&conn) {
-                                    log::error!("Failed to populate Elasticsearch: {}", error);
-                                } else {
-                                    log::info!("Bundled Elasticsearch is ready and synchronized");
+                                match engine.synchronize_elasticsearch(&conn) {
+                                    Ok(true) => log::info!("Bundled Elasticsearch was rebuilt and synchronized"),
+                                    Ok(false) => log::info!("Bundled Elasticsearch is already synchronized"),
+                                    Err(error) => {
+                                        log::error!("Failed to synchronize Elasticsearch: {}", error);
+                                    }
                                 }
                             }
                             Err(error) => log::error!("Bundled Elasticsearch failed to start: {}", error),

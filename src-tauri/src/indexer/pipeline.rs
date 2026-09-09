@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
+use rayon::prelude::*;
+use rusqlite::{params, params_from_iter, Connection, Transaction, TransactionBehavior};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::indexer::{hasher, walker};
@@ -11,6 +13,7 @@ use crate::search::engine::SearchDocument;
 use crate::search::SearchEngine;
 
 const SEARCH_BATCH_SIZE: usize = 250;
+const DB_BATCH_SIZE: usize = 500;
 const DELETE_BATCH_SIZE: usize = 500;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
 
@@ -50,14 +53,36 @@ pub struct PipelineConfig {
     pub mode: IndexMode,
     pub ocr_after_index: bool,
     pub max_file_size_bytes: i64,
+    pub indexer_threads: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ExistingFile {
     file_size: i64,
     modified_at: String,
     content_hash: String,
     index_status: String,
+}
+
+struct PreparedFile {
+    file_path: PathBuf,
+    relative: String,
+    file_name: String,
+    action: PreparedAction,
+}
+
+enum PreparedAction {
+    Error(String),
+    Unchanged,
+    Skip {
+        file_size: i64,
+        modified_at: String,
+    },
+    Index {
+        file_size: i64,
+        modified_at: String,
+        content_hash: Result<String, String>,
+    },
 }
 
 #[derive(Default)]
@@ -76,6 +101,7 @@ pub fn run_index(
     app_handle: &AppHandle,
     job_id: i64,
 ) -> Result<(), String> {
+    let started = Instant::now();
     if !config.root_path.is_dir() {
         return Err(format!(
             "Index root is not an accessible directory: {}",
@@ -98,139 +124,189 @@ pub fn run_index(
     )
     .map_err(|error| error.to_string())?;
 
-    let estimated_total: u64 = db
-        .query_row(
-            "SELECT COUNT(*) FROM files WHERE folder_id = ?1",
-            [config.folder_id],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or(0)
-        .max(0) as u64;
+    let mut discovered_files = Vec::new();
+    let mut walk_errors = 0u64;
+    let discovery_stats = ScanStats::default();
+    let mut discovery_progress = Instant::now() - PROGRESS_INTERVAL;
+    for entry in walker::walk_pdf_files(&config.root_path) {
+        match entry {
+            Ok(path) => discovered_files.push(path),
+            Err(error) => {
+                walk_errors += 1;
+                log::warn!("Directory traversal error: {error}");
+            }
+        }
+        if discovery_progress.elapsed() >= PROGRESS_INTERVAL {
+            emit_progress(
+                &config,
+                app_handle,
+                job_id,
+                0,
+                discovered_files.len() as u64,
+                &discovery_stats,
+                "running",
+                "discovering",
+                None,
+                started,
+                started,
+            );
+            discovery_progress = Instant::now();
+        }
+    }
+    let estimated_total = discovered_files.len() as u64;
     update_job(db, job_id, estimated_total, &ScanStats::default());
+    let existing_files = load_existing_files(db, config.folder_id)?;
+    let processing_started = Instant::now();
 
     let engine = app_handle.try_state::<SearchEngine>();
     let mut search_upserts = Vec::with_capacity(SEARCH_BATCH_SIZE);
     let mut search_deletes = Vec::with_capacity(SEARCH_BATCH_SIZE);
-    let mut stats = ScanStats::default();
-    let mut walk_errors = 0u64;
+    let mut search_batch_dirty = false;
+    let mut stats = ScanStats {
+        errors: walk_errors,
+        ..ScanStats::default()
+    };
     let mut last_progress = Instant::now() - PROGRESS_INTERVAL;
 
-    for entry in walker::walk_pdf_files(&config.root_path) {
-        let file_path = match entry {
-            Ok(path) => path,
-            Err(error) => {
-                walk_errors += 1;
-                stats.errors += 1;
-                log::warn!("Directory traversal error: {error}");
-                continue;
-            }
-        };
-        stats.processed += 1;
-
-        let relative = relative_path(&config.root_path, &file_path);
-        db.execute(
-            "INSERT OR IGNORE INTO scan_seen (relative_path) VALUES (?1)",
-            [&relative],
-        )
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(config.indexer_threads.clamp(1, 64))
+        .thread_name(|index| format!("index-hash-{index}"))
+        .build()
         .map_err(|error| error.to_string())?;
+    let chunk_size = config
+        .indexer_threads
+        .clamp(1, 64)
+        .saturating_mul(8)
+        .clamp(32, DB_BATCH_SIZE);
 
-        let file_name = file_path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "unknown.pdf".to_string());
-        let metadata = match std::fs::metadata(&file_path) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                stats.errors += 1;
-                log::warn!("Cannot read metadata for {}: {error}", file_path.display());
-                emit_if_due(
-                    &config,
-                    app_handle,
-                    db,
-                    job_id,
-                    estimated_total,
-                    &stats,
-                    Some(file_name),
-                    &mut last_progress,
-                );
-                continue;
-            }
-        };
-        let file_size = metadata.len() as i64;
-        let modified_at = format_system_time(metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH));
-        let existing = existing_file(db, config.folder_id, &relative)?;
+    for chunk in discovered_files.chunks(chunk_size) {
+        let prepared = prepare_files(&pool, &config, &existing_files, chunk);
+        let transaction = Transaction::new_unchecked(db, TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
 
-        if file_size > config.max_file_size_bytes
-            && existing.as_ref().is_some_and(|item| {
-                item.file_size == file_size
-                    && item.modified_at == modified_at
-                    && item.index_status == "skipped"
-            })
-        {
-            stats.skipped += 1;
-        } else if file_size > config.max_file_size_bytes {
-            let file_id = mark_skipped_file(
-                db,
-                &config,
-                &file_path,
-                &relative,
-                &file_name,
-                file_size,
-                &modified_at,
-                existing.as_ref(),
-            )?;
-            stats.skipped += 1;
-            if config.mode == IndexMode::Incremental {
-                search_deletes.push(file_id);
-            }
-        } else if should_process(config.mode, existing.as_ref(), file_size, &modified_at) {
-            match hasher::hash_file_md5(&file_path) {
-                Ok(content_hash) => {
-                    let content_changed = existing
-                        .as_ref()
-                        .map_or(true, |item| item.content_hash != content_hash);
-                    let file_id = upsert_file(
-                        db,
+        for prepared_file in prepared {
+            let PreparedFile {
+                file_path,
+                relative,
+                file_name,
+                action,
+            } = prepared_file;
+            stats.processed += 1;
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO scan_seen (relative_path) VALUES (?1)",
+                    [&relative],
+                )
+                .map_err(|error| error.to_string())?;
+            let existing = existing_files.get(&relative);
+
+            match action {
+                PreparedAction::Error(error) => {
+                    stats.errors += 1;
+                    log::warn!("Cannot inspect {}: {error}", file_path.display());
+                }
+                PreparedAction::Unchanged => stats.skipped += 1,
+                PreparedAction::Skip {
+                    file_size,
+                    modified_at,
+                } => {
+                    if !search_batch_dirty {
+                        if let Some(engine) = engine.as_deref() {
+                            engine.mark_elasticsearch_dirty();
+                        }
+                        search_batch_dirty = true;
+                    }
+                    let file_id = mark_skipped_file(
+                        &transaction,
                         &config,
                         &file_path,
                         &relative,
                         &file_name,
                         file_size,
                         &modified_at,
-                        &content_hash,
-                        content_changed,
+                        existing,
                     )?;
-                    stats.indexed += 1;
-                    stats.bytes_processed += file_size.max(0) as u64;
+                    stats.skipped += 1;
                     if config.mode == IndexMode::Incremental {
-                        search_upserts.push(crate::search::engine::document_for_file(db, file_id)?);
+                        search_deletes.push(file_id);
                     }
                 }
-                Err(error) => {
-                    stats.errors += 1;
-                    log::warn!("Cannot hash {}: {error}", file_path.display());
-                }
+                PreparedAction::Index {
+                    file_size,
+                    modified_at,
+                    content_hash,
+                } => match content_hash {
+                    Ok(content_hash) => {
+                        let content_changed =
+                            existing.map_or(true, |item| item.content_hash != content_hash);
+                        if !search_batch_dirty {
+                            if let Some(engine) = engine.as_deref() {
+                                engine.mark_elasticsearch_dirty();
+                            }
+                            search_batch_dirty = true;
+                        }
+                        let file_id = upsert_file(
+                            &transaction,
+                            &config,
+                            &file_path,
+                            &relative,
+                            &file_name,
+                            file_size,
+                            &modified_at,
+                            &content_hash,
+                            content_changed,
+                        )?;
+                        stats.indexed += 1;
+                        stats.bytes_processed += file_size.max(0) as u64;
+                        if config.mode == IndexMode::Incremental {
+                            search_upserts.push(crate::search::engine::document_for_file(
+                                &transaction,
+                                file_id,
+                            )?);
+                        }
+                    }
+                    Err(error) => {
+                        stats.errors += 1;
+                        log::warn!("Cannot hash {}: {error}", file_path.display());
+                    }
+                },
             }
-        } else {
-            stats.skipped += 1;
-        }
 
+            emit_if_due(
+                &config,
+                app_handle,
+                db,
+                job_id,
+                estimated_total,
+                &stats,
+                Some(file_name),
+                &mut last_progress,
+                started,
+                processing_started,
+            );
+        }
+        transaction.commit().map_err(|error| error.to_string())?;
         if search_upserts.len() + search_deletes.len() >= SEARCH_BATCH_SIZE {
             flush_search_changes(engine.as_deref(), &mut search_upserts, &mut search_deletes);
+            search_batch_dirty = false;
         }
-        emit_if_due(
-            &config,
-            app_handle,
-            db,
-            job_id,
-            estimated_total,
-            &stats,
-            Some(file_name),
-            &mut last_progress,
-        );
     }
 
     flush_search_changes(engine.as_deref(), &mut search_upserts, &mut search_deletes);
+
+    emit_progress(
+        &config,
+        app_handle,
+        job_id,
+        estimated_total,
+        estimated_total,
+        &stats,
+        "running",
+        "synchronizing",
+        None,
+        started,
+        processing_started,
+    );
 
     if walk_errors == 0 {
         stats.deleted = delete_missing_files(db, &config, engine.as_deref(), &mut search_deletes)?;
@@ -264,15 +340,19 @@ pub fn run_index(
         }
     }
 
-    update_job(db, job_id, stats.processed, &stats);
+    update_job(db, job_id, estimated_total, &stats);
     emit_progress(
         &config,
         app_handle,
         job_id,
-        stats.processed,
+        estimated_total,
+        estimated_total,
         &stats,
         "completed",
+        "completed",
         None,
+        started,
+        processing_started,
     );
 
     let _ = db.execute_batch("PRAGMA analysis_limit = 1000; PRAGMA optimize;");
@@ -285,6 +365,24 @@ pub fn run_index(
         stats.errors
     );
     Ok(())
+}
+
+fn prepare_files(
+    pool: &rayon::ThreadPool,
+    config: &PipelineConfig,
+    existing_files: &HashMap<String, ExistingFile>,
+    files: &[PathBuf],
+) -> Vec<PreparedFile> {
+    pool.install(|| {
+        files
+            .par_iter()
+            .map(|file_path| {
+                let relative = relative_path(&config.root_path, file_path);
+                let existing = existing_files.get(&relative);
+                prepare_file(config, file_path, relative, existing)
+            })
+            .collect()
+    })
 }
 
 fn should_process(
@@ -302,26 +400,80 @@ fn should_process(
         })
 }
 
-fn existing_file(
+fn prepare_file(
+    config: &PipelineConfig,
+    file_path: &Path,
+    relative: String,
+    existing: Option<&ExistingFile>,
+) -> PreparedFile {
+    let file_name = file_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "unknown.pdf".to_string());
+    let action = match std::fs::metadata(file_path) {
+        Err(error) => PreparedAction::Error(error.to_string()),
+        Ok(metadata) => {
+            let file_size = metadata.len() as i64;
+            let modified_at =
+                format_system_time(metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH));
+            if file_size > config.max_file_size_bytes
+                && existing.is_some_and(|item| {
+                    item.file_size == file_size
+                        && item.modified_at == modified_at
+                        && item.index_status == "skipped"
+                })
+            {
+                PreparedAction::Unchanged
+            } else if file_size > config.max_file_size_bytes {
+                PreparedAction::Skip {
+                    file_size,
+                    modified_at,
+                }
+            } else if should_process(config.mode, existing, file_size, &modified_at) {
+                PreparedAction::Index {
+                    file_size,
+                    modified_at,
+                    content_hash: hasher::hash_file_md5(file_path)
+                        .map_err(|error| error.to_string()),
+                }
+            } else {
+                PreparedAction::Unchanged
+            }
+        }
+    };
+    PreparedFile {
+        file_path: file_path.to_path_buf(),
+        relative,
+        file_name,
+        action,
+    }
+}
+
+fn load_existing_files(
     db: &Connection,
     folder_id: i64,
-    relative_path: &str,
-) -> Result<Option<ExistingFile>, String> {
-    db.query_row(
-        "SELECT file_size_bytes, file_modified_at, content_hash, index_status
-         FROM files WHERE folder_id = ?1 AND relative_path = ?2",
-        params![folder_id, relative_path],
-        |row| {
-            Ok(ExistingFile {
-                file_size: row.get(0)?,
-                modified_at: row.get(1)?,
-                content_hash: row.get(2)?,
-                index_status: row.get(3)?,
-            })
-        },
-    )
-    .optional()
-    .map_err(|error| error.to_string())
+) -> Result<HashMap<String, ExistingFile>, String> {
+    let mut statement = db
+        .prepare(
+            "SELECT relative_path, file_size_bytes, file_modified_at, content_hash, index_status
+             FROM files WHERE folder_id = ?1",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([folder_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                ExistingFile {
+                    file_size: row.get(1)?,
+                    modified_at: row.get(2)?,
+                    content_hash: row.get(3)?,
+                    index_status: row.get(4)?,
+                },
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<HashMap<_, _>, _>>()
+        .map_err(|error| error.to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -490,6 +642,10 @@ fn delete_missing_files(
             break;
         }
 
+        if let Some(engine) = engine {
+            engine.mark_elasticsearch_dirty();
+        }
+
         let ids: Vec<i64> = stale.iter().map(|(id, _)| *id).collect();
         if config.mode == IndexMode::Incremental {
             pending_search_deletes.extend(ids.iter().copied());
@@ -541,6 +697,8 @@ fn emit_if_due(
     stats: &ScanStats,
     current_file: Option<String>,
     last_progress: &mut Instant,
+    started: Instant,
+    processing_started: Instant,
 ) {
     if last_progress.elapsed() < PROGRESS_INTERVAL {
         return;
@@ -552,9 +710,13 @@ fn emit_if_due(
         app_handle,
         job_id,
         total,
+        estimated_total,
         stats,
         "running",
+        "processing",
         current_file,
+        started,
+        processing_started,
     );
     *last_progress = Instant::now();
 }
@@ -577,15 +739,34 @@ fn update_job(db: &Connection, job_id: i64, total: u64, stats: &ScanStats) {
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_progress(
     config: &PipelineConfig,
     app_handle: &AppHandle,
     job_id: i64,
     total: u64,
+    discovered: u64,
     stats: &ScanStats,
     status: &str,
+    phase: &str,
     current_file: Option<String>,
+    started: Instant,
+    phase_started: Instant,
 ) {
+    let elapsed_ms = duration_ms(started.elapsed());
+    let phase_seconds = phase_started.elapsed().as_secs_f64().max(0.001);
+    let activity_count = if phase == "discovering" {
+        discovered
+    } else {
+        stats.processed
+    };
+    let files_per_second = activity_count as f64 / phase_seconds;
+    let bytes_per_second = stats.bytes_processed as f64 / phase_seconds;
+    let estimated_remaining_ms = match phase {
+        "completed" => Some(0),
+        "processing" => estimate_remaining_ms(total, stats.processed, files_per_second),
+        _ => None,
+    };
     let _ = app_handle.emit(
         "indexing:progress",
         IndexProgress {
@@ -601,8 +782,29 @@ fn emit_progress(
             files_errors: stats.errors as i64,
             bytes_processed: stats.bytes_processed as i64,
             current_file,
+            phase: phase.to_string(),
+            files_discovered: discovered as i64,
+            elapsed_ms,
+            estimated_remaining_ms,
+            files_per_second,
+            bytes_per_second,
         },
     );
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn estimate_remaining_ms(total: u64, processed: u64, files_per_second: f64) -> Option<u64> {
+    if processed == 0 || total <= processed || files_per_second <= 0.0 {
+        return None;
+    }
+    Some(
+        (((total - processed) as f64 / files_per_second) * 1_000.0)
+            .round()
+            .min(u64::MAX as f64) as u64,
+    )
 }
 
 fn relative_path(root: &Path, file_path: &Path) -> String {
@@ -624,13 +826,15 @@ fn format_system_time(value: SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        delete_missing_files, format_system_time, should_process, upsert_file, ExistingFile,
-        IndexMode, PipelineConfig,
+        delete_missing_files, estimate_remaining_ms, format_system_time, prepare_file,
+        prepare_files, should_process, upsert_file, ExistingFile, IndexMode, PipelineConfig,
+        PreparedAction,
     };
     use crate::db::schema;
     use rusqlite::Connection;
+    use std::collections::HashMap;
     use std::fs;
-    use std::time::SystemTime;
+    use std::time::{Instant, SystemTime};
 
     fn existing() -> ExistingFile {
         ExistingFile {
@@ -686,6 +890,110 @@ mod tests {
     }
 
     #[test]
+    fn calculates_processing_eta_from_measured_throughput() {
+        assert_eq!(estimate_remaining_ms(100, 25, 5.0), Some(15_000));
+        assert_eq!(estimate_remaining_ms(100, 0, 5.0), None);
+        assert_eq!(estimate_remaining_ms(100, 100, 5.0), None);
+    }
+
+    #[test]
+    fn prepared_incremental_file_skips_hashing_when_metadata_is_unchanged() {
+        let root = std::env::temp_dir().join(format!(
+            "xdocuments-prepare-pipeline-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("same.pdf");
+        fs::write(&path, b"%PDF unchanged").unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        let item = ExistingFile {
+            file_size: metadata.len() as i64,
+            modified_at: format_system_time(metadata.modified().unwrap()),
+            content_hash: "stored-hash".to_string(),
+            index_status: "indexed".to_string(),
+        };
+        let config = PipelineConfig {
+            root_path: root.clone(),
+            folder_id: 1,
+            mode: IndexMode::Incremental,
+            ocr_after_index: false,
+            max_file_size_bytes: 1_000_000,
+            indexer_threads: 2,
+        };
+
+        let prepared = prepare_file(&config, &path, "same.pdf".to_string(), Some(&item));
+
+        assert!(matches!(prepared.action, PreparedAction::Unchanged));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn synthetic_index_preparation_handles_fresh_and_restart_scans() {
+        let root = std::env::temp_dir().join(format!(
+            "xdocuments-synthetic-index-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let files = (0..256)
+            .map(|index| {
+                let path = root.join(format!("document-{index:03}.pdf"));
+                fs::write(&path, format!("%PDF synthetic document {index}")).unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+        let config = PipelineConfig {
+            root_path: root.clone(),
+            folder_id: 1,
+            mode: IndexMode::Incremental,
+            ocr_after_index: false,
+            max_file_size_bytes: 1_000_000,
+            indexer_threads: 4,
+        };
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+
+        let fresh_started = Instant::now();
+        let fresh = prepare_files(&pool, &config, &HashMap::new(), &files);
+        let fresh_ms = fresh_started.elapsed().as_millis();
+        assert_eq!(
+            fresh
+                .iter()
+                .filter(|file| matches!(file.action, PreparedAction::Index { .. }))
+                .count(),
+            files.len()
+        );
+
+        let existing = files
+            .iter()
+            .map(|path| {
+                let metadata = fs::metadata(path).unwrap();
+                (
+                    path.file_name().unwrap().to_string_lossy().to_string(),
+                    ExistingFile {
+                        file_size: metadata.len() as i64,
+                        modified_at: format_system_time(metadata.modified().unwrap()),
+                        content_hash: "cached-hash".to_string(),
+                        index_status: "indexed".to_string(),
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let restart_started = Instant::now();
+        let restart = prepare_files(&pool, &config, &existing, &files);
+        let restart_ms = restart_started.elapsed().as_millis();
+        assert!(restart
+            .iter()
+            .all(|file| matches!(file.action, PreparedAction::Unchanged)));
+        println!(
+            "synthetic_index_benchmark files={} threads=4 fresh_ms={} restart_ms={}",
+            files.len(),
+            fresh_ms,
+            restart_ms
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn changed_content_resets_ocr_and_missing_files_are_removed() {
         let root = std::env::temp_dir().join(format!(
             "xdocuments-incremental-pipeline-{}",
@@ -705,6 +1013,7 @@ mod tests {
             mode: IndexMode::Incremental,
             ocr_after_index: true,
             max_file_size_bytes: 1_000_000,
+            indexer_threads: 2,
         };
 
         let first_id = upsert_file(

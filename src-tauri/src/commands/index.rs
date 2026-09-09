@@ -19,7 +19,7 @@ pub async fn start_indexing(
 
     // Validate and create the job under one application-level database lock. The
     // partial unique index also protects this across independent connections.
-    let (folder_path, max_file_size_bytes, job_id): (String, i64, i64) = {
+    let (folder_path, max_file_size_bytes, indexer_threads, job_id): (String, i64, usize, i64) = {
         let conn = db.get_connection();
         let active_job = conn
             .query_row(
@@ -51,6 +51,16 @@ pub async fn start_indexing(
             .and_then(|value| value.parse::<i64>().ok())
             .unwrap_or(500)
             .clamp(1, 1_000_000);
+        let indexer_threads = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'indexer_threads'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(4)
+            .clamp(1, 64);
         conn.execute(
             "INSERT INTO index_jobs (folder_id, job_type, status, started_at)
              VALUES (?1, ?2, 'running', datetime('now'))",
@@ -74,7 +84,12 @@ pub async fn start_indexing(
             [folder_id],
         ).map_err(|e| e.to_string())?;
 
-        (folder_path, max_file_size_mb * 1024 * 1024, job_id)
+        (
+            folder_path,
+            max_file_size_mb * 1024 * 1024,
+            indexer_threads,
+            job_id,
+        )
     };
 
     // Spawn the actual indexing work in the background — return job_id immediately
@@ -87,6 +102,7 @@ pub async fn start_indexing(
         mode,
         ocr_after_index,
         max_file_size_bytes,
+        indexer_threads,
     };
 
     // Clone db_path for use after the spawn_blocking closure
@@ -179,6 +195,12 @@ fn emit_failed_progress(
             files_errors: 1,
             bytes_processed: 0,
             current_file: None,
+            phase: "failed".to_string(),
+            files_discovered: 0,
+            elapsed_ms: 0,
+            estimated_remaining_ms: None,
+            files_per_second: 0.0,
+            bytes_per_second: 0.0,
         },
     );
 }

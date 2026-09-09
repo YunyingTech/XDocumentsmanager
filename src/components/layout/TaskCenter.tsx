@@ -8,6 +8,7 @@ import { useFolderStore } from '../../stores/folderStore';
 import { useOcrStore, type OcrTask } from '../../stores/ocrStore';
 import type { IndexProgress } from '../../types';
 import { useI18n, type TranslationKey } from '../../lib/i18n';
+import { averageCompletedOcrDuration, estimateBulkOcrRemaining, ocrWorkerCount } from '../../lib/ocrEta';
 
 const activeOcrStatuses: OcrTask['status'][] = ['submitting', 'queued', 'running'];
 const ocrStatusKeys: Record<OcrTask['status'], TranslationKey> = {
@@ -28,6 +29,7 @@ export function TaskCenter() {
   const tasks = useOcrStore((s) => s.tasks);
   const bulkOcrRunning = useOcrStore((s) => s.bulkOcrRunning);
   const bulkOcrQueued = useOcrStore((s) => s.bulkOcrQueued);
+  const rapidWorkerCount = useOcrStore((s) => s.rapidWorkerCount);
   const clearTasks = useOcrStore((s) => s.clearTasks);
   const downloadResult = useOcrStore((s) => s.downloadResult);
   const cancelTask = useOcrStore((s) => s.cancelTask);
@@ -40,6 +42,17 @@ export function TaskCenter() {
   const activeCount = (bulkOcrRunning ? Math.max(activeOcr, bulkOcrQueued, 1) : activeOcr) + indexActive;
   const failedCount = failedOcr + indexFailed;
   const hasHistory = tasks.length > 0 || indexTasks.length > 0;
+  const averageOcrMsByEngine = {
+    mineru: averageCompletedOcrDuration(tasks, 'mineru'),
+    windows: averageCompletedOcrDuration(tasks, 'windows'),
+    paddle: averageCompletedOcrDuration(tasks, 'paddle'),
+    rapid: averageCompletedOcrDuration(tasks, 'rapid'),
+  };
+  const bulkEngine = tasks.find((task) => activeOcrStatuses.includes(task.status))?.engine;
+  const averageOcrMs = bulkEngine ? averageOcrMsByEngine[bulkEngine] : null;
+  const bulkEta = bulkOcrRunning
+    ? estimateBulkOcrRemaining(tasks, bulkOcrQueued, ocrWorkerCount(bulkEngine, rapidWorkerCount), averageOcrMs)
+    : null;
 
   useEffect(() => {
     if (!open) return;
@@ -79,6 +92,9 @@ export function TaskCenter() {
                   {t('tasks.active', { count: activeCount })}
                 </span>
               )}
+              {bulkEta !== null && (
+                <span className="text-[11px] tabular-nums text-surface-400">{t('tasks.eta', { duration: formatRemaining(bulkEta) })}</span>
+              )}
             </div>
             {activeOcr > 0 || bulkOcrRunning ? (
               <button type="button" onClick={() => void cancelAllTasks()} className="icon-button text-surface-400 hover:text-red-600" title={t('tasks.cancelAllOcr')} aria-label={t('tasks.cancelAllOcr')}>
@@ -107,7 +123,7 @@ export function TaskCenter() {
                 <p className="px-2 pb-1.5 text-[11px] font-semibold text-surface-400">OCR</p>
                 <div className="space-y-1">
                   {[...tasks].reverse().map((task) => (
-                    <OcrTaskRow key={`${task.fileId}-${task.taskId}-${task.submittedAt}`} task={task} onDownload={downloadResult} onCancel={cancelTask} />
+                    <OcrTaskRow key={`${task.fileId}-${task.taskId}-${task.submittedAt}`} task={task} averageDurationMs={averageOcrMsByEngine[task.engine]} workerCount={ocrWorkerCount(task.engine, rapidWorkerCount)} onDownload={downloadResult} onCancel={cancelTask} />
                   ))}
                 </div>
               </div>
@@ -134,6 +150,13 @@ function IndexTask({ progress, folderName }: { progress: IndexProgress; folderNa
   const percentage = progress.files_total > 0 ? Math.min(100, Math.round((processed / progress.files_total) * 100)) : 0;
   const active = progress.status === 'running' || progress.status === 'queued';
   const failed = progress.status === 'error';
+  const phaseKey: Record<IndexProgress['phase'], TranslationKey> = {
+    discovering: 'tasks.indexDiscovering',
+    processing: 'tasks.indexProcessing',
+    synchronizing: 'tasks.indexSynchronizing',
+    completed: 'tasks.completedStatus',
+    failed: 'tasks.failedStatus',
+  };
 
   return (
     <div className="rounded-md bg-surface-50 p-3 dark:bg-surface-800/60">
@@ -161,18 +184,30 @@ function IndexTask({ progress, folderName }: { progress: IndexProgress; folderNa
             <span className="truncate">{progress.current_file || t('tasks.filesProcessed', { count: processed.toLocaleString(locale) })}</span>
             {progress.files_total > 0 && <span className="shrink-0 tabular-nums">{processed.toLocaleString(locale)} / {progress.files_total.toLocaleString(locale)}</span>}
           </div>
+          {active && (
+            <p className="mt-1 truncate text-[11px] tabular-nums text-surface-400">
+              {t(phaseKey[progress.phase])}
+              {progress.files_per_second > 0 ? ` · ${progress.files_per_second.toFixed(1)} ${t('tasks.filesPerSecond')}` : ''}
+              {progress.estimated_remaining_ms !== null ? ` · ${t('tasks.eta', { duration: formatRemaining(progress.estimated_remaining_ms) })}` : ''}
+            </p>
+          )}
         </div>
       </div>
     </div>
   );
 }
 
-function OcrTaskRow({ task, onDownload, onCancel }: { task: OcrTask; onDownload: (taskId: string, fileId: number) => Promise<void>; onCancel: (taskId: string) => Promise<void> }) {
+function OcrTaskRow({ task, averageDurationMs, workerCount, onDownload, onCancel }: { task: OcrTask; averageDurationMs: number | null; workerCount: number; onDownload: (taskId: string, fileId: number) => Promise<void>; onCancel: (taskId: string) => Promise<void> }) {
   const { t } = useI18n();
   const active = activeOcrStatuses.includes(task.status);
   const failed = task.status === 'failed';
   const cancelled = task.status === 'cancelled';
   const percentage = task.progress == null ? null : Math.min(100, Math.max(0, Math.round(task.progress)));
+  const estimatedRemainingMs = task.estimatedRemainingMs ?? (
+    task.status === 'queued' && task.queuedAhead !== null && averageDurationMs !== null
+      ? Math.ceil((task.queuedAhead + 1) / Math.max(1, workerCount)) * averageDurationMs
+      : null
+  );
 
   return (
     <div className="flex min-h-12 items-center gap-2.5 rounded-md px-2 py-2 hover:bg-surface-50 dark:hover:bg-surface-800/60">
@@ -190,6 +225,9 @@ function OcrTaskRow({ task, onDownload, onCancel }: { task: OcrTask; onDownload:
         {task.error ? <p className="mt-0.5 truncate text-[11px] text-red-500" title={task.error}>{task.error}</p>
           : task.status === 'queued' && task.queuedAhead != null ? <p className="mt-0.5 text-[11px] text-surface-400">{t('tasks.queueAhead', { count: task.queuedAhead })}</p>
           : <p className="mt-0.5 text-[11px] text-surface-400">{task.engine === 'rapid' ? 'RapidOCR' : task.engine === 'windows' ? 'Windows OCR' : task.engine === 'paddle' ? 'PaddleOCR' : 'MinerU'} - {t('tasks.ocrProcessing')}</p>}
+        {active && estimatedRemainingMs !== null && (
+          <p className="mt-0.5 text-[11px] tabular-nums text-surface-400">{t('tasks.eta', { duration: formatRemaining(estimatedRemainingMs) })}</p>
+        )}
       </div>
       {active && (
         <button type="button" onClick={() => void onCancel(task.taskId)} className="icon-button shrink-0 text-surface-400 hover:text-red-600" title={t('tasks.cancel')} aria-label={t('tasks.cancelFor', { name: task.fileName })}>
@@ -208,4 +246,13 @@ function OcrTaskRow({ task, onDownload, onCancel }: { task: OcrTask; onDownload:
       )}
     </div>
   );
+}
+
+function formatRemaining(milliseconds: number): string {
+  const seconds = Math.max(0, Math.round(milliseconds / 1_000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
 }

@@ -85,6 +85,12 @@ pub struct IndexProgress {
     pub files_errors: i64,
     pub bytes_processed: i64,
     pub current_file: Option<String>,
+    pub phase: String,
+    pub files_discovered: i64,
+    pub elapsed_ms: u64,
+    pub estimated_remaining_ms: Option<u64>,
+    pub files_per_second: f64,
+    pub bytes_per_second: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +101,7 @@ pub struct SearchResult {
     pub folder_path: String,
     pub absolute_path: String,
     pub matched_terms: Vec<String>,
+    pub highlight_terms: Vec<String>,
     pub match_model: Option<String>,
 }
 
@@ -102,6 +109,10 @@ pub struct SearchResult {
 pub struct SearchResponse {
     pub results: Vec<SearchResult>,
     pub elapsed_ms: u64,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+    pub total_pages: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

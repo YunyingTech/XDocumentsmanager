@@ -7209,7 +7209,7 @@ dependencies = [
 
 [[package]]
 name = "xdocuments"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -7220,6 +7220,7 @@ dependencies = [
  "md-5",
  "notify",
  "notify-debouncer-full",
+ "rayon",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",

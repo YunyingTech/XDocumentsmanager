@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
@@ -28,19 +29,25 @@ fn emit_progress(app: &AppHandle, request_id: u64, stage: &'static str, progress
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn search(
     query: String,
     terms: Option<Vec<String>>,
     query_model: Option<String>,
     filters: Option<SearchFilters>,
-    limit: Option<i64>,
+    page: Option<i64>,
+    page_size: Option<i64>,
     request_id: Option<u64>,
     app: AppHandle,
     db: State<'_, Database>,
 ) -> Result<SearchResponse, String> {
     let started = Instant::now();
     let request_id = request_id.unwrap_or(0);
-    let limit = limit.unwrap_or(100).clamp(1, 500) as usize;
+    let page = page.unwrap_or(0).max(0);
+    let page_size = page_size.unwrap_or(25).clamp(10, 100);
+    let offset = page
+        .checked_mul(page_size)
+        .ok_or_else(|| "Search page offset is too large".to_string())? as usize;
     let selected_terms = normalize_selected_terms(terms.as_deref());
     let engine_query = selected_terms_query(&selected_terms).unwrap_or_else(|| query.clone());
     let match_model = if selected_terms.is_empty() {
@@ -50,14 +57,19 @@ pub async fn search(
             .map(|model| model.trim().chars().take(128).collect::<String>())
             .filter(|model| !model.is_empty())
     };
+    let highlight_terms = search_highlight_terms(&query, &selected_terms);
     emit_progress(&app, request_id, "searching", 50);
     log::info!("Search {}: querying full-text index", request_id);
     let search_app = app.clone();
     let search_filters = filters.clone();
-    let hit_limit = limit.saturating_mul(5).min(1_000);
-    let hits = match tokio::task::spawn_blocking(move || {
+    let search_page = match tokio::task::spawn_blocking(move || {
         let engine = search_app.state::<SearchEngine>();
-        engine.search(&engine_query, search_filters.as_ref(), hit_limit)
+        engine.search(
+            &engine_query,
+            search_filters.as_ref(),
+            offset,
+            page_size as usize,
+        )
     })
     .await
     {
@@ -75,18 +87,27 @@ pub async fn search(
         }
     };
     emit_progress(&app, request_id, "resolving", 78);
-    log::info!("Search {}: resolving {} index hits", request_id, hits.len());
+    log::info!(
+        "Search {}: resolving {} of {} index hits",
+        request_id,
+        search_page.hits.len(),
+        search_page.total
+    );
     let conn = db.get_connection();
-    let mut results = Vec::with_capacity(limit);
+    let hydrated = load_files(
+        &conn,
+        &search_page
+            .hits
+            .iter()
+            .map(|hit| hit.file_id)
+            .collect::<Vec<_>>(),
+    )?;
+    let mut results = Vec::with_capacity(search_page.hits.len());
 
-    for hit in hits {
-        let (file, folder_path) = match load_file(&conn, hit.file_id) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        if !matches_filters(&file, filters.as_ref()) {
+    for hit in search_page.hits {
+        let Some((file, folder_path)) = hydrated.get(&hit.file_id).cloned() else {
             continue;
-        }
+        };
         let absolute_path = Path::new(&folder_path)
             .join(&file.relative_path)
             .to_string_lossy()
@@ -94,11 +115,7 @@ pub async fn search(
         let searchable_preview =
             normalize_cjk_ocr_spacing(file.text_preview.as_deref().unwrap_or_default());
         let matched_terms = matched_ai_terms(&file, &selected_terms);
-        let snippet_query = if matched_terms.is_empty() {
-            query.clone()
-        } else {
-            matched_terms.join(" ")
-        };
+        let snippet_query = highlight_terms.join(" ");
         results.push(SearchResult {
             snippet: make_snippet(&searchable_preview, &snippet_query),
             file,
@@ -106,16 +123,21 @@ pub async fn search(
             folder_path,
             absolute_path,
             matched_terms,
+            highlight_terms: highlight_terms.clone(),
             match_model: match_model.clone(),
         });
-        if results.len() == limit {
-            break;
-        }
     }
+
+    let total = search_page.total.min(i64::MAX as u64) as i64;
+    let total_pages = if total == 0 {
+        0
+    } else {
+        (total + page_size - 1) / page_size
+    };
 
     let _ = conn.execute(
         "INSERT INTO search_history (query_text, result_count) VALUES (?1, ?2)",
-        rusqlite::params![query, results.len() as i64],
+        rusqlite::params![query, total],
     );
     emit_progress(&app, request_id, "completed", 100);
     log::info!(
@@ -127,6 +149,10 @@ pub async fn search(
     Ok(SearchResponse {
         results,
         elapsed_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+        total,
+        page,
+        page_size,
+        total_pages,
     })
 }
 
@@ -165,7 +191,10 @@ fn selected_terms_query(terms: &[String]) -> Option<String> {
 fn escape_search_term(term: &str) -> String {
     let mut escaped = String::with_capacity(term.len());
     for character in term.chars() {
-        if matches!(character, '+' | '|' | '-' | '(' | ')' | '"' | '*' | '~' | '\\' | ':') {
+        if matches!(
+            character,
+            '+' | '|' | '-' | '(' | ')' | '"' | '*' | '~' | '\\' | ':'
+        ) {
             escaped.push('\\');
         }
         escaped.push(character);
@@ -203,6 +232,44 @@ fn matching_ai_terms(searchable: &str, terms: &[String]) -> Vec<String> {
         .collect()
 }
 
+fn search_highlight_terms(query: &str, selected_terms: &[String]) -> Vec<String> {
+    let source = if selected_terms.is_empty() {
+        query
+            .split_whitespace()
+            .map(|term| {
+                let trimmed = term.trim_matches(|character: char| {
+                    matches!(
+                        character,
+                        '"' | '\'' | '(' | ')' | '+' | '-' | '|' | '*' | '~'
+                    )
+                });
+                trimmed
+                    .rsplit_once(':')
+                    .map_or(trimmed, |(_, value)| value)
+                    .trim()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+    } else {
+        selected_terms.to_vec()
+    };
+    let mut terms = Vec::new();
+    for term in source {
+        let normalized = term.trim();
+        if !normalized.is_empty()
+            && !terms
+                .iter()
+                .any(|existing: &String| existing.eq_ignore_ascii_case(normalized))
+        {
+            terms.push(normalized.chars().take(128).collect());
+        }
+        if terms.len() == 16 {
+            break;
+        }
+    }
+    terms
+}
+
 fn make_snippet(content: &str, query: &str) -> String {
     let lower = content.to_lowercase();
     let position = query
@@ -225,14 +292,35 @@ fn make_snippet(content: &str, query: &str) -> String {
     content[start..].chars().take(320).collect()
 }
 
-fn load_file(conn: &rusqlite::Connection, file_id: i64) -> Result<(FileInfo, String), String> {
-    conn.query_row(
-        "SELECT f.id, f.folder_id, f.relative_path, f.file_name, f.file_extension, f.file_size_bytes, f.content_hash, f.page_count, f.text_length, f.file_created_at, f.file_modified_at, f.indexed_at, f.index_status, f.index_error, f.text_preview, f.ocr_applied, f.pdf_title, f.pdf_author, f.pdf_subject, f.pdf_keywords, wf.path FROM files f JOIN watched_folders wf ON wf.id = f.folder_id WHERE f.id = ?1",
-        [file_id],
-        |row| Ok((crate::db::row_to_file_info(row)?, row.get(20)?)),
-    ).map_err(|e| e.to_string())
+fn load_files(
+    conn: &rusqlite::Connection,
+    file_ids: &[i64],
+) -> Result<HashMap<i64, (FileInfo, String)>, String> {
+    if file_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders = std::iter::repeat("?")
+        .take(file_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT f.id, f.folder_id, f.relative_path, f.file_name, f.file_extension, f.file_size_bytes, f.content_hash, f.page_count, f.text_length, f.file_created_at, f.file_modified_at, f.indexed_at, f.index_status, f.index_error, f.text_preview, f.ocr_applied, f.pdf_title, f.pdf_author, f.pdf_subject, f.pdf_keywords, wf.path FROM files f JOIN watched_folders wf ON wf.id = f.folder_id WHERE f.id IN ({placeholders})"
+        ))
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(rusqlite::params_from_iter(file_ids), |row| {
+            Ok((crate::db::row_to_file_info(row)?, row.get(20)?))
+        })
+        .map_err(|error| error.to_string())?;
+    rows.map(|row| {
+        let value = row.map_err(|error| error.to_string())?;
+        Ok((value.0.id, value))
+    })
+    .collect()
 }
 
+#[cfg(test)]
 fn matches_filters(file: &FileInfo, filters: Option<&SearchFilters>) -> bool {
     let Some(filters) = filters else { return true };
     if filters
@@ -281,7 +369,7 @@ fn matches_filters(file: &FileInfo, filters: Option<&SearchFilters>) -> bool {
 mod tests {
     use super::{
         make_snippet, matches_filters, matching_ai_terms, normalize_selected_terms,
-        selected_terms_query,
+        search_highlight_terms, selected_terms_query,
     };
     use crate::models::{FileInfo, SearchFilters};
 
@@ -319,9 +407,7 @@ mod tests {
         ];
         assert_eq!(
             selected_terms_query(&normalize_selected_terms(Some(&terms))),
-            Some(
-                "(SSL certificate) | (TLS certificate) | (security \\| audit)".to_string()
-            )
+            Some("(SSL certificate) | (TLS certificate) | (security \\| audit)".to_string())
         );
     }
 
@@ -386,5 +472,17 @@ mod tests {
 
         let cjk = format!("{}中国科学院网络安全报告", "前置内容".repeat(100));
         assert!(make_snippet(&cjk, "网络安全").contains("网络安全报告"));
+    }
+
+    #[test]
+    fn extracts_safe_deduplicated_highlight_terms() {
+        assert_eq!(
+            search_highlight_terms("name:audit.pdf AUDIT \"风险\"", &[]),
+            vec!["audit.pdf", "AUDIT", "风险"]
+        );
+        assert_eq!(
+            search_highlight_terms("ignored", &["supply risk".to_string()]),
+            vec!["supply risk"]
+        );
     }
 }

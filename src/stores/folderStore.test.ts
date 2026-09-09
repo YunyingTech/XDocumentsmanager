@@ -56,6 +56,12 @@ describe('folder store', () => {
       files_errors: 0,
       bytes_processed: 100,
       current_file: null,
+      phase: 'completed',
+      files_discovered: 12,
+      elapsed_ms: 1000,
+      estimated_remaining_ms: 0,
+      files_per_second: 12,
+      bytes_per_second: 100,
     });
 
     expect(listFolders).not.toHaveBeenCalled();
@@ -70,7 +76,10 @@ describe('folder store', () => {
 function progress(job: number, folder: number, status = 'running'): IndexProgress {
   return { job_id: job, folder_id: folder, status, index_mode: 'incremental',
     ocr_after_index: false, files_total: 10, files_processed: 4, files_indexed: 4,
-    files_skipped: 0, files_errors: 0, bytes_processed: 100, current_file: 'four.pdf' };
+    files_skipped: 0, files_errors: 0, bytes_processed: 100, current_file: 'four.pdf',
+    phase: status === 'completed' ? 'completed' : status === 'error' ? 'failed' : 'processing',
+    files_discovered: 10, elapsed_ms: 1000, estimated_remaining_ms: 1500,
+    files_per_second: 4, bytes_per_second: 100 };
 }
 
 describe('concurrent index progress regression', () => {

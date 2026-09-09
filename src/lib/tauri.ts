@@ -74,12 +74,13 @@ export async function reindexFile(fileId: number): Promise<void> {
 export async function search(
   query: string,
   filters?: SearchFilters,
-  limit: number = 100,
+  page: number = 0,
+  pageSize: number = 25,
   requestId?: number,
   terms?: string[],
   queryModel?: string,
 ): Promise<SearchResponse> {
-  return invoke('search', { query, terms, queryModel, filters, limit, requestId });
+  return invoke('search', { query, terms, queryModel, filters, page, pageSize, requestId });
 }
 
 export async function analyzeSearchQuery(query: string): Promise<SearchQueryAnalysis> {

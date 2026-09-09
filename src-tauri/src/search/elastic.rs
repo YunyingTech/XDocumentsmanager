@@ -275,6 +275,24 @@ impl ElasticRuntime {
         Ok(true)
     }
 
+    pub fn document_count(&self) -> Result<Option<u64>, String> {
+        let Some(endpoint) = self.endpoint()? else {
+            return Ok(None);
+        };
+        self.ensure_index(&endpoint)?;
+        let response = self
+            .client
+            .get(format!("{}/{}/_count", endpoint, INDEX_NAME))
+            .send()
+            .map_err(|e| e.to_string())?;
+        let value = ensure_success_json(response, "count Elasticsearch documents")?;
+        value
+            .get("count")
+            .and_then(Value::as_u64)
+            .map(Some)
+            .ok_or_else(|| "Elasticsearch count response has no count".to_string())
+    }
+
     fn rebuild_inner(&self, conn: &rusqlite::Connection, endpoint: &str) -> Result<(), String> {
         let delete = self
             .client
@@ -318,8 +336,9 @@ impl ElasticRuntime {
         &self,
         query: &str,
         filters: Option<&SearchFilters>,
+        offset: usize,
         limit: usize,
-    ) -> Result<Option<Vec<SearchHit>>, String> {
+    ) -> Result<Option<super::engine::SearchPage>, String> {
         let Some(endpoint) = self.endpoint()? else {
             return Ok(None);
         };
@@ -353,7 +372,9 @@ impl ElasticRuntime {
             }
         }
         let payload = json!({
+            "from": offset,
             "size": limit,
+            "track_total_hits": true,
             "_source": ["file_id"],
             "query": {
                 "bool": {
@@ -386,7 +407,15 @@ impl ElasticRuntime {
                 })
             })
             .collect();
-        Ok(Some(results))
+        let total = value
+            .pointer("/hits/total/value")
+            .and_then(Value::as_u64)
+            .or_else(|| value.pointer("/hits/total").and_then(Value::as_u64))
+            .ok_or_else(|| "Elasticsearch response has no total hit count".to_string())?;
+        Ok(Some(super::engine::SearchPage {
+            hits: results,
+            total,
+        }))
     }
 
     pub fn status(&self) -> SearchBackendStatus {
@@ -459,7 +488,14 @@ impl ElasticRuntime {
             .post(format!("{}/_bulk", endpoint))
             // Incremental writes must be searchable before reporting completion.
             // Full rebuilds perform a single explicit refresh after all batches.
-            .query(&[("refresh", if wait_for_refresh { "wait_for" } else { "false" })])
+            .query(&[(
+                "refresh",
+                if wait_for_refresh {
+                    "wait_for"
+                } else {
+                    "false"
+                },
+            )])
             .header("content-type", "application/x-ndjson")
             .body(body)
             .send()
@@ -663,7 +699,7 @@ fn copy_directory(source: &Path, destination: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{bulk_has_fatal_errors, prepare_runtime_config, ElasticRuntime};
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     #[test]
     fn runtime_config_keeps_jvm_writes_out_of_the_distribution() {
@@ -719,7 +755,9 @@ mod tests {
             let endpoint = format!("http://{}", listener.local_addr().unwrap());
             let server = std::thread::spawn(move || {
                 let (mut socket, _) = listener.accept().unwrap();
-                socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
                 let mut reader = BufReader::new(socket.try_clone().unwrap());
                 let mut request_line = String::new();
                 reader.read_line(&mut request_line).unwrap();
@@ -727,25 +765,95 @@ mod tests {
                 loop {
                     let mut line = String::new();
                     reader.read_line(&mut line).unwrap();
-                    if line == "\r\n" || line.is_empty() { break; }
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
                     if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
                         length = value.trim().parse::<usize>().unwrap();
                     }
                 }
                 reader.read_exact(&mut vec![0; length]).unwrap();
                 let body = r#"{"errors":false,"items":[]}"#;
-                write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
                 request_line
             });
             let runtime = ElasticRuntime::new().unwrap();
             if incremental {
                 runtime.apply_changes_inner(&endpoint, &[], &[42]).unwrap();
             } else {
-                runtime.send_bulk(&endpoint, "{}\n".to_string(), false).unwrap();
+                runtime
+                    .send_bulk(&endpoint, "{}\n".to_string(), false)
+                    .unwrap();
             }
             let refresh = if incremental { "wait_for" } else { "false" };
-            assert_eq!(server.join().unwrap(), format!("POST /_bulk?refresh={refresh} HTTP/1.1\r\n"));
+            assert_eq!(
+                server.join().unwrap(),
+                format!("POST /_bulk?refresh={refresh} HTTP/1.1\r\n")
+            );
         }
+    }
+
+    #[test]
+    fn search_sends_pagination_and_returns_exact_total() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).unwrap();
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse::<usize>().unwrap();
+                }
+            }
+            let mut request_body = vec![0; length];
+            reader.read_exact(&mut request_body).unwrap();
+            let response = r#"{"hits":{"total":{"value":123,"relation":"eq"},"hits":[{"_score":2.5,"_source":{"file_id":42}}]}}"#;
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response.len(),
+                response
+            )
+            .unwrap();
+            (
+                request_line,
+                serde_json::from_slice::<Value>(&request_body).unwrap(),
+            )
+        });
+        let runtime = ElasticRuntime::new().unwrap();
+        *runtime.endpoint.write().unwrap() = Some(endpoint);
+        *runtime.version.write().unwrap() = Some("8.17.0".to_string());
+
+        let page = runtime.search("audit", None, 25, 10).unwrap().unwrap();
+
+        assert_eq!(page.total, 123);
+        assert_eq!(page.hits[0].file_id, 42);
+        let (request_line, body) = server.join().unwrap();
+        assert_eq!(request_line, "POST /xdocuments-v1/_search HTTP/1.1\r\n");
+        assert_eq!(body["from"], 25);
+        assert_eq!(body["size"], 10);
+        assert_eq!(body["track_total_hits"], true);
     }
 
     #[test]

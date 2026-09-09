@@ -528,6 +528,40 @@ describe('OCR store', () => {
     expect(useOcrStore.getState().tasks[0].progress).toBe(10);
   });
 
+  it('estimates remaining OCR time from elapsed page progress', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(10_000);
+    try {
+      useOcrStore.setState({
+        tasks: [{
+          taskId: 'local-eta',
+          fileId: 1,
+          fileName: 'estimate.pdf',
+          status: 'running',
+          queuedAhead: null,
+          progress: 10,
+          submittedAt: 1,
+          startedAt: 2_000,
+          engine: 'rapid',
+        }],
+      });
+
+      useOcrStore.getState().updateWindowsProgress({
+        task_id: 'local-eta',
+        file_id: 1,
+        processed_pages: 5,
+        total_pages: 20,
+        progress: 25,
+      });
+
+      await vi.waitFor(() => expect(useOcrStore.getState().tasks[0]).toMatchObject({
+        progress: 25,
+        estimatedRemainingMs: 24_000,
+      }));
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it('persists OCR settings and refreshes engine health', async () => {
     mocks.setSetting.mockResolvedValue(undefined);
     mocks.getWindowsOcrStatus.mockResolvedValue({ available: true, languages: [], error: null });

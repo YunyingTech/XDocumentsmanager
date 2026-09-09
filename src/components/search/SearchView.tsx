@@ -31,6 +31,7 @@ export function SearchView() {
   const searchSelectedTerms = useSearchStore((s) => s.searchSelectedTerms);
   const searchElapsedMs = useSearchStore((s) => s.searchElapsedMs);
   const searchStartedAt = useSearchStore((s) => s.searchStartedAt);
+  const total = useSearchStore((s) => s.total);
   const [clock, setClock] = useState(Date.now());
   const [expandedAnalysis, setExpandedAnalysis] = useState<SearchQueryAnalysis | null>(null);
   const selectedResult = results.find((result) => result.file.id === selectedResultId);
@@ -55,7 +56,7 @@ export function SearchView() {
           <SearchBar />
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-3 text-xs text-surface-400">
-          {results.length > 0 && <span>{plural('search.resultCount', results.length)}</span>}
+          {total > 0 && <span>{plural('search.resultCount', total)}</span>}
           {elapsedMs !== null && <span className="font-mono tabular-nums">{t('search.duration', { duration: formatDuration(elapsedMs) })}</span>}
         </div>
       </div>
@@ -175,7 +176,7 @@ export function SearchView() {
           />
         ) : (
           <div className={`grid h-full min-h-0 ${selectedResult ? 'md:grid-cols-[minmax(280px,38%)_minmax(0,1fr)]' : ''}`}>
-            <div className={`min-h-0 overflow-auto ${selectedResult ? 'hidden border-r border-surface-200 md:block dark:border-surface-800' : ''}`}>
+            <div className={`min-h-0 ${selectedResult ? 'hidden border-r border-surface-200 md:block dark:border-surface-800' : ''}`}>
               <SearchResults />
             </div>
             {selectedResult && (

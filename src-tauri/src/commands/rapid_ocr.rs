@@ -1,6 +1,6 @@
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -81,6 +81,7 @@ struct WorkerEnvironment {
 struct WorkerMessage {
     #[serde(rename = "type")]
     kind: Option<String>,
+    task_id: Option<String>,
     processed_pages: Option<u32>,
     total_pages: Option<u32>,
     progress: Option<f64>,
@@ -89,6 +90,18 @@ struct WorkerMessage {
     accelerated: Option<bool>,
     fallback_reason: Option<String>,
     error: Option<String>,
+}
+
+#[derive(Default)]
+pub struct RapidOcrWorkerPool {
+    idle: Mutex<Vec<PersistentWorker>>,
+}
+
+struct PersistentWorker {
+    child: Child,
+    stdin: ChildStdin,
+    output: mpsc::Receiver<String>,
+    stderr: Arc<Mutex<String>>,
 }
 
 #[tauri::command]
@@ -119,8 +132,8 @@ pub async fn get_rapid_ocr_status(
         )?;
         resolve_status(mode, profile, paths, &script)
     })
-        .await
-        .map_err(|error| format!("RapidOCR status task failed: {error}"))?
+    .await
+    .map_err(|error| format!("RapidOCR status task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -197,20 +210,6 @@ pub async fn run_rapid_ocr(
     .await
     .map_err(|error| format!("RapidOCR runtime provisioning task failed: {error}"))??;
 
-    let python_for_probe = runtime_paths.python.clone();
-    let paths_for_probe = runtime_paths.clone();
-    let script_for_probe = script.clone();
-    let environment = tokio::task::spawn_blocking(move || {
-        probe_environment(&python_for_probe, &paths_for_probe, &script_for_probe, mode)
-    })
-    .await
-    .map_err(|error| format!("RapidOCR runtime check task failed: {error}"))??;
-    if !environment.available {
-        return Err(environment
-            .error
-            .unwrap_or_else(|| "RapidOCR runtime check failed".to_string()));
-    }
-
     let registration = tasks.register(&task_id)?;
     let cancellation = registration.cancellation_flag();
     let (file_path, file_name) = get_file_abs_path(&db, file_id)?;
@@ -226,19 +225,14 @@ pub async fn run_rapid_ocr(
     let model = model.unwrap_or_else(|| "PP-OCRv6_small".to_string());
     let started = Instant::now();
     log::info!(
-        "RapidOCR [{}] started: file_id={}, file='{}', language='{}', model='{}', device_mode='{}', provider='{}', accelerated={}",
+        "RapidOCR [{}] started: file_id={}, file='{}', language='{}', model='{}', device_mode='{}'",
         task_id,
         file_id,
         file_name,
         language,
         model,
-        mode.as_str(),
-        environment.active_provider.as_deref().unwrap_or("unknown"),
-        environment.accelerated
+        mode.as_str()
     );
-    if let Some(reason) = &environment.fallback_reason {
-        log::warn!("RapidOCR [{}] acceleration fallback: {}", task_id, reason);
-    }
 
     let python_path = runtime_paths.python.clone();
     let app_for_worker = app.clone();
@@ -247,7 +241,9 @@ pub async fn run_rapid_ocr(
     let file_for_worker = file_name.clone();
     let output_for_worker = output_path.clone();
     let worker_result = tokio::task::spawn_blocking(move || {
+        let pool = app_for_worker.state::<RapidOcrWorkerPool>();
         run_worker(
+            &pool,
             &python_path,
             &runtime_paths,
             &script,
@@ -293,6 +289,7 @@ pub async fn run_rapid_ocr(
 
 #[allow(clippy::too_many_arguments)]
 fn run_worker(
+    pool: &RapidOcrWorkerPool,
     python: &Path,
     runtime_paths: &RuntimePaths,
     script: &Path,
@@ -307,83 +304,214 @@ fn run_worker(
     app: &AppHandle,
     cancellation: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), String> {
-    let mut command = hidden_command(python);
-    paddle_runtime::configure_python_command(&mut command, runtime_paths);
-    let mut child = command
-        .arg(script)
-        .args([
-            "--input",
+    pool.execute(
+        python,
+        runtime_paths,
+        script,
+        input,
+        output,
+        language,
+        model,
+        mode,
+        file_id,
+        task_id,
+        file_name,
+        app,
+        cancellation,
+    )
+}
+
+impl RapidOcrWorkerPool {
+    #[allow(clippy::too_many_arguments)]
+    fn execute(
+        &self,
+        python: &Path,
+        runtime_paths: &RuntimePaths,
+        script: &Path,
+        input: &str,
+        output: &Path,
+        language: &str,
+        model: &str,
+        mode: RapidDeviceMode,
+        file_id: i64,
+        task_id: &str,
+        file_name: &str,
+        app: &AppHandle,
+        cancellation: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<(), String> {
+        let mut worker = self
+            .idle
+            .lock()
+            .map_err(|error| error.to_string())?
+            .pop()
+            .map(Ok)
+            .unwrap_or_else(|| PersistentWorker::spawn(python, runtime_paths, script))?;
+        if let Ok(mut stderr) = worker.stderr.lock() {
+            stderr.clear();
+        }
+        let result = worker.run(
             input,
-            "--language",
+            output,
             language,
-            "--model",
             model,
-            "--device",
-            mode.as_str(),
-        ])
-        .arg("--output")
-        .arg(output)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            format!(
-                "Cannot start RapidOCR worker with '{}': {error}",
-                python.display()
-            )
-        })?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "RapidOCR stdout unavailable".to_string())?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "RapidOCR stderr unavailable".to_string())?;
-    let (sender, receiver) = mpsc::channel();
-    let stdout_thread = std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            let _ = sender.send(line);
+            mode,
+            file_id,
+            task_id,
+            file_name,
+            app,
+            cancellation,
+        );
+        let reusable = worker.child.try_wait().is_ok_and(|status| status.is_none());
+        if reusable {
+            self.idle
+                .lock()
+                .map_err(|error| error.to_string())?
+                .push(worker);
         }
-    });
-    let stderr_text = Arc::new(Mutex::new(String::new()));
-    let stderr_target = stderr_text.clone();
-    let stderr_thread = std::thread::spawn(move || {
-        let mut reader = BufReader::new(stderr);
-        let _ = reader.read_to_string(&mut stderr_target.lock().unwrap());
-    });
-    let mut worker_error = None;
-    let status = loop {
-        while let Ok(line) = receiver.try_recv() {
-            handle_worker_line(&line, file_id, task_id, file_name, app, &mut worker_error);
-        }
-        if cancellation.load(Ordering::Acquire) {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = stdout_thread.join();
-            let _ = stderr_thread.join();
-            return Err("OCR task cancelled".to_string());
-        }
-        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
-            break status;
-        }
-        std::thread::sleep(Duration::from_millis(75));
-    };
-    let _ = stdout_thread.join();
-    let _ = stderr_thread.join();
-    while let Ok(line) = receiver.try_recv() {
-        handle_worker_line(&line, file_id, task_id, file_name, app, &mut worker_error);
+        result
     }
-    if !status.success() {
-        let stderr = stderr_text.lock().unwrap();
-        return Err(worker_error.unwrap_or_else(|| {
-            format!(
-                "RapidOCR worker exited with {status}: {}",
-                tail(&stderr, 4_000)
-            )
-        }));
+}
+
+impl PersistentWorker {
+    fn spawn(python: &Path, runtime_paths: &RuntimePaths, script: &Path) -> Result<Self, String> {
+        let mut command = hidden_command(python);
+        paddle_runtime::configure_python_command(&mut command, runtime_paths);
+        let mut child = command
+            .arg(script)
+            .arg("--server")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| {
+                format!(
+                    "Cannot start RapidOCR worker with '{}': {error}",
+                    python.display()
+                )
+            })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "RapidOCR stdin unavailable".to_string())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "RapidOCR stdout unavailable".to_string())?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "RapidOCR stderr unavailable".to_string())?;
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                let _ = sender.send(line);
+            }
+        });
+        let stderr_text = Arc::new(Mutex::new(String::new()));
+        let stderr_target = stderr_text.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if let Ok(mut value) = stderr_target.lock() {
+                    value.push_str(&line);
+                    value.push('\n');
+                    if value.len() > 8_000 {
+                        let split = value
+                            .char_indices()
+                            .nth(value.chars().count().saturating_sub(4_000))
+                            .map(|(index, _)| index)
+                            .unwrap_or(0);
+                        value.drain(..split);
+                    }
+                }
+            }
+        });
+        Ok(Self {
+            child,
+            stdin,
+            output: receiver,
+            stderr: stderr_text,
+        })
     }
-    Ok(())
+
+    #[allow(clippy::too_many_arguments)]
+    fn run(
+        &mut self,
+        input: &str,
+        output: &Path,
+        language: &str,
+        model: &str,
+        mode: RapidDeviceMode,
+        file_id: i64,
+        task_id: &str,
+        file_name: &str,
+        app: &AppHandle,
+        cancellation: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<(), String> {
+        let request = serde_json::json!({
+            "task_id": task_id,
+            "input": input,
+            "output": output,
+            "language": language,
+            "model": model,
+            "device": mode.as_str(),
+        });
+        serde_json::to_writer(&mut self.stdin, &request).map_err(|error| error.to_string())?;
+        self.stdin
+            .write_all(b"\n")
+            .map_err(|error| error.to_string())?;
+        self.stdin.flush().map_err(|error| error.to_string())?;
+
+        loop {
+            if cancellation.load(Ordering::Acquire) {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                return Err("OCR task cancelled".to_string());
+            }
+            match self.output.recv_timeout(Duration::from_millis(75)) {
+                Ok(line) => match handle_worker_line(&line, file_id, task_id, file_name, app) {
+                    WorkerLineResult::Continue => {}
+                    WorkerLineResult::Complete => return Ok(()),
+                    WorkerLineResult::Error(error) => return Err(error),
+                },
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if let Some(status) =
+                        self.child.try_wait().map_err(|error| error.to_string())?
+                    {
+                        return Err(format!(
+                            "RapidOCR worker exited with {status}: {}",
+                            self.stderr_tail()
+                        ));
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(format!(
+                        "RapidOCR worker output closed unexpectedly: {}",
+                        self.stderr_tail()
+                    ));
+                }
+            }
+        }
+    }
+
+    fn stderr_tail(&self) -> String {
+        self.stderr
+            .lock()
+            .map(|value| tail(&value, 4_000))
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for PersistentWorker {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+enum WorkerLineResult {
+    Continue,
+    Complete,
+    Error(String),
 }
 
 fn handle_worker_line(
@@ -392,16 +520,26 @@ fn handle_worker_line(
     task_id: &str,
     file_name: &str,
     app: &AppHandle,
-    worker_error: &mut Option<String>,
-) {
+) -> WorkerLineResult {
     let Ok(message) = serde_json::from_str::<WorkerMessage>(line) else {
         log::debug!("RapidOCR [{}]: {}", task_id, line);
-        return;
+        return WorkerLineResult::Continue;
     };
+    if message
+        .task_id
+        .as_deref()
+        .is_some_and(|value| value != task_id)
+    {
+        log::warn!("RapidOCR [{}] ignored output for another task", task_id);
+        return WorkerLineResult::Continue;
+    }
     match message.kind.as_deref() {
-        Some("error") => {
-            *worker_error = message.error;
-        }
+        Some("error") => WorkerLineResult::Error(
+            message
+                .error
+                .unwrap_or_else(|| "RapidOCR worker failed".to_string()),
+        ),
+        Some("complete") => WorkerLineResult::Complete,
         Some("runtime") => {
             log::info!(
                 "RapidOCR [{}] runtime: requested='{}', active='{}', accelerated={}",
@@ -413,6 +551,7 @@ fn handle_worker_line(
             if let Some(reason) = message.fallback_reason {
                 log::warn!("RapidOCR [{}] runtime fallback: {}", task_id, reason);
             }
+            WorkerLineResult::Continue
         }
         Some("progress") => {
             let (Some(processed_pages), Some(total_pages), Some(progress)) = (
@@ -420,7 +559,7 @@ fn handle_worker_line(
                 message.total_pages,
                 message.progress,
             ) else {
-                return;
+                return WorkerLineResult::Continue;
             };
             log::info!(
                 "RapidOCR [{}] progress: file='{}', pages={}/{}, {:.0}%",
@@ -440,8 +579,9 @@ fn handle_worker_line(
                     progress,
                 },
             );
+            WorkerLineResult::Continue
         }
-        _ => {}
+        _ => WorkerLineResult::Continue,
     }
 }
 

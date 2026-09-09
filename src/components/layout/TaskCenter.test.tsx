@@ -10,6 +10,7 @@ const state = vi.hoisted(() => ({
   tasks: [] as Array<Record<string, unknown>>,
   bulkOcrRunning: false,
   bulkOcrQueued: 0,
+  rapidWorkerCount: 3,
   folders: [] as Array<Record<string, unknown>>,
   indexProgressByJob: {} as Record<number, Record<string, unknown>>,
 }));
@@ -33,6 +34,7 @@ describe('task center', () => {
     state.tasks = [];
     state.bulkOcrRunning = false;
     state.bulkOcrQueued = 0;
+    state.rapidWorkerCount = 3;
     state.folders = [];
     state.indexProgressByJob = {};
     useUIStore.setState({ language: 'en' });
@@ -135,6 +137,12 @@ describe('task center', () => {
       files_errors: 0,
       bytes_processed: 100,
       current_file: 'four.pdf',
+      phase: 'processing',
+      files_discovered: 10,
+      elapsed_ms: 1000,
+      estimated_remaining_ms: 1500,
+      files_per_second: 4,
+      bytes_per_second: 100,
     };
     const user = userEvent.setup();
     render(<TaskCenter />);
@@ -160,6 +168,12 @@ describe('task center', () => {
       files_errors: 0,
       bytes_processed: 100,
       current_file: 'one.pdf',
+      phase: 'processing',
+      files_discovered: 10,
+      elapsed_ms: 1000,
+      estimated_remaining_ms: 9000,
+      files_per_second: 1,
+      bytes_per_second: 100,
     };
     const user = userEvent.setup();
     render(<TaskCenter />);

@@ -55,6 +55,7 @@ export function searchResultFixture(file = fileFixture()): SearchResult {
     folder_path: 'C:\\Documents',
     absolute_path: `C:\\Documents\\${file.file_name}`,
     matched_terms: [],
+    highlight_terms: [],
     match_model: null,
   };
 }

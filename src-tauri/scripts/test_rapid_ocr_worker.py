@@ -97,6 +97,15 @@ class OutputTests(unittest.TestCase):
         result = SimpleNamespace(txts=(), to_markdown=lambda: "placeholder")
         self.assertEqual(WORKER.page_markdown(result), "")
 
+    def test_server_cache_reuses_the_loaded_engine(self):
+        cache = {}
+        created = (object(), {"active_provider": WORKER.CPU_PROVIDER})
+        with patch.object(WORKER, "create_engine", return_value=created) as create:
+            first = WORKER.cached_engine(cache, "ch", "PP-OCRv6_small", "cpu")
+            second = WORKER.cached_engine(cache, "ch", "PP-OCRv6_small", "cpu")
+        self.assertIs(first, second)
+        create.assert_called_once_with("ch", "PP-OCRv6_small", "cpu")
+
 
 if __name__ == "__main__":
     unittest.main()

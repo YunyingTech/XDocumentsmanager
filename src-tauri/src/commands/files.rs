@@ -101,6 +101,7 @@ pub fn get_file(file_id: i64, db: State<'_, Database>) -> Result<FileInfo, Strin
 
 #[tauri::command]
 pub fn delete_file_record(file_id: i64, db: State<'_, Database>, engine: State<'_, SearchEngine>) -> Result<(), String> {
+    engine.mark_elasticsearch_dirty();
     let conn = db.get_connection();
     conn.execute("DELETE FROM files WHERE id = ?1", [file_id])
         .map_err(|e| e.to_string())?;

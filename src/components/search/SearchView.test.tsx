@@ -43,6 +43,12 @@ describe('search result workflow', () => {
       analysisError: null,
       searchElapsedMs: 12,
       searchStartedAt: null,
+      page: 0,
+      pageSize: 25,
+      total: 0,
+      totalPages: 0,
+      activeTerms: [],
+      activeQueryModel: null,
     });
   });
 
@@ -64,6 +70,7 @@ describe('search result workflow', () => {
     const result = {
       ...searchResultFixture(fileFixture({ id: 8, file_name: 'security.pdf' })),
       matched_terms: ['security', 'audit', 'risk', 'compliance'],
+      highlight_terms: ['security'],
       match_model: 'gpt-test',
     };
     useSearchStore.setState({ results: [result] });
@@ -71,10 +78,41 @@ describe('search result workflow', () => {
     render(<SearchView />);
 
     expect(screen.getByText('gpt-test')).toBeInTheDocument();
+    expect(screen.getByText('security', { selector: 'mark' })).toBeInTheDocument();
     expect(screen.getByText('+1')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Open containing folder' }));
 
     expect(tauri.showInFolder).toHaveBeenCalledWith(result.absolute_path);
     expect(useSearchStore.getState().selectedResultId).toBeNull();
+  });
+
+  it('requests the next result page with the active search context', async () => {
+    const first = searchResultFixture(fileFixture({ id: 1, file_name: 'audit.pdf' }));
+    const next = searchResultFixture(fileFixture({ id: 26, file_name: 'audit-26.pdf' }));
+    useSearchStore.setState({
+      results: [first],
+      total: 30,
+      totalPages: 2,
+      page: 0,
+      pageSize: 25,
+      activeTerms: ['audit'],
+      activeQueryModel: 'gpt-test',
+    });
+    tauri.search.mockResolvedValue({
+      results: [next],
+      elapsed_ms: 3,
+      total: 30,
+      page: 1,
+      page_size: 25,
+      total_pages: 2,
+    });
+    const user = userEvent.setup();
+    render(<SearchView />);
+
+    await user.click(screen.getByRole('button', { name: 'Next page' }));
+
+    expect(tauri.search).toHaveBeenCalledWith('audit', {}, 1, 25, expect.any(Number), ['audit'], 'gpt-test');
+    expect(await screen.findByText('audit-26.pdf')).toBeInTheDocument();
+    expect(screen.getByText('Page 2 of 2 · 30 results')).toBeInTheDocument();
   });
 });

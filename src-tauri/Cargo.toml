@@ -1,6 +1,6 @@
 [package]
 name = "xdocuments"
-version = "0.1.8"
+version = "0.1.9"
 description = "Desktop PDF document manager for local and SMB collections"
 authors = ["you"]
 license = "MIT"
@@ -37,6 +37,7 @@ md-5 = "0.10"
 
 # File system
 walkdir = "2"
+rayon = "1"
 notify = { version = "6", features = ["macos_kqueue"] }
 notify-debouncer-full = "0.3"
 

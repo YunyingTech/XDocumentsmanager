@@ -152,12 +152,17 @@ def page_markdown(result):
     return "\n".join(str(text) for text in texts if str(text).strip())
 
 
-def run(args):
+def cached_engine(cache, language, model, device_mode):
+    key = (language, model, device_mode)
+    if key not in cache:
+        cache[key] = create_engine(language, model, device_mode)
+    return cache[key]
+
+
+def process_document(input_path, output_path, engine, task_id=None):
     import fitz
 
-    engine, provider_status = create_engine(args.language, args.model, args.device)
-    emit({"type": "runtime", **provider_status})
-    document = fitz.open(args.input)
+    document = fitz.open(input_path)
     if document.page_count == 0:
         raise RuntimeError("The PDF contains no pages")
 
@@ -168,33 +173,67 @@ def run(args):
             page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False).save(image_path)
             markdown = page_markdown(engine(image_path))
             pages.append(f"## Page {index + 1}\n\n{markdown}".rstrip())
-            emit(
-                {
-                    "type": "progress",
-                    "processed_pages": index + 1,
-                    "total_pages": document.page_count,
-                    "progress": (index + 1) * 100.0 / document.page_count,
-                }
-            )
+            progress = {
+                "type": "progress",
+                "processed_pages": index + 1,
+                "total_pages": document.page_count,
+                "progress": (index + 1) * 100.0 / document.page_count,
+            }
+            if task_id is not None:
+                progress["task_id"] = task_id
+            emit(progress)
 
     markdown = "\n\n".join(pages)
     if not any(page.partition("\n\n")[2].strip() for page in pages):
         raise RuntimeError("RapidOCR did not recognize any text")
-    output = Path(args.output)
+    output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(markdown, encoding="utf-8")
-    emit({"type": "complete", "characters": len(markdown)})
+    return len(markdown)
+
+
+def run(args):
+    engine, provider_status = create_engine(args.language, args.model, args.device)
+    emit({"type": "runtime", **provider_status})
+    characters = process_document(args.input, args.output, engine)
+    emit({"type": "complete", "characters": characters})
+
+
+def run_server():
+    engines = {}
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        task_id = None
+        try:
+            job = json.loads(line)
+            task_id = str(job["task_id"])
+            language = str(job.get("language", "ch"))
+            model = str(job.get("model", "PP-OCRv6_small"))
+            device = str(job.get("device", "auto"))
+            engine, provider_status = cached_engine(engines, language, model, device)
+            emit({"type": "runtime", "task_id": task_id, **provider_status})
+            characters = process_document(
+                str(job["input"]), str(job["output"]), engine, task_id
+            )
+            emit({"type": "complete", "task_id": task_id, "characters": characters})
+        except Exception as error:
+            emit({"type": "error", "task_id": task_id, "error": str(error)})
+    return 0
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true")
+    parser.add_argument("--server", action="store_true")
     parser.add_argument("--input")
     parser.add_argument("--output")
     parser.add_argument("--language", default="ch")
     parser.add_argument("--model", choices=("PP-OCRv6_small",), default="PP-OCRv6_small")
     parser.add_argument("--device", choices=("auto", "cpu"), default="auto")
     args = parser.parse_args()
+    if args.server:
+        return run_server()
     if args.check:
         return dependency_status(args.device, args.language, args.model)
     if not args.input or not args.output:

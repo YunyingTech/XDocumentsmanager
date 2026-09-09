@@ -20,7 +20,10 @@ import { FolderList } from '../folders/FolderList';
 function progress(job: number, folder: number, status = 'running'): IndexProgress {
   return { job_id: job, folder_id: folder, status, index_mode: 'incremental',
     ocr_after_index: false, files_total: 10, files_processed: job, files_indexed: job,
-    files_skipped: 0, files_errors: 0, bytes_processed: 100, current_file: `${job}.pdf` };
+    files_skipped: 0, files_errors: 0, bytes_processed: 100, current_file: `${job}.pdf`,
+    phase: status === 'completed' ? 'completed' : status === 'error' ? 'failed' : 'processing',
+    files_discovered: 10, elapsed_ms: 1000, estimated_remaining_ms: 2000,
+    files_per_second: 2, bytes_per_second: 100 };
 }
 
 describe('multi-folder index display', () => {

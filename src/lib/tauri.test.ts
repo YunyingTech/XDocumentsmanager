@@ -28,14 +28,15 @@ describe('Tauri command bindings', () => {
   });
 
   it('forwards AI terms and the model used to generate them', async () => {
-    invoke.mockResolvedValue({ results: [], elapsed_ms: 1 });
-    await api.search('risk report', { folder_id: 3 }, 25, 9, ['audit', 'risk'], 'gpt-test');
+    invoke.mockResolvedValue({ results: [], elapsed_ms: 1, total: 0, page: 2, page_size: 25, total_pages: 0 });
+    await api.search('risk report', { folder_id: 3 }, 2, 25, 9, ['audit', 'risk'], 'gpt-test');
     expect(invoke).toHaveBeenCalledWith('search', {
       query: 'risk report',
       terms: ['audit', 'risk'],
       queryModel: 'gpt-test',
       filters: { folder_id: 3 },
-      limit: 25,
+      page: 2,
+      pageSize: 25,
       requestId: 9,
     });
   });
