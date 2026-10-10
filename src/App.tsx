@@ -8,10 +8,12 @@ import { useUIStore } from './stores/uiStore';
 import { useSearchStore } from './stores/searchStore';
 import { useOcrStore } from './stores/ocrStore';
 import { useStartup } from './hooks/useStartup';
+import { useAppUpdates } from './hooks/useAppUpdates';
 import type { IndexProgress, PaddleInstallProgress, RapidInstallProgress, SearchProgress, WindowsOcrProgress } from './types';
 
 export default function App() {
   const startup = useStartup();
+  useAppUpdates(startup.ready);
   const loadFolders = useFolderStore((s) => s.loadFolders);
   const setIndexProgress = useFolderStore((s) => s.setIndexProgress);
   const updateSearchProgress = useSearchStore((s) => s.updateProgress);

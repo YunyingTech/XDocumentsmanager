@@ -1,5 +1,13 @@
 // Type definitions shared between frontend and backend
 
+export interface AppUpdateStatus {
+  phase: 'idle' | 'checking' | 'available' | 'downloading' | 'verifying' | 'ready' | 'installing' | 'up_to_date' | 'error';
+  version: string | null;
+  downloaded: number;
+  total: number | null;
+  error: string | null;
+}
+
 export interface FileInfo {
   id: number;
   folder_id: number;
