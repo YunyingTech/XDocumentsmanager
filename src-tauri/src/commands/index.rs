@@ -206,59 +206,79 @@ fn emit_failed_progress(
 }
 
 #[tauri::command]
-pub fn pause_indexing(job_id: i64, db: State<'_, Database>) -> Result<(), String> {
-    let conn = db.get_connection();
-    conn.execute(
-        "UPDATE index_jobs SET status = 'paused' WHERE id = ?1",
-        [job_id],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[tauri::command]
-pub fn get_index_status(db: State<'_, Database>) -> Result<Option<IndexJob>, String> {
-    let conn = db.get_connection();
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, folder_id, job_type, status, files_total, files_processed,
-                files_indexed, files_skipped, files_errors, bytes_processed,
-                started_at, completed_at, error_message
-         FROM index_jobs ORDER BY id DESC LIMIT 1",
+pub async fn pause_indexing(
+    job_id: i64,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    crate::background::run(move || {
+        let db = crate::background::state::<Database>(&app)?;
+        let conn = db.get_connection();
+        conn.execute(
+            "UPDATE index_jobs SET status = 'paused' WHERE id = ?1",
+            [job_id],
         )
         .map_err(|e| e.to_string())?;
-
-    let result = stmt.query_row([], |row| {
-        Ok(IndexJob {
-            id: row.get(0)?,
-            folder_id: row.get(1)?,
-            job_type: row.get(2)?,
-            status: row.get(3)?,
-            files_total: row.get(4)?,
-            files_processed: row.get(5)?,
-            files_indexed: row.get(6)?,
-            files_skipped: row.get(7)?,
-            files_errors: row.get(8)?,
-            bytes_processed: row.get(9)?,
-            started_at: row.get(10)?,
-            completed_at: row.get(11)?,
-            error_message: row.get(12)?,
-        })
-    });
-
-    match result {
-        Ok(job) => Ok(Some(job)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e.to_string()),
-    }
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn reindex_file(file_id: i64, db: State<'_, Database>) -> Result<(), String> {
-    let conn = db.get_connection();
-    conn.execute(
-        "UPDATE files SET index_status = 'pending', indexed_at = NULL, index_error = NULL WHERE id = ?1",
-        [file_id],
-    ).map_err(|e| e.to_string())?;
-    Ok(())
+pub async fn get_index_status(
+    app: tauri::AppHandle,
+) -> Result<Option<IndexJob>, String> {
+    crate::background::run(move || {
+        let db = crate::background::state::<Database>(&app)?;
+        let conn = db.get_connection();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, folder_id, job_type, status, files_total, files_processed,
+                    files_indexed, files_skipped, files_errors, bytes_processed,
+                    started_at, completed_at, error_message
+             FROM index_jobs ORDER BY id DESC LIMIT 1",
+            )
+            .map_err(|e| e.to_string())?;
+
+        let result = stmt.query_row([], |row| {
+            Ok(IndexJob {
+                id: row.get(0)?,
+                folder_id: row.get(1)?,
+                job_type: row.get(2)?,
+                status: row.get(3)?,
+                files_total: row.get(4)?,
+                files_processed: row.get(5)?,
+                files_indexed: row.get(6)?,
+                files_skipped: row.get(7)?,
+                files_errors: row.get(8)?,
+                bytes_processed: row.get(9)?,
+                started_at: row.get(10)?,
+                completed_at: row.get(11)?,
+                error_message: row.get(12)?,
+            })
+        });
+
+        match result {
+            Ok(job) => Ok(Some(job)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn reindex_file(
+    file_id: i64,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    crate::background::run(move || {
+        let db = crate::background::state::<Database>(&app)?;
+        let conn = db.get_connection();
+        conn.execute(
+            "UPDATE files SET index_status = 'pending', indexed_at = NULL, index_error = NULL WHERE id = ?1",
+            [file_id],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
 }

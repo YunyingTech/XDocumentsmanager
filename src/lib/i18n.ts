@@ -2,6 +2,15 @@ import { useUIStore, type Language } from '../stores/uiStore';
 import { useCallback } from 'react';
 
 const en = {
+  'startup.loading': 'Opening your library…',
+  'startup.database': 'Preparing the database…',
+  'startup.localIndex': 'Preparing the local search index…',
+  'startup.searchStarting': 'Starting the search service…',
+  'startup.searchSync': 'Synchronizing the search index…',
+  'startup.logsHint': 'You can view runtime logs while loading.',
+  'startup.failed': 'Startup failed',
+  'startup.failureHint': 'View runtime logs for details, then restart the app.',
+
   'common.add': 'Add',
   'common.adding': 'Adding…',
   'common.browse': 'Browse',
@@ -347,6 +356,15 @@ export type TranslationKey = keyof typeof en;
 type Variables = Record<string, string | number>;
 
 const zh: Record<TranslationKey, string> = {
+  'startup.loading': '正在打开文档库…',
+  'startup.database': '正在准备数据库…',
+  'startup.localIndex': '正在准备本地搜索索引…',
+  'startup.searchStarting': '正在启动搜索服务…',
+  'startup.searchSync': '正在同步搜索索引…',
+  'startup.logsHint': '加载期间可以切换到运行日志查看进度。',
+  'startup.failed': '启动失败',
+  'startup.failureHint': '请查看运行日志了解详情，然后重新打开软件。',
+
   'files.sort': '文件排序',
   'settings.saving': '正在保存…',
   'settings.saved': '设置已保存',

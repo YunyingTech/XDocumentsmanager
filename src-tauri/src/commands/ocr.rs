@@ -1064,90 +1064,104 @@ mod tests {
 
 /// Get the configured OCR output directory path.
 #[tauri::command]
-pub fn get_ocr_output_dir(db: State<'_, Database>) -> Result<String, String> {
-    resolve_output_dir(&db)
+pub async fn get_ocr_output_dir(
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    crate::background::run(move || {
+        let db = crate::background::state::<Database>(&app)?;
+        resolve_output_dir(&db)
+    })
+    .await
 }
 
 /// List indexed PDF files available for OCR (files with index_status='indexed').
 /// Supports pagination via `page` (0-indexed) and `page_size`.
 #[tauri::command]
-pub fn list_ocr_candidates(
+pub async fn list_ocr_candidates(
     folder_id: Option<i64>,
     page: i64,
     page_size: i64,
     pending_only: Option<bool>,
-    db: State<'_, Database>,
+    app: tauri::AppHandle,
 ) -> Result<PaginatedResult<crate::models::FileInfo>, String> {
-    let conn = db.get_connection();
-    let page = page.max(0);
-    let page_size = page_size.clamp(1, 500);
-    let pending_only = pending_only.unwrap_or(true);
+    crate::background::run(move || {
+        let db = crate::background::state::<Database>(&app)?;
+        let conn = db.get_connection();
+        let page = page.max(0);
+        let page_size = page_size.clamp(1, 500);
+        let pending_only = pending_only.unwrap_or(true);
 
-    // Build WHERE clause shared by COUNT and data queries
-    let where_clause = "index_status = 'indexed' AND (?1 IS NULL OR folder_id = ?1) AND (?2 = 0 OR ocr_applied = 0)";
+        // Build WHERE clause shared by COUNT and data queries
+        let where_clause = "index_status = 'indexed' AND (?1 IS NULL OR folder_id = ?1) AND (?2 = 0 OR ocr_applied = 0)";
 
-    // Get total count
-    let count_sql = format!("SELECT COUNT(*) FROM files WHERE {}", where_clause);
-    let total: i64 = conn
-        .query_row(
-            &count_sql,
-            rusqlite::params![folder_id, pending_only],
-            |row| row.get(0),
-        )
-        .map_err(|e| e.to_string())?;
+        // Get total count
+        let count_sql = format!("SELECT COUNT(*) FROM files WHERE {}", where_clause);
+        let total: i64 = conn
+            .query_row(
+                &count_sql,
+                rusqlite::params![folder_id, pending_only],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
 
-    let total_pages = if total == 0 {
-        0
-    } else {
-        ((total as f64) / (page_size as f64)).ceil() as i64
-    };
-    let offset = page * page_size;
+        let total_pages = if total == 0 {
+            0
+        } else {
+            ((total as f64) / (page_size as f64)).ceil() as i64
+        };
+        let offset = page * page_size;
 
-    // Fetch page
-    let sql = format!(
-        "SELECT id, folder_id, relative_path, file_name, file_extension, \
-         file_size_bytes, content_hash, page_count, text_length, \
-         file_created_at, file_modified_at, indexed_at, index_status, \
-         index_error, text_preview, ocr_applied, pdf_title, pdf_author, \
-         pdf_subject, pdf_keywords \
-         FROM files \
-         WHERE {} \
-         ORDER BY file_name \
-         LIMIT ?3 OFFSET ?4",
-        where_clause
-    );
+        // Fetch page
+        let sql = format!(
+            "SELECT id, folder_id, relative_path, file_name, file_extension, \
+             file_size_bytes, content_hash, page_count, text_length, \
+             file_created_at, file_modified_at, indexed_at, index_status, \
+             index_error, text_preview, ocr_applied, pdf_title, pdf_author, \
+             pdf_subject, pdf_keywords \
+             FROM files \
+             WHERE {} \
+             ORDER BY file_name \
+             LIMIT ?3 OFFSET ?4",
+            where_clause
+        );
 
-    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map(
-            rusqlite::params![folder_id, pending_only, page_size, offset],
-            crate::db::row_to_file_info,
-        )
-        .map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![folder_id, pending_only, page_size, offset],
+                crate::db::row_to_file_info,
+            )
+            .map_err(|e| e.to_string())?;
 
-    let mut files = Vec::new();
-    for row in rows {
-        files.push(row.map_err(|e| e.to_string())?);
-    }
+        let mut files = Vec::new();
+        for row in rows {
+            files.push(row.map_err(|e| e.to_string())?);
+        }
 
-    Ok(PaginatedResult {
-        items: files,
-        total,
-        page,
-        page_size,
-        total_pages,
+        Ok(PaginatedResult {
+            items: files,
+            total,
+            page,
+            page_size,
+            total_pages,
+        })
     })
+    .await
 }
 
 #[tauri::command]
-pub fn list_ocr_candidate_refs(
+pub async fn list_ocr_candidate_refs(
     folder_id: Option<i64>,
     after_id: Option<i64>,
     limit: Option<i64>,
-    db: State<'_, Database>,
+    app: tauri::AppHandle,
 ) -> Result<Vec<OcrCandidateRef>, String> {
-    let conn = db.get_connection();
-    list_ocr_candidate_refs_from_connection(&conn, folder_id, after_id, limit)
+    crate::background::run(move || {
+        let db = crate::background::state::<Database>(&app)?;
+        let conn = db.get_connection();
+        list_ocr_candidate_refs_from_connection(&conn, folder_id, after_id, limit)
+    })
+    .await
 }
 
 fn list_ocr_candidate_refs_from_connection(

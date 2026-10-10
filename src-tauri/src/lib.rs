@@ -1,3 +1,5 @@
+mod background;
+mod startup;
 mod commands;
 mod db;
 mod indexer;
@@ -8,8 +10,6 @@ mod smb;
 mod utils;
 mod watcher;
 
-use db::Database;
-use search::SearchEngine;
 use commands::ocr_control::OcrTaskManager;
 use commands::rapid_ocr::RapidOcrWorkerPool;
 use tauri::Manager;
@@ -34,73 +34,10 @@ pub fn run() {
                     .build(),
             )?;
 
-            // Initialize database
-            let app_data_dir = app.path().app_data_dir()
-                .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
-
-            let database = Database::new(&app_data_dir)
-                .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
-
-            // Create indexes
-            {
-                let conn = database.get_connection();
-                db::schema::create_indexes(&conn)
-                    .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
-            }
-
-            let search_engine = SearchEngine::open(&app_data_dir.join("search-index-v1"))
-                .map_err(|e| Box::<dyn std::error::Error>::from(e))?;
-            if search_engine.is_empty() {
-                let conn = database.get_connection();
-                search_engine.rebuild(&conn)
-                    .map_err(|e| Box::<dyn std::error::Error>::from(e))?;
-            }
-            if let Some(distribution_dir) = find_elasticsearch_distribution(app) {
-                log::info!(
-                    "Using Elasticsearch distribution: {}",
-                    distribution_dir.display()
-                );
-                let elastic_dir = app_data_dir.join("elasticsearch");
-                search_engine.configure_elasticsearch(
-                    distribution_dir,
-                    elastic_dir.join("data"),
-                    elastic_dir.join("logs"),
-                );
-            } else {
-                log::error!("Bundled Elasticsearch distribution was not found");
-            }
-
-            // Store database in app state
-            app.manage(search_engine);
-            app.manage(database);
+            app.manage(startup::StartupState::default());
             app.manage(OcrTaskManager::default());
             app.manage(RapidOcrWorkerPool::default());
-
-            let app_handle = app.handle().clone();
-            std::thread::Builder::new()
-                .name("elasticsearch-startup".to_string())
-                .spawn(move || {
-                    let engine = app_handle.state::<SearchEngine>();
-                    if !engine.backend_status().connected {
-                        match engine.start_elasticsearch() {
-                            Ok(()) => {
-                                let database = app_handle.state::<Database>();
-                                let conn = database.get_connection();
-                                match engine.synchronize_elasticsearch(&conn) {
-                                    Ok(true) => log::info!("Bundled Elasticsearch was rebuilt and synchronized"),
-                                    Ok(false) => log::info!("Bundled Elasticsearch is already synchronized"),
-                                    Err(error) => {
-                                        log::error!("Failed to synchronize Elasticsearch: {}", error);
-                                    }
-                                }
-                            }
-                            Err(error) => log::error!("Bundled Elasticsearch failed to start: {}", error),
-                        }
-                    }
-                })
-                .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
-
-            log::info!("XDocuments Manager initialized. Data dir: {:?}", app_data_dir);
+            startup::start(app.handle().clone())?;
 
             Ok(())
         })
@@ -123,6 +60,7 @@ pub fn run() {
             // Search
             commands::search::search,
             commands::search::analyze_search_query,
+            startup::get_startup_status,
             // Runtime logs
             commands::logs::get_runtime_logs,
             // Viewer
@@ -162,7 +100,7 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-fn find_elasticsearch_distribution<R: tauri::Runtime>(app: &tauri::App<R>) -> Option<PathBuf> {
+fn find_elasticsearch_distribution<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<PathBuf> {
     let mut candidates = Vec::new();
     if let Ok(resource_dir) = app.path().resource_dir() {
         candidates.push(resource_dir.join("resources").join("elasticsearch"));

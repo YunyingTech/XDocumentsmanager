@@ -7,9 +7,11 @@ import { useFolderStore } from './stores/folderStore';
 import { useUIStore } from './stores/uiStore';
 import { useSearchStore } from './stores/searchStore';
 import { useOcrStore } from './stores/ocrStore';
+import { useStartup } from './hooks/useStartup';
 import type { IndexProgress, PaddleInstallProgress, RapidInstallProgress, SearchProgress, WindowsOcrProgress } from './types';
 
 export default function App() {
+  const startup = useStartup();
   const loadFolders = useFolderStore((s) => s.loadFolders);
   const setIndexProgress = useFolderStore((s) => s.setIndexProgress);
   const updateSearchProgress = useSearchStore((s) => s.updateProgress);
@@ -22,8 +24,10 @@ export default function App() {
   const language = useUIStore((s) => s.language);
 
   useEffect(() => {
-    loadFolders();
+    if (startup.ready) void loadFolders();
+  }, [loadFolders, startup.ready]);
 
+  useEffect(() => {
     // Listen for indexing progress events from Rust backend
     const unlisten = listen<IndexProgress>('indexing:progress', (event) => {
       setIndexProgress(event.payload);
@@ -57,7 +61,7 @@ export default function App() {
       unlistenPaddleInstall.then((fn) => fn());
       unlistenRapidInstall.then((fn) => fn());
     };
-  }, [loadFolders, queueFolderOcr, setIndexProgress, updatePaddleInstallProgress, updateRapidInstallProgress, updateSearchProgress, updateWindowsOcrProgress]);
+  }, [queueFolderOcr, setIndexProgress, updatePaddleInstallProgress, updateRapidInstallProgress, updateSearchProgress, updateWindowsOcrProgress]);
 
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)');
@@ -89,7 +93,7 @@ export default function App() {
       <h1 className="sr-only">XDocuments Manager</h1>
       {sidebarOpen && <Sidebar />}
       <div className="flex flex-col flex-1 min-w-0">
-        <MainPanel />
+        <MainPanel startup={startup} />
         <StatusBar />
       </div>
     </div>

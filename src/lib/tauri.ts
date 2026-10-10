@@ -3,8 +3,12 @@ import type {
   FileInfo, FolderInfo, FolderConfig, IndexJob,
   SearchResponse, SearchFilters, PaginatedResult, SortConfig, SearchQueryAnalysis,
   RuntimeLogSnapshot, RuntimeLogSource,
-  IndexMode,
+  IndexMode, StartupStatus,
 } from '../types';
+
+export async function getStartupStatus(): Promise<StartupStatus> {
+  return invoke('get_startup_status');
+}
 
 // ── Files ──
 

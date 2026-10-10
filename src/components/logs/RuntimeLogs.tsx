@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlertTriangle, Check, Clipboard, Pause, Radio, RefreshCw, Search,
+  AlertTriangle, Loader2, Check, Clipboard, Pause, Radio, RefreshCw, Search,
   Server, TerminalSquare,
 } from 'lucide-react';
-import { getRuntimeLogs } from '../../lib/tauri';
+import { useRuntimeLogs } from '../../hooks/useRuntimeLogs';
 import { useI18n } from '../../lib/i18n';
-import type { RuntimeLogSnapshot, RuntimeLogSource } from '../../types';
+import type { RuntimeLogSource } from '../../types';
 
 type LogLevel = 'all' | 'error' | 'warn' | 'info' | 'debug';
 
@@ -28,40 +28,12 @@ const levelStyles: Record<Exclude<LogLevel, 'all'>, string> = {
 export function RuntimeLogs() {
   const { locale, t } = useI18n();
   const [source, setSource] = useState<RuntimeLogSource>('application');
-  const [snapshot, setSnapshot] = useState<RuntimeLogSnapshot | null>(null);
   const [level, setLevel] = useState<LogLevel>('all');
   const [filter, setFilter] = useState('');
   const [live, setLive] = useState(true);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const { snapshot, loading, error, refresh } = useRuntimeLogs(source, live);
   const [copied, setCopied] = useState(false);
   const viewportRef = useRef<HTMLDivElement>(null);
-  const requestRef = useRef(0);
-
-  const refresh = useCallback(async (showLoading = false) => {
-    const requestId = ++requestRef.current;
-    if (showLoading) setLoading(true);
-    try {
-      const next = await getRuntimeLogs(source, 800);
-      if (requestId === requestRef.current) {
-        setSnapshot(next);
-        setError(null);
-      }
-    } catch (reason) {
-      if (requestId === requestRef.current) setError(String(reason));
-    } finally {
-      if (requestId === requestRef.current) setLoading(false);
-    }
-  }, [source]);
-
-  useEffect(() => {
-    setSnapshot(null);
-    void refresh(true);
-    if (!live) return;
-    const timer = window.setInterval(() => void refresh(false), 2000);
-    return () => window.clearInterval(timer);
-  }, [live, refresh]);
-
   const visibleLines = useMemo(() => {
     const needle = filter.trim().toLocaleLowerCase();
     return (snapshot?.lines ?? []).filter((line) => {
@@ -103,7 +75,7 @@ export function RuntimeLogs() {
           {live ? <Radio size={13} /> : <Pause size={13} />}
           {live ? t('logs.live') : t('logs.paused')}
         </button>
-        <button type="button" className="icon-button" onClick={() => void refresh(true)} title={t('common.refresh')} aria-label={t('common.refresh')}>
+        <button type="button" className="icon-button" onClick={refresh} disabled={loading} title={t('common.refresh')} aria-label={t('common.refresh')}>
           <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
         </button>
         <button type="button" className="icon-button" onClick={() => void copyVisible()} disabled={visibleLines.length === 0} title={copied ? t('logs.copied') : t('logs.copy')} aria-label={copied ? t('logs.copied') : t('logs.copy')}>
@@ -117,11 +89,11 @@ export function RuntimeLogs() {
         {snapshot?.updated_at && <span className="hidden shrink-0 tabular-nums md:inline">{new Date(snapshot.updated_at).toLocaleTimeString(locale)}</span>}
       </div>
 
-      <div ref={viewportRef} className="min-h-0 flex-1 overflow-auto bg-[#fbfbfb] dark:bg-[#101010]">
+      <div ref={viewportRef} aria-busy={loading} className="min-h-0 flex-1 overflow-auto bg-[#fbfbfb] dark:bg-[#101010]">
         {error ? (
           <div className="flex h-full items-center justify-center gap-2 p-6 text-sm text-red-600" role="alert"><AlertTriangle size={16} aria-hidden="true" />{t('logs.loadFailed', { error })}</div>
         ) : loading && !snapshot ? (
-          <div className="space-y-px p-3">{Array.from({ length: 12 }, (_, index) => <div key={index} className="h-5 animate-pulse bg-surface-100 dark:bg-surface-900" style={{ width: `${62 + (index % 4) * 9}%` }} />)}</div>
+          <div className="space-y-px p-3"><div role="status" className="mb-3 flex items-center gap-2 text-xs text-surface-500"><Loader2 size={16} className="animate-spin" aria-hidden="true" />{t('common.loading')}</div>{Array.from({ length: 12 }, (_, index) => <div key={index} className="h-5 animate-pulse bg-surface-100 dark:bg-surface-900" style={{ width: `${62 + (index % 4) * 9}%` }} />)}</div>
         ) : visibleLines.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center p-6 text-center">
             <TerminalSquare size={24} className="mb-3 text-surface-300 dark:text-surface-700" />
@@ -134,7 +106,7 @@ export function RuntimeLogs() {
               const detectedLevel = lineLevel(line);
               return (
                 <div
-                  key={`${index}-${line}`}
+                  key={index}
                   style={{ contentVisibility: 'auto', containIntrinsicSize: '0 20px' }}
                   className={`grid min-w-max grid-cols-[3.5rem_minmax(0,1fr)] border-l-2 pr-4 hover:bg-surface-100 dark:hover:bg-surface-900 ${levelStyles[detectedLevel]}`}
                 >

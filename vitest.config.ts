@@ -13,6 +13,9 @@ export default defineConfig({
         'src/components/search/{SearchResults,SearchView}.tsx',
         'src/components/layout/TaskCenter.tsx',
         'src/components/viewer/PdfViewer.tsx',
+        'src/components/logs/RuntimeLogs.tsx',
+        'src/components/layout/{MainPanel,StartupScreen}.tsx',
+        'src/hooks/{useStartup,useRuntimeLogs}.ts',
       ],
       thresholds: {
         statements: 75,

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.10 — 2026-10-10
+
+### Fixed
+
+- Move database preparation, local index loading/rebuilding and search service synchronization to a startup worker so the desktop window remains responsive.
+- Move runtime log reads, database-backed library/settings commands and PDF reads to blocking workers rather than the UI thread.
+- Serialize runtime log polling, discard stale responses after a source switch, retain displayed logs on pause and stop polling after leaving the view.
+- Bound log reads to the latest 512 KiB and truncate unusually long lines at 4,096 characters to avoid excessive IPC and rendering work.
+
+### Changed
+
+- Show an animated startup screen with the current initialization stage. Runtime logs remain accessible while starting or after an initialization failure.
+- Show a log loading indicator and disable duplicate refreshes while a read is pending.
+
+### Tests
+
+- Add regression coverage for startup gating/failure, slow and overlapping log requests, source changes, pause/retry/unmount, UTF-8 log truncation and background execution.
+
 ## 0.1.9 — 2026-09-09
 
 ### Fixed

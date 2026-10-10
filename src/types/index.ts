@@ -295,3 +295,8 @@ export interface WindowsOcrProgress {
   total_pages: number;
   progress: number;
 }
+export interface StartupStatus {
+  phase: 'database' | 'local_index' | 'search_starting' | 'search_sync' | 'ready' | 'failed';
+  ready: boolean;
+  error: string | null;
+}
