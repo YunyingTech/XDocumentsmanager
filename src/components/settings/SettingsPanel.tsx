@@ -8,6 +8,7 @@ import type { MinerUHealthInfo, OcrEngine, PaddleDeviceMode, PaddleInstallProgre
 import { useI18n } from '../../lib/i18n';
 import { APP_VERSION } from '../../lib/constants';
 import type { Language } from '../../stores/uiStore';
+import { UpdateSettings } from './UpdateSettings';
 
 const paddleInstallStageLabels = {
   preparing: 'ocr.paddleStagePreparing',
@@ -779,6 +780,8 @@ export function SettingsPanel() {
               )}
             </div>
           </div>
+
+          <UpdateSettings />
 
           {/* ── About ── */}
           <div className="card p-5">

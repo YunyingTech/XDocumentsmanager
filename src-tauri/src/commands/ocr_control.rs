@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 #[derive(Default)]
 pub struct OcrTaskManager {
     tasks: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    updating: AtomicBool,
 }
 
 impl OcrTaskManager {
@@ -13,6 +14,9 @@ impl OcrTaskManager {
             .tasks
             .lock()
             .expect("OCR task registry lock poisoned");
+        if self.updating.load(Ordering::Acquire) {
+            return Err("Application update installation in progress".into());
+        }
         if tasks.contains_key(task_id) {
             return Err(format!("OCR task '{task_id}' is already running"));
         }
@@ -60,6 +64,20 @@ impl OcrTaskManager {
             .expect("OCR task registry lock poisoned")
             .remove(task_id);
     }
+
+    pub fn begin_update(&self) -> Result<UpdateGuard<'_>, String> {
+        let tasks = self.tasks.lock().expect("OCR task registry lock poisoned");
+        if !tasks.is_empty() || self.updating.load(Ordering::Acquire) {
+            return Err("Wait for OCR and runtime installation tasks to finish before installing".into());
+        }
+        self.updating.store(true, Ordering::Release);
+        Ok(UpdateGuard(&self.updating))
+    }
+}
+
+pub struct UpdateGuard<'a>(&'a AtomicBool);
+impl Drop for UpdateGuard<'_> {
+    fn drop(&mut self) { self.0.store(false, Ordering::Release); }
 }
 
 pub struct OcrTaskRegistration<'a> {
@@ -106,5 +124,18 @@ mod tests {
         assert_eq!(manager.cancel_all(), 2);
         assert!(first.cancellation_flag().load(Ordering::Acquire));
         assert!(second.cancellation_flag().load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn update_guard_requires_idle_ocr_and_blocks_new_tasks() {
+        let manager = OcrTaskManager::default();
+        let active = manager.register("active").unwrap();
+        assert!(manager.begin_update().is_err());
+        drop(active);
+        {
+            let _guard = manager.begin_update().unwrap();
+            assert!(manager.register("new").is_err());
+        }
+        assert!(manager.register("new").is_ok());
     }
 }

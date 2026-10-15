@@ -1,4 +1,5 @@
 mod background;
+mod updater;
 mod startup;
 mod commands;
 mod db;
@@ -23,6 +24,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // Initialize logging
             app.handle().plugin(
@@ -35,6 +37,7 @@ pub fn run() {
             )?;
 
             app.manage(startup::StartupState::default());
+            app.manage(updater::UpdateManager::default());
             app.manage(OcrTaskManager::default());
             app.manage(RapidOcrWorkerPool::default());
             startup::start(app.handle().clone())?;
@@ -61,6 +64,10 @@ pub fn run() {
             commands::search::search,
             commands::search::analyze_search_query,
             startup::get_startup_status,
+            updater::get_app_update_status,
+            updater::check_app_update,
+            updater::download_app_update,
+            updater::install_app_update,
             // Runtime logs
             commands::logs::get_runtime_logs,
             // Viewer

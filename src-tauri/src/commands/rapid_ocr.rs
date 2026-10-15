@@ -142,6 +142,8 @@ pub async fn install_rapid_ocr(
     app: AppHandle,
     db: State<'_, Database>,
 ) -> Result<RapidOcrStatus, String> {
+    let tasks = crate::background::state::<crate::commands::ocr_control::OcrTaskManager>(&app)?;
+    let _registration = tasks.register("runtime-install-rapid")?;
     let mode = RapidDeviceMode::parse(
         &device_mode.unwrap_or_else(|| setting(&db, "rapidocr_device_mode", "auto")),
     );

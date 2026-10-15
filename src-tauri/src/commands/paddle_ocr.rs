@@ -142,6 +142,8 @@ pub async fn install_paddle_ocr(
     app: AppHandle,
     db: State<'_, Database>,
 ) -> Result<PaddleOcrStatus, String> {
+    let tasks = crate::background::state::<crate::commands::ocr_control::OcrTaskManager>(&app)?;
+    let _registration = tasks.register("runtime-install-paddle")?;
     let mode = PaddleDeviceMode::parse(
         &device_mode.unwrap_or_else(|| setting(&db, "paddle_device_mode", "auto")),
     );

@@ -1,8 +1,16 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "XDocuments",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "identifier": "com.xdocuments.manager",
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IENFNDRDRDE5Rjk1MDhDQTMKUldTampGRDVHYzFFenBPa21uV0M4U2FRSUYvSW01c3NmTmo0SjRwcTFiRWhrYjdUaHBqWmh3NzAK",
+      "endpoints": ["https://github.com/YunyingTech/XDocumentsmanager/releases/latest/download/latest.json"],
+      "windows": { "installMode": "quiet" },
+      "requireSignedVersion": false
+    }
+  },
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
@@ -28,6 +36,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "resources": [
       "resources/elasticsearch/**/*",

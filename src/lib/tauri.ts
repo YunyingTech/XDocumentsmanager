@@ -233,6 +233,22 @@ export async function setSetting(key: string, value: string): Promise<void> {
   return invoke('set_setting', { key, value });
 }
 
+export async function getAppUpdateStatus(): Promise<import('../types').AppUpdateStatus> {
+  return invoke('get_app_update_status');
+}
+
+export async function checkAppUpdate(startup = false): Promise<void> {
+  return invoke('check_app_update', { startup });
+}
+
+export async function downloadAppUpdate(): Promise<void> {
+  return invoke('download_app_update');
+}
+
+export async function installAppUpdate(): Promise<void> {
+  return invoke('install_app_update');
+}
+
 export async function getDbPath(): Promise<string> {
   return invoke('get_db_path');
 }
