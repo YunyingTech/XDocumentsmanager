@@ -1,7 +1,7 @@
 {
   "name": "xdocumentsmanager",
   "private": true,
-  "version": "0.1.11",
+  "version": "0.1.12",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -34,6 +34,11 @@
     "react-dom": "^19.2.7",
     "zustand": "^5.0.14"
   },
+  "overrides": {
+    "@tailwindcss/typography": {
+      "postcss-selector-parser": "^6.1.6"
+    }
+  },
   "devDependencies": {
     "@tailwindcss/typography": "^0.5.20",
     "@tauri-apps/cli": "^2.11.4",
@@ -44,7 +49,7 @@
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",
-    "@vitest/coverage-v8": "^5.0.0",
+    "@vitest/coverage-v8": "^5.1.0",
     "autoprefixer": "^10.5.3",
     "esbuild": "^0.28.1",
     "jsdom": "^29.1.1",
@@ -53,6 +58,6 @@
     "tailwindcss": "^3.4.19",
     "typescript": "~6.0.2",
     "vite": "^8.1.1",
-    "vitest": "^5.0.0"
+    "vitest": "^5.1.0"
   }
 }

@@ -167,6 +167,7 @@ export interface SearchBackendStatus {
 }
 
 export interface SearchFilters {
+  scope?: 'all' | 'title' | 'content';
   folder_id?: number;
   date_from?: string;
   date_to?: string;

@@ -145,8 +145,19 @@ pub struct SearchBackendStatus {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchScope {
+    #[default]
+    All,
+    Title,
+    Content,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SearchFilters {
+    #[serde(default)]
+    pub scope: SearchScope,
     pub folder_id: Option<i64>,
     pub date_from: Option<String>,
     pub date_to: Option<String>,

@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
 import { useSearchStore } from '../../stores/searchStore';
+import { useFolderStore } from '../../stores/folderStore';
 import { SearchBar } from './SearchBar';
 import { SearchResults } from './SearchResults';
 import { PdfViewer } from '../viewer/PdfViewer';
 import { EmptyState } from '../common/EmptyState';
 import { AlertCircle, Check, DatabaseZap, FileSearch, ListFilter, LoaderCircle, Search, Sparkles } from 'lucide-react';
 import { useI18n, type TranslationKey } from '../../lib/i18n';
-import type { SearchQueryAnalysis } from '../../types';
+import type { SearchFilters, SearchQueryAnalysis } from '../../types';
 
 const stages = [
   { id: 'searching', label: 'search.stageSearching', icon: DatabaseZap, threshold: 50 },
@@ -16,6 +17,9 @@ const stages = [
 export function SearchView() {
   const { t, plural } = useI18n();
   const query = useSearchStore((s) => s.query);
+  const filters = useSearchStore((s) => s.filters);
+  const setFilters = useSearchStore((s) => s.setFilters);
+  const folders = useFolderStore((s) => s.folders);
   const results = useSearchStore((s) => s.results);
   const isSearching = useSearchStore((s) => s.isSearching);
   const progress = useSearchStore((s) => s.progress);
@@ -59,6 +63,28 @@ export function SearchView() {
           {total > 0 && <span>{plural('search.resultCount', total)}</span>}
           {elapsedMs !== null && <span className="font-mono tabular-nums">{t('search.duration', { duration: formatDuration(elapsedMs) })}</span>}
         </div>
+      </div>
+
+      <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-surface-200 px-4 py-2 text-xs dark:border-surface-800">
+        <label className="flex items-center gap-2">
+          <span className="shrink-0 whitespace-nowrap">{t('search.scope')}</span>
+          <select aria-label={t('search.scope')} className="input h-8 w-auto py-1 text-xs" value={filters.scope ?? 'all'}
+            onChange={(event) => setFilters({ ...filters, scope: event.target.value as SearchFilters['scope'] })}>
+            <option value="all">{t('search.scopeAll')}</option>
+            <option value="title">{t('search.scopeTitle')}</option>
+            <option value="content">{t('search.scopeContent')}</option>
+          </select>
+        </label>
+        <label className="flex min-w-0 items-center gap-2">
+          <span className="shrink-0 whitespace-nowrap">{t('search.folder')}</span>
+          <select aria-label={t('search.folder')} className="input h-8 max-w-72 py-1 text-xs" value={filters.folder_id ?? ''}
+            onChange={(event) => setFilters({ ...filters, folder_id: event.target.value ? Number(event.target.value) : undefined })}>
+            <option value="">{t('search.allFolders')}</option>
+            {folders.map((folder) => (
+              <option key={folder.id} value={folder.id}>{folder.display_name || folder.path} — {folder.path}</option>
+            ))}
+          </select>
+        </label>
       </div>
 
       {(isAnalyzing || analysis || analysisError) && (

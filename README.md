@@ -19,6 +19,8 @@ Files stay in place. Local indexing, RapidOCR, Windows OCR, and PaddleOCR do not
 
 ## Incremental processing model
 
+Search supports **All fields**, **Title / file name**, and **Content only**, combined with all indexed folders or one selected folder. Title searches match file names and PDF title metadata; content searches match indexed body/OCR text only. These options query the existing Elasticsearch and Tantivy fields and require no re-indexing after upgrading. Changing filters resets pagination.
+
 Indexing is incremental by default. Each scan streams directory entries instead of collecting the full tree in memory, compares file size and nanosecond modification time, and hashes only new or changed PDFs. Search documents are updated or deleted in bounded batches. The **Full re-index** command is a separate, confirmed action that re-hashes every PDF and rebuilds both search backends.
 
 OCR is incremental by default as well. Automatic and manual candidate lists include only indexed PDFs whose current content has not completed OCR. When a PDF's content hash changes, its previous OCR text is invalidated and the file becomes eligible again. Automatic OCR reads candidates with an ID cursor in batches of 100 and prevents duplicate passes for the same folder.

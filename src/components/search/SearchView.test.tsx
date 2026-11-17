@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { fileFixture, searchResultFixture } from '../../test/fixtures';
+import { fileFixture, folderFixture, searchResultFixture } from '../../test/fixtures';
 
 const tauri = vi.hoisted(() => ({
   analyzeSearchQuery: vi.fn(),
@@ -22,12 +22,14 @@ vi.mock('../viewer/PdfViewer', () => ({
 
 import { useSearchStore } from '../../stores/searchStore';
 import { useUIStore } from '../../stores/uiStore';
+import { useFolderStore } from '../../stores/folderStore';
 import { SearchView } from './SearchView';
 
 describe('search result workflow', () => {
   beforeEach(() => {
     Object.values(tauri).forEach((mock) => mock.mockReset());
     useUIStore.setState({ language: 'en' });
+    useFolderStore.setState({ folders: [folderFixture(), folderFixture({ id: 20, display_name: 'Documents', path: '\\\\nas\\archive' })] });
     useSearchStore.setState({
       query: 'audit',
       results: [],
@@ -50,6 +52,21 @@ describe('search result workflow', () => {
       activeTerms: [],
       activeQueryModel: null,
     });
+  });
+
+  it('combines title/content scope and folder selection, and can reset to all folders', async () => {
+    const user = userEvent.setup();
+    tauri.search.mockResolvedValue({ results: [], elapsed_ms: 1, total: 0, page: 0, page_size: 25, total_pages: 0 });
+    render(<SearchView />);
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Search in' }), 'title');
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Folder' }), '20');
+    expect(useSearchStore.getState().filters).toEqual({ scope: 'title', folder_id: 20 });
+    expect(screen.getByRole('option', { name: /Documents.*nas/ })).toBeInTheDocument();
+    await useSearchStore.getState().doSearch();
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Search in' }), 'content');
+    expect(tauri.search).toHaveBeenLastCalledWith('audit', { scope: 'content', folder_id: 20 }, 0, 25, expect.any(Number), [], undefined);
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Folder' }), '');
+    expect(useSearchStore.getState().filters).toEqual({ scope: 'content', folder_id: undefined });
   });
 
   it('opens the selected PDF in the embedded right-side preview and can close it', async () => {

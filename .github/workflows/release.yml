@@ -70,6 +70,14 @@ jobs:
         with:
           args: ${{ matrix.args }}
 
+      - name: Verify scoped search against real Elasticsearch
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:XDOCUMENTS_ELASTICSEARCH_HOME = (Resolve-Path src-tauri/resources/elasticsearch/runtime).Path
+          cargo test --manifest-path src-tauri/Cargo.toml scoped_search_matches_real -- --ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Stage release assets
         shell: pwsh
         run: |

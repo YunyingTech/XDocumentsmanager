@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
 
-use crate::models::{SearchBackendStatus, SearchFilters};
+use crate::models::{SearchBackendStatus, SearchFilters, SearchScope};
 
 use super::engine::{for_each_document, SearchDocument, SearchHit};
 
@@ -371,6 +371,11 @@ impl ElasticRuntime {
                 filter.push(json!({ "range": { "modified_at": range } }));
             }
         }
+        let fields = match filters.map_or(SearchScope::All, |filters| filters.scope) {
+            SearchScope::All => vec!["file_name^4", "title^3", "keywords^2", "author", "content"],
+            SearchScope::Title => vec!["file_name^4", "title^3"],
+            SearchScope::Content => vec!["content"],
+        };
         let payload = json!({
             "from": offset,
             "size": limit,
@@ -380,7 +385,7 @@ impl ElasticRuntime {
                 "bool": {
                     "must": [{ "simple_query_string": {
                         "query": query,
-                        "fields": ["file_name^4", "title^3", "keywords^2", "author", "content"],
+                        "fields": fields,
                         "default_operator": "and"
                     }}],
                     "filter": filter
@@ -699,6 +704,7 @@ fn copy_directory(source: &Path, destination: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{bulk_has_fatal_errors, prepare_runtime_config, ElasticRuntime};
+    use crate::models::{SearchFilters, SearchScope};
     use serde_json::{json, Value};
 
     #[test]
@@ -845,7 +851,15 @@ mod tests {
         *runtime.endpoint.write().unwrap() = Some(endpoint);
         *runtime.version.write().unwrap() = Some("8.17.0".to_string());
 
-        let page = runtime.search("audit", None, 25, 10).unwrap().unwrap();
+        let filters = SearchFilters {
+            scope: SearchScope::Content,
+            folder_id: Some(42),
+            ..Default::default()
+        };
+        let page = runtime
+            .search("audit", Some(&filters), 25, 10)
+            .unwrap()
+            .unwrap();
 
         assert_eq!(page.total, 123);
         assert_eq!(page.hits[0].file_id, 42);
@@ -854,6 +868,15 @@ mod tests {
         assert_eq!(body["from"], 25);
         assert_eq!(body["size"], 10);
         assert_eq!(body["track_total_hits"], true);
+        assert_eq!(body["_source"], json!(["file_id"]));
+        assert_eq!(
+            body["query"]["bool"]["must"][0]["simple_query_string"]["fields"],
+            json!(["content"])
+        );
+        assert_eq!(
+            body["query"]["bool"]["filter"],
+            json!([{"term": {"folder_id": 42}}])
+        );
     }
 
     #[test]

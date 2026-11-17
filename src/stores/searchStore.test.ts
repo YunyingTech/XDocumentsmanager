@@ -102,6 +102,33 @@ describe('search store', () => {
     expect(useSearchStore.getState().searchElapsedMs).toBe(2);
   });
 
+  it('invalidates an in-flight result when the query changes without submitting again', async () => {
+    const pending = deferred<SearchResponse>();
+    mocks.search.mockReturnValue(pending.promise);
+    useSearchStore.getState().setQuery('old');
+    const request = useSearchStore.getState().doSearch();
+    useSearchStore.getState().setQuery('new');
+    pending.resolve({ results: [searchResultFixture()], elapsed_ms: 1, total: 1, page: 0, page_size: 25, total_pages: 1 });
+    await request;
+    expect(useSearchStore.getState()).toMatchObject({ query: 'new', results: [], isSearching: false, progress: null });
+  });
+
+  it('restarts scoped folder searches on the first page, preserving AI terms and discarding old hits', async () => {
+    const old = deferred<SearchResponse>();
+    const current = deferred<SearchResponse>();
+    mocks.search.mockReturnValueOnce(old.promise).mockReturnValueOnce(current.promise);
+    useSearchStore.getState().setQuery('audit');
+    const first = useSearchStore.getState().doSearch(['审计'], 'test-model', 3);
+    useSearchStore.getState().setFilters({ scope: 'title', folder_id: 10 });
+    expect(mocks.search).toHaveBeenLastCalledWith('audit', { scope: 'title', folder_id: 10 }, 0, 25, expect.any(Number), ['审计'], 'test-model');
+    old.resolve({ results: [searchResultFixture(fileFixture({ id: 99 }))], elapsed_ms: 10, total: 100, page: 3, page_size: 25, total_pages: 4 });
+    await first;
+    expect(useSearchStore.getState().results).toEqual([]);
+    current.resolve({ results: [], elapsed_ms: 1, total: 0, page: 0, page_size: 25, total_pages: 0 });
+    await vi.waitFor(() => expect(useSearchStore.getState().isSearching).toBe(false));
+    expect(useSearchStore.getState()).toMatchObject({ filters: { scope: 'title', folder_id: 10 }, results: [], total: 0, page: 0 });
+  });
+
   it('uses the latest analysis and searches selected terms with its model', async () => {
     const analysis: SearchQueryAnalysis = { terms: ['supplier', 'risk'], elapsed_ms: 3, model: 'gpt-test' };
     mocks.analyzeSearchQuery.mockResolvedValue(analysis);

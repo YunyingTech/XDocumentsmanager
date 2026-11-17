@@ -13,7 +13,7 @@ use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy, Term};
 
 use super::elastic::ElasticRuntime;
 use super::schema::{build_schema, SearchFields};
-use crate::models::{SearchBackendStatus, SearchFilters};
+use crate::models::{SearchBackendStatus, SearchFilters, SearchScope};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchDocument {
@@ -237,18 +237,27 @@ impl SearchEngine {
         limit: usize,
     ) -> Result<SearchPage, String> {
         let searcher = self.reader.searcher();
-        let mut parser = QueryParser::for_index(
-            &self.index,
-            vec![
+        let scope = filters.map_or(SearchScope::All, |filters| filters.scope);
+        let fields = match scope {
+            SearchScope::Title => vec![self.fields.file_name, self.fields.title],
+            SearchScope::Content => vec![self.fields.content],
+            SearchScope::All => vec![
                 self.fields.file_name,
                 self.fields.content,
                 self.fields.title,
                 self.fields.author,
                 self.fields.keywords,
             ],
-        );
+        };
+        let mut parser = QueryParser::for_index(&self.index, fields);
         parser.set_conjunction_by_default();
         let embedded_query = query_text.replace(" | ", " OR ");
+        // Keep field-qualified input from escaping the selected scope, including ranges.
+        let embedded_query = if scope == SearchScope::All {
+            embedded_query
+        } else {
+            literal_field_separators(&embedded_query)
+        };
         let text_query = parser
             .parse_query(&embedded_query)
             .or_else(|_| parser.parse_query(&escape_query(query_text)))
@@ -442,6 +451,19 @@ fn is_cjk(character: char) -> bool {
     )
 }
 
+fn literal_field_separators(query: &str) -> String {
+    let mut result = String::with_capacity(query.len());
+    let mut escaped = false;
+    for character in query.chars() {
+        if character == ':' && !escaped {
+            result.push('\\');
+        }
+        result.push(character);
+        escaped = character == '\\' && !escaped;
+    }
+    result
+}
+
 fn escape_query(query: &str) -> String {
     query
         .split_whitespace()
@@ -518,6 +540,7 @@ mod tests {
             .search(
                 "compliance",
                 Some(&SearchFilters {
+                    scope: SearchScope::All,
                     folder_id: Some(2),
                     date_from: Some("2026-01-01".to_string()),
                     date_to: Some("2026-01-31T23:59:59".to_string()),
@@ -532,6 +555,191 @@ mod tests {
         assert_eq!(filtered.total, 1);
         assert_eq!(filtered.hits[0].file_id, 7);
 
+        drop(engine);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn existing_index_supports_scopes_and_folders_without_reindexing() {
+        let path = std::env::temp_dir().join(format!("xdocuments-scopes-{}", uuid::Uuid::new_v4()));
+        {
+            let engine = SearchEngine::open(&path).unwrap();
+            let documents = [
+                (1, 10, "星河.pdf", "ordinary", ""),
+                (2, 10, "body.pdf", "星河", ""),
+                (3, 20, "metadata.pdf", "ordinary", "星河"),
+                (4, 20, "星河.pdf", "星河", ""),
+            ]
+            .map(
+                |(file_id, folder_id, name, content, title)| SearchDocument {
+                    file_id,
+                    folder_id,
+                    file_name: name.into(),
+                    content: content.into(),
+                    title: title.into(),
+                    author: "authoronly".into(),
+                    keywords: "keywordonly".into(),
+                    extension: "pdf".into(),
+                    modified_at: "2026-01-01".into(),
+                    size_bytes: 100,
+                },
+            );
+            engine.apply_changes(&documents, &[]).unwrap();
+        }
+        let before = std::fs::read(path.join("meta.json")).unwrap();
+        let engine = SearchEngine::open(&path).unwrap();
+        for (scope, folder_id, expected) in [
+            (SearchScope::All, None, vec![1, 2, 3, 4]),
+            (SearchScope::Title, None, vec![1, 3, 4]),
+            (SearchScope::Content, None, vec![2, 4]),
+            (SearchScope::Title, Some(10), vec![1]),
+            (SearchScope::Title, Some(20), vec![3, 4]),
+            (SearchScope::Content, Some(10), vec![2]),
+            (SearchScope::Content, Some(999), vec![]),
+        ] {
+            let filters = SearchFilters {
+                scope,
+                folder_id,
+                ..Default::default()
+            };
+            let page = engine.search("星河", Some(&filters), 0, 10).unwrap();
+            let mut actual: Vec<_> = page.hits.iter().map(|hit| hit.file_id).collect();
+            actual.sort();
+            assert_eq!(actual, expected, "{scope:?} {folder_id:?}");
+            assert_eq!(page.total, expected.len() as u64);
+            let paged = engine.search("星河", Some(&filters), 1, 1).unwrap();
+            assert_eq!(paged.total, expected.len() as u64);
+            assert_eq!(paged.hits.len(), usize::from(expected.len() > 1));
+        }
+        for scope in [SearchScope::Title, SearchScope::Content] {
+            let filters = SearchFilters {
+                scope,
+                ..Default::default()
+            };
+            for query in [
+                "authoronly",
+                "keywordonly",
+                "author:authoronly",
+                "folder_id:10",
+                "file_id:[1 TO 4]",
+            ] {
+                assert_eq!(
+                    engine.search(query, Some(&filters), 0, 10).unwrap().total,
+                    0,
+                    "{scope:?}: {query}"
+                );
+            }
+        }
+        let filters = SearchFilters {
+            scope: SearchScope::Content,
+            ..Default::default()
+        };
+        assert_eq!(
+            engine
+                .search("(星河) | (不存在)", Some(&filters), 0, 10)
+                .unwrap()
+                .total,
+            2
+        );
+        assert_eq!(before, std::fs::read(path.join("meta.json")).unwrap());
+        assert_eq!(engine.reader.searcher().num_docs(), 4);
+        let legacy: SearchFilters = serde_json::from_str(r#"{"folder_id":10}"#).unwrap();
+        assert_eq!(legacy.scope, SearchScope::All);
+        assert!(serde_json::from_str::<SearchFilters>(r#"{"scope":"unknown"}"#).is_err());
+        drop(engine);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires XDOCUMENTS_ELASTICSEARCH_HOME"]
+    fn scoped_search_matches_real_elasticsearch_without_changing_existing_indexes() {
+        let distribution = std::env::var("XDOCUMENTS_ELASTICSEARCH_HOME").unwrap();
+        let path =
+            std::env::temp_dir().join(format!("xdocuments-real-scopes-{}", uuid::Uuid::new_v4()));
+        let engine = SearchEngine::open(&path.join("tantivy")).unwrap();
+        engine.configure_elasticsearch(
+            PathBuf::from(distribution),
+            path.join("es-data"),
+            path.join("logs"),
+        );
+        engine.start_elasticsearch().unwrap();
+        let documents: Vec<_> = (0..1000)
+            .map(|id| SearchDocument {
+                file_id: id,
+                folder_id: id % 4,
+                file_name: if id % 3 == 0 {
+                    "星河 audit.pdf"
+                } else {
+                    "ordinary.pdf"
+                }
+                .into(),
+                title: if id % 3 == 2 { "星河 audit" } else { "" }.into(),
+                content: if id % 3 == 1 {
+                    "星河 audit"
+                } else {
+                    "ordinary report"
+                }
+                .into(),
+                author: "authoronly".into(),
+                keywords: "keywordonly".into(),
+                extension: "pdf".into(),
+                modified_at: "2026-01-01".into(),
+                size_bytes: 100,
+            })
+            .collect();
+        engine.apply_changes(&documents, &[]).unwrap();
+        let meta = std::fs::read(path.join("tantivy/meta.json")).unwrap();
+        let endpoint = engine.backend_status().endpoint.unwrap();
+        let snapshot = || -> serde_json::Value {
+            reqwest::blocking::get(format!("{endpoint}/xdocuments-v1/_stats?filter_path=indices.*.primaries.docs,indices.*.primaries.indexing.index_total"))
+                .unwrap().error_for_status().unwrap().json().unwrap()
+        };
+        let before = snapshot();
+        assert!(before.get("indices").is_some());
+        let started = std::time::Instant::now();
+        let mut queries = 0;
+        for scope in [SearchScope::All, SearchScope::Title, SearchScope::Content] {
+            for folder_id in [None, Some(0), Some(1), Some(3), Some(999)] {
+                let filters = SearchFilters {
+                    scope,
+                    folder_id,
+                    ..Default::default()
+                };
+                for query in ["星河", "audit", "(星河) | (missingterm)", "authoronly"] {
+                    let elastic = engine
+                        .elastic
+                        .search(query, Some(&filters), 0, 100)
+                        .unwrap()
+                        .unwrap();
+                    let embedded = engine
+                        .search_embedded(query, Some(&filters), 0, 100)
+                        .unwrap();
+                    assert_eq!(
+                        elastic.total, embedded.total,
+                        "{query}: {scope:?} {folder_id:?}"
+                    );
+                    assert_eq!(elastic.hits.len(), embedded.hits.len());
+                    for hit in &elastic.hits {
+                        let document = &documents[hit.file_id as usize];
+                        assert!(folder_id.is_none_or(|folder| folder == document.folder_id));
+                        if query != "authoronly" {
+                            match scope {
+                                SearchScope::Title => assert!(
+                                    document.file_name.contains("星河")
+                                        || document.title.contains("星河")
+                                ),
+                                SearchScope::Content => assert!(document.content.contains("星河")),
+                                SearchScope::All => (),
+                            }
+                        }
+                    }
+                    queries += 1;
+                }
+            }
+        }
+        println!("Validated {queries} scope/folder/query combinations on 1000 indexed PDFs in {} ms (both backends)", started.elapsed().as_millis());
+        assert_eq!(before, snapshot());
+        assert_eq!(meta, std::fs::read(path.join("tantivy/meta.json")).unwrap());
         drop(engine);
         let _ = std::fs::remove_dir_all(path);
     }

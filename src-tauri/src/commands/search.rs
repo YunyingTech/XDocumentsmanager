@@ -3,10 +3,12 @@ use std::path::Path;
 use std::time::Instant;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 
 use crate::db::Database;
-use crate::models::{FileInfo, SearchFilters, SearchQueryAnalysis, SearchResponse, SearchResult};
+use crate::models::{
+    FileInfo, SearchFilters, SearchQueryAnalysis, SearchResponse, SearchResult, SearchScope,
+};
 use crate::search::engine::normalize_cjk_ocr_spacing;
 use crate::search::SearchEngine;
 
@@ -39,7 +41,6 @@ pub async fn search(
     page_size: Option<i64>,
     request_id: Option<u64>,
     app: AppHandle,
-    db: State<'_, Database>,
 ) -> Result<SearchResponse, String> {
     let started = Instant::now();
     let request_id = request_id.unwrap_or(0);
@@ -63,7 +64,7 @@ pub async fn search(
     let search_app = app.clone();
     let search_filters = filters.clone();
     let search_page = match tokio::task::spawn_blocking(move || {
-        let engine = search_app.state::<SearchEngine>();
+        let engine = crate::background::state::<SearchEngine>(&search_app)?;
         engine.search(
             &engine_query,
             search_filters.as_ref(),
@@ -93,67 +94,80 @@ pub async fn search(
         search_page.hits.len(),
         search_page.total
     );
-    let conn = db.get_connection();
-    let hydrated = load_files(
-        &conn,
-        &search_page
-            .hits
-            .iter()
-            .map(|hit| hit.file_id)
-            .collect::<Vec<_>>(),
-    )?;
-    let mut results = Vec::with_capacity(search_page.hits.len());
-
-    for hit in search_page.hits {
-        let Some((file, folder_path)) = hydrated.get(&hit.file_id).cloned() else {
-            continue;
-        };
-        let absolute_path = Path::new(&folder_path)
-            .join(&file.relative_path)
-            .to_string_lossy()
-            .to_string();
-        let searchable_preview =
-            normalize_cjk_ocr_spacing(file.text_preview.as_deref().unwrap_or_default());
-        let matched_terms = matched_ai_terms(&file, &selected_terms);
+    let response_app = app.clone();
+    let result = crate::background::run(move || {
+        let db = crate::background::state::<Database>(&app)?;
+        let conn = db.get_connection();
+        let mut hydrated = load_files(
+            &conn,
+            &search_page
+                .hits
+                .iter()
+                .map(|hit| hit.file_id)
+                .collect::<Vec<_>>(),
+        )?;
+        drop(conn);
+        let mut results = Vec::with_capacity(search_page.hits.len());
         let snippet_query = highlight_terms.join(" ");
-        results.push(SearchResult {
-            snippet: make_snippet(&searchable_preview, &snippet_query),
-            file,
-            score: hit.score as f64,
-            folder_path,
-            absolute_path,
-            matched_terms,
-            highlight_terms: highlight_terms.clone(),
-            match_model: match_model.clone(),
-        });
-    }
+        let scope = filters
+            .as_ref()
+            .map_or(SearchScope::All, |filters| filters.scope);
 
-    let total = search_page.total.min(i64::MAX as u64) as i64;
-    let total_pages = if total == 0 {
-        0
-    } else {
-        (total + page_size - 1) / page_size
-    };
+        for hit in search_page.hits {
+            let Some((file, folder_path)) = hydrated.remove(&hit.file_id) else {
+                continue;
+            };
+            let absolute_path = Path::new(&folder_path)
+                .join(&file.relative_path)
+                .to_string_lossy()
+                .to_string();
+            let searchable_preview =
+                normalize_cjk_ocr_spacing(file.text_preview.as_deref().unwrap_or_default());
+            let matched_terms = matched_ai_terms_in_scope(&file, &selected_terms, scope);
+            results.push(SearchResult {
+                snippet: make_snippet(&searchable_preview, &snippet_query),
+                file,
+                score: hit.score as f64,
+                folder_path,
+                absolute_path,
+                matched_terms,
+                highlight_terms: highlight_terms.clone(),
+                match_model: match_model.clone(),
+            });
+        }
 
-    let _ = conn.execute(
-        "INSERT INTO search_history (query_text, result_count) VALUES (?1, ?2)",
-        rusqlite::params![query, total],
-    );
-    emit_progress(&app, request_id, "completed", 100);
-    log::info!(
-        "Search {} completed with {} results in {} ms",
-        request_id,
-        results.len(),
-        started.elapsed().as_millis()
-    );
-    Ok(SearchResponse {
-        results,
-        elapsed_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
-        total,
-        page,
-        page_size,
-        total_pages,
+        let total = search_page.total.min(i64::MAX as u64) as i64;
+        let total_pages = if total == 0 {
+            0
+        } else {
+            (total + page_size - 1) / page_size
+        };
+
+        let _ = db.get_connection().execute(
+            "INSERT INTO search_history (query_text, result_count) VALUES (?1, ?2)",
+            rusqlite::params![query, total],
+        );
+        emit_progress(&app, request_id, "completed", 100);
+        log::info!(
+            "Search {} completed with {} results in {} ms",
+            request_id,
+            results.len(),
+            started.elapsed().as_millis()
+        );
+        Ok(SearchResponse {
+            results,
+            elapsed_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+            total,
+            page,
+            page_size,
+            total_pages,
+        })
     })
+    .await;
+    if result.is_err() {
+        emit_progress(&response_app, request_id, "failed", 100);
+    }
+    result
 }
 
 #[tauri::command]
@@ -202,17 +216,21 @@ fn escape_search_term(term: &str) -> String {
     escaped
 }
 
-fn matched_ai_terms(file: &FileInfo, terms: &[String]) -> Vec<String> {
+fn matched_ai_terms_in_scope(file: &FileInfo, terms: &[String], scope: SearchScope) -> Vec<String> {
     if terms.is_empty() {
         return Vec::new();
     }
-    let searchable = [
-        Some(file.file_name.as_str()),
-        file.text_preview.as_deref(),
-        file.pdf_title.as_deref(),
-        file.pdf_author.as_deref(),
-        file.pdf_keywords.as_deref(),
-    ]
+    let searchable = match scope {
+        SearchScope::Title => vec![Some(file.file_name.as_str()), file.pdf_title.as_deref()],
+        SearchScope::Content => vec![file.text_preview.as_deref()],
+        SearchScope::All => vec![
+            Some(file.file_name.as_str()),
+            file.text_preview.as_deref(),
+            file.pdf_title.as_deref(),
+            file.pdf_author.as_deref(),
+            file.pdf_keywords.as_deref(),
+        ],
+    }
     .into_iter()
     .flatten()
     .collect::<Vec<_>>()
@@ -368,10 +386,10 @@ fn matches_filters(file: &FileInfo, filters: Option<&SearchFilters>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        make_snippet, matches_filters, matching_ai_terms, normalize_selected_terms,
-        search_highlight_terms, selected_terms_query,
+        make_snippet, matched_ai_terms_in_scope, matches_filters, matching_ai_terms,
+        normalize_selected_terms, search_highlight_terms, selected_terms_query,
     };
-    use crate::models::{FileInfo, SearchFilters};
+    use crate::models::{FileInfo, SearchFilters, SearchScope};
 
     fn file_fixture() -> FileInfo {
         FileInfo {
@@ -396,6 +414,26 @@ mod tests {
             pdf_subject: None,
             pdf_keywords: None,
         }
+    }
+
+    #[test]
+    fn ai_match_labels_respect_the_selected_scope() {
+        let mut file = file_fixture();
+        file.pdf_title = Some("TitleOnly".into());
+        file.pdf_author = Some("AuthorOnly".into());
+        let terms = vec!["TitleOnly".into(), "Compliance".into(), "AuthorOnly".into()];
+        assert_eq!(
+            matched_ai_terms_in_scope(&file, &terms, SearchScope::Title),
+            vec!["TitleOnly"]
+        );
+        assert_eq!(
+            matched_ai_terms_in_scope(&file, &terms, SearchScope::Content),
+            vec!["Compliance"]
+        );
+        assert_eq!(
+            matched_ai_terms_in_scope(&file, &terms, SearchScope::All),
+            terms
+        );
     }
 
     #[test]
@@ -430,6 +468,7 @@ mod tests {
         assert!(matches_filters(
             &file,
             Some(&SearchFilters {
+                scope: Default::default(),
                 folder_id: Some(2),
                 date_from: Some("2026-07-01".to_string()),
                 date_to: Some("2026-07-31".to_string()),
@@ -441,6 +480,7 @@ mod tests {
         assert!(!matches_filters(
             &file,
             Some(&SearchFilters {
+                scope: Default::default(),
                 folder_id: Some(3),
                 date_from: None,
                 date_to: None,
@@ -452,6 +492,7 @@ mod tests {
         assert!(!matches_filters(
             &file,
             Some(&SearchFilters {
+                scope: Default::default(),
                 folder_id: None,
                 date_from: None,
                 date_to: None,

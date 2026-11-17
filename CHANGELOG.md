@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.12 — 2026-11-17
+
+### Added
+
+- Search all fields, titles/file names only, or document content only. Combine any mode with a specific indexed folder or all folders.
+- Use the existing Elasticsearch and Tantivy fields directly. No index schema, tokenizer, database migration, or index rebuild is required for these search options.
+
+### Fixed and improved
+
+- Reset pagination and discard stale results when the search text, mode, or folder changes; preserve selected AI terms when changing filters.
+- Move search-result database reads, history writes, and snippet generation to background workers. Release the database lock before processing document text and avoid copying full document text during hydration.
+- Keep title/content-only queries within their selected fields, including field-qualified input in the embedded backend.
+- Replace the search hint that advertised unsupported `name:`, `ext:`, and `size:` shortcuts with a keyword hint.
+- Update affected frontend tool dependencies and override the typography plugin's selector parser to resolve all eight reported npm audit findings.
+
+### Validation
+
+- Add stored-index compatibility checks, scope/folder combination tests, pagination and stale-request regressions.
+- Add a release gate that compares 60 queries across real Elasticsearch and Tantivy on 1,000 indexed documents and verifies that the queries do not change index data.
+
 ## 0.1.10 — 2026-10-10
 
 ### Fixed

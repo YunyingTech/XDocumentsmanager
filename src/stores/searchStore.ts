@@ -65,11 +65,17 @@ export const useSearchStore = create<SearchStore>((set, get) => ({
   activeQueryModel: null,
 
   setQuery: (query) => {
+    latestSearchRequest += 1;
     latestAnalysisRequest += 1;
-    set({ query, error: null, analysis: null, selectedTerms: [], analysisError: null, isAnalyzing: false, page: 0, total: 0, totalPages: 0, activeTerms: [], activeQueryModel: null });
+    set({ query, results: [], selectedResultId: null, isSearching: false, progress: null, searchStartedAt: null, searchElapsedMs: null, error: null, analysis: null, selectedTerms: [], analysisError: null, isAnalyzing: false, page: 0, total: 0, totalPages: 0, activeTerms: [], activeQueryModel: null });
   },
 
-  setFilters: (filters) => set({ filters }),
+  setFilters: (filters) => {
+    const { query, activeTerms, activeQueryModel, progress } = get();
+    latestSearchRequest += 1;
+    set({ filters, results: [], selectedResultId: null, page: 0, total: 0, totalPages: 0, isSearching: false, progress: null, error: null, searchStartedAt: null, searchElapsedMs: null });
+    if (query.trim() && progress) void get().doSearch(activeTerms, activeQueryModel ?? undefined);
+  },
 
   doSearch: async (terms, queryModel, requestedPage = 0) => {
     const requestId = ++latestSearchRequest;
