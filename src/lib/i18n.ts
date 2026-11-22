@@ -190,6 +190,7 @@ const en = {
   'search.noResultsHint': 'No PDFs matched "{query}". Try different keywords or check your spelling.',
   'search.relevance': 'Relevance {score}%',
   'search.openFolder': 'Open containing folder',
+  'search.openFolderFailed': 'Could not open the containing folder. The file may have moved or the location may be unavailable. {error}',
   'search.analyze': 'Analyze query with AI',
   'search.analyzing': 'Analyzing query with the configured language model…',
   'search.analysisFailed': 'AI analysis failed: {error}',
@@ -377,6 +378,7 @@ export type TranslationKey = keyof typeof en;
 type Variables = Record<string, string | number>;
 
 const zh: Record<TranslationKey, string> = {
+  'search.openFolderFailed': '打开所在文件夹失败，文件可能已移动，或所在位置暂时不可访问。{error}',
   'search.scope': '搜索方式',
   'search.scopeAll': '全部字段',
   'search.scopeTitle': '标题 / 文件名',

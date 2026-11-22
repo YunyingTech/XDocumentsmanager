@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { fileFixture, folderFixture, searchResultFixture } from '../../test/fixtures';
 
@@ -28,6 +28,7 @@ import { SearchView } from './SearchView';
 describe('search result workflow', () => {
   beforeEach(() => {
     Object.values(tauri).forEach((mock) => mock.mockReset());
+    tauri.showInFolder.mockResolvedValue(undefined);
     useUIStore.setState({ language: 'en' });
     useFolderStore.setState({ folders: [folderFixture(), folderFixture({ id: 20, display_name: 'Documents', path: '\\\\nas\\archive' })] });
     useSearchStore.setState({
@@ -101,6 +102,44 @@ describe('search result workflow', () => {
 
     expect(tauri.showInFolder).toHaveBeenCalledWith(result.absolute_path);
     expect(useSearchStore.getState().selectedResultId).toBeNull();
+  });
+
+  it('shows folder errors without losing results, and lets the user retry', async () => {
+    const result = searchResultFixture(fileFixture({ id: 9, file_name: 'report.pdf' }));
+    useSearchStore.setState({ results: [result] });
+    tauri.showInFolder.mockRejectedValueOnce('The file was moved or is unavailable');
+    const user = userEvent.setup();
+    render(<SearchView />);
+
+    await user.click(screen.getByRole('button', { name: 'Open containing folder' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('The file was moved or is unavailable');
+    expect(screen.getByRole('alert')).toHaveTextContent(result.absolute_path);
+    expect(screen.getByRole('button', { name: 'Preview: report.pdf' })).toBeInTheDocument();
+    expect(useSearchStore.getState().selectedResultId).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'Open containing folder' }));
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+    expect(tauri.showInFolder).toHaveBeenCalledTimes(2);
+  });
+
+  it('prevents duplicate folder opens while the native operation is pending', async () => {
+    const result = searchResultFixture(fileFixture({ id: 10, file_name: 'report.pdf' }));
+    useSearchStore.setState({ results: [result] });
+    let finish!: () => void;
+    tauri.showInFolder.mockReturnValueOnce(new Promise<void>((resolve) => { finish = resolve; }));
+    const user = userEvent.setup();
+    render(<SearchView />);
+    const button = screen.getByRole('button', { name: 'Open containing folder' });
+
+    await user.click(button);
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute('aria-busy', 'true');
+    await user.click(button);
+    expect(tauri.showInFolder).toHaveBeenCalledTimes(1);
+
+    await act(async () => { finish(); });
+    await waitFor(() => expect(button).toBeEnabled());
   });
 
   it('requests the next result page with the active search context', async () => {

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.13 — 2026-11-22
+
+### Fixed and improved
+
+- Fix the folder button in search results opening Explorer Home instead of revealing the matching file. Windows now resolves the file through native Shell APIs and selects it in its containing folder.
+- Support Chinese names, spaces, commas, brackets, extended Windows paths and deeply nested paths without constructing an Explorer command line.
+- Run folder opening in the background, show a loading indicator, prevent repeated clicks while opening, and display an actionable error if a file has moved or its location is unavailable. Keep search results available for retry.
+- Preserve existing indexes, search settings and indexed documents; no reindex is required.
+
+### Validation
+
+- Add regression tests for folder opening failures, retry and pending-state behavior, plus missing-file validation and an opt-in native Explorer integration check.
+- Verify actual Explorer folder location and selected file for ordinary, Chinese/special-character, extended-prefix and long paths.
+
 ## 0.1.12 — 2026-11-17
 
 ### Added

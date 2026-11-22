@@ -1,11 +1,27 @@
+import { useState } from 'react';
 import { useSearchStore } from '../../stores/searchStore';
 import { formatFileSize, formatDate } from '../../lib/format';
-import { ChevronLeft, ChevronRight, FileText, FolderOpen, Sparkles } from 'lucide-react';
+import { ChevronLeft, ChevronRight, FileText, FolderOpen, LoaderCircle, Sparkles } from 'lucide-react';
 import { showInFolder } from '../../lib/tauri';
 import { useI18n } from '../../lib/i18n';
 
 export function SearchResults() {
   const { locale, t } = useI18n();
+  const [openingPath, setOpeningPath] = useState<string | null>(null);
+  const [folderError, setFolderError] = useState<{ path: string; message: string } | null>(null);
+
+  async function openFolder(path: string) {
+    setOpeningPath(path);
+    setFolderError(null);
+    try {
+      await showInFolder(path);
+    } catch (error) {
+      setFolderError({ path, message: String(error) });
+    } finally {
+      setOpeningPath(null);
+    }
+  }
+
   const results = useSearchStore((s) => s.results);
   const selectedResultId = useSearchStore((s) => s.selectedResultId);
   const selectResult = useSearchStore((s) => s.selectResult);
@@ -19,6 +35,12 @@ export function SearchResults() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
+      {folderError && (
+        <div role="alert" className="shrink-0 break-words border-b border-red-200 bg-red-50 px-4 py-3 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">
+          <p>{t('search.openFolderFailed', { error: folderError.message })}</p>
+          <p className="mt-1 break-all">{folderError.path}</p>
+        </div>
+      )}
       <div className="min-h-0 flex-1 space-y-2 overflow-auto p-4">
         {results.map((result) => (
         <article
@@ -54,11 +76,13 @@ export function SearchResults() {
                   className="btn-ghost pointer-events-auto relative z-20 shrink-0 rounded p-1"
                   title={t('search.openFolder')}
                   aria-label={t('search.openFolder')}
-                  onClick={() => {
-                    void showInFolder(result.absolute_path);
-                  }}
+                  disabled={openingPath !== null}
+                  aria-busy={openingPath === result.absolute_path}
+                  onClick={() => void openFolder(result.absolute_path)}
                 >
-                  <FolderOpen size={13} />
+                  {openingPath === result.absolute_path
+                    ? <LoaderCircle size={13} className="animate-spin" />
+                    : <FolderOpen size={13} />}
                 </button>
               </div>
               {/* Snippet */}
