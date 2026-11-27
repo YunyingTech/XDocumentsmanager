@@ -2,6 +2,11 @@ import { useUIStore, type Language } from '../stores/uiStore';
 import { useCallback } from 'react';
 
 const en = {
+  'startup.progress': 'Startup progress',
+  'startup.stages': 'Stages {done}/{total}',
+  'startup.background': 'Preparing search in background',
+  'startup.localSearch': 'Local search is available; see logs for search service details',
+  'startup.stageHint': 'Progress shows completed stages; stage duration depends on your library.',
   'startup.loading': 'Opening your library…',
   'startup.database': 'Preparing the database…',
   'startup.localIndex': 'Preparing the local search index…',
@@ -385,6 +390,11 @@ const zh: Record<TranslationKey, string> = {
   'search.scopeContent': '仅内容',
   'search.folder': '文件夹',
   'search.allFolders': '所有文件夹',
+  'startup.progress': '启动进度',
+  'startup.stages': '阶段 {done}/{total}',
+  'startup.background': '搜索服务正在后台准备',
+  'startup.localSearch': '本地搜索可用，搜索服务详情请查看日志',
+  'startup.stageHint': '进度条显示已完成的阶段，各阶段耗时取决于文档库大小。',
   'startup.loading': '正在打开文档库…',
   'startup.database': '正在准备数据库…',
   'startup.localIndex': '正在准备本地搜索索引…',

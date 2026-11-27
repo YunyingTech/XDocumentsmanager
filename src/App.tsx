@@ -96,7 +96,7 @@ export default function App() {
       {sidebarOpen && <Sidebar />}
       <div className="flex flex-col flex-1 min-w-0">
         <MainPanel startup={startup} />
-        <StatusBar />
+        <StatusBar startup={startup} />
       </div>
     </div>
   );

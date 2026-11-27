@@ -12,9 +12,9 @@ export function useStartup(): StartupStatus {
         const next = await getStartupStatus();
         if (!active) return;
         setStatus(next);
-        if (!next.ready && next.phase !== 'failed') timer = setTimeout(() => void poll(), 500);
+        if (next.phase !== 'ready' && next.phase !== 'failed') timer = setTimeout(() => void poll(), 500);
       } catch (reason) {
-        if (active) setStatus({ phase: 'failed', ready: false, error: String(reason) });
+        if (active) setStatus((previous) => ({ ...previous, phase: previous.ready ? 'ready' : 'failed', error: String(reason) }));
       }
     };
     void poll();

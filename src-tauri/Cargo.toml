@@ -1,6 +1,6 @@
 [package]
 name = "xdocuments"
-version = "0.1.13"
+version = "0.1.14"
 description = "Desktop PDF document manager for local and SMB collections"
 authors = ["you"]
 license = "MIT"
@@ -66,6 +66,7 @@ uuid = { version = "1", features = ["v4"] }
 tauri-plugin-updater = "2"
 minisign-verify = "0.2.5"
 semver = "1"
+tauri-plugin-single-instance = "2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }

@@ -23,7 +23,20 @@ pub fn run_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error
     conn.execute_batch(CREATE_SEARCH_HISTORY)?;
     conn.execute_batch(CREATE_INDEXED_FILES)?;
 
-    normalize_legacy_file_timestamps(conn)?;
+    let legacy_done: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM settings WHERE key = 'legacy_timestamps_v1')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !legacy_done {
+        let tx = conn.unchecked_transaction()?;
+        normalize_legacy_file_timestamps(&tx)?;
+        tx.execute(
+            "INSERT INTO settings(key, value) VALUES ('legacy_timestamps_v1', 'complete')",
+            [],
+        )?;
+        tx.commit()?;
+    }
     recover_interrupted_index_jobs(conn)?;
     resolve_duplicate_active_index_jobs(conn)?;
 
@@ -311,6 +324,35 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "manual startup performance benchmark"]
+    fn benchmark_warm_database_startup() {
+        let path = std::env::temp_dir().join(format!(
+            "xdocuments-startup-bench-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let conn = Connection::open(&path).unwrap();
+        run_migrations(&conn).unwrap();
+        create_indexes(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO watched_folders(path, display_name) VALUES ('benchmark', 'benchmark')",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch("BEGIN; WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<300000) INSERT INTO files(folder_id, relative_path, file_name, file_size_bytes, content_hash, file_modified_at, index_status, text_preview) SELECT 1, x||'.pdf', x||'.pdf', 100, 'hash', '2026-11-27T00:00:00Z', 'indexed', replace(hex(zeroblob(512)), '0', 'a') FROM n; COMMIT; PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        drop(conn);
+        let mut timings = Vec::new();
+        for _ in 0..3 {
+            let started = std::time::Instant::now();
+            let conn = Connection::open(&path).unwrap();
+            run_migrations(&conn).unwrap();
+            create_indexes(&conn).unwrap();
+            timings.push(started.elapsed().as_millis());
+        }
+        println!("STARTUP_BENCH documents=300000 warm_migration_ms={timings:?}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn converts_windows_system_time_to_rfc3339() {
         assert_eq!(
             parse_legacy_system_time("SystemTime { intervals: 116444736000000000 }"),
@@ -441,6 +483,11 @@ mod tests {
         )
         .unwrap();
 
+        conn.execute(
+            "DELETE FROM settings WHERE key = 'legacy_timestamps_v1'",
+            [],
+        )
+        .unwrap();
         run_migrations(&conn).unwrap();
         let timestamps: (String, String) = conn
             .query_row(
@@ -451,6 +498,29 @@ mod tests {
             .unwrap();
         assert_eq!(timestamps.0, "1970-01-01T00:00:00.000Z");
         assert_eq!(timestamps.1, "1970-01-01T00:00:01.000Z");
+    }
+
+    #[test]
+    fn legacy_timestamp_migration_is_recorded_and_restart_preserves_existing_files() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        let completed: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key='legacy_timestamps_v1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(completed, "complete");
+        conn.execute_batch("INSERT INTO watched_folders(id,path) VALUES(1,'library');
+            INSERT INTO files(folder_id,relative_path,file_name,file_size_bytes,content_hash,file_modified_at,index_status,text_preview) VALUES(1,'a.pdf','a.pdf',100,'hash','2026-11-27','indexed','keepthis');").unwrap();
+        run_migrations(&conn).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT text_preview FROM files", [], |row| row
+                .get::<_, String>(0))
+                .unwrap(),
+            "keepthis"
+        );
     }
 
     #[test]

@@ -1,6 +1,4 @@
 mod background;
-mod updater;
-mod startup;
 mod commands;
 mod db;
 mod indexer;
@@ -8,17 +6,26 @@ mod models;
 mod paddle_runtime;
 mod search;
 mod smb;
+mod startup;
+mod updater;
 mod utils;
 mod watcher;
 
 use commands::ocr_control::OcrTaskManager;
 use commands::rapid_ocr::RapidOcrWorkerPool;
-use tauri::Manager;
 use std::path::{Path, PathBuf};
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_sql::Builder::new().build())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
@@ -107,7 +114,9 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-fn find_elasticsearch_distribution<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<PathBuf> {
+fn find_elasticsearch_distribution<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Option<PathBuf> {
     let mut candidates = Vec::new();
     if let Ok(resource_dir) = app.path().resource_dir() {
         candidates.push(resource_dir.join("resources").join("elasticsearch"));
@@ -121,7 +130,9 @@ fn find_elasticsearch_distribution<R: tauri::Runtime>(app: &tauri::AppHandle<R>)
             .join("elasticsearch"),
     );
 
-    candidates.into_iter().find_map(resolve_elasticsearch_distribution)
+    candidates
+        .into_iter()
+        .find_map(resolve_elasticsearch_distribution)
 }
 
 fn resolve_elasticsearch_distribution(path: PathBuf) -> Option<PathBuf> {

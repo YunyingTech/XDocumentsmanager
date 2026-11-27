@@ -305,6 +305,10 @@ export interface WindowsOcrProgress {
   progress: number;
 }
 export interface StartupStatus {
+  completed_steps?: number;
+  elapsed_ms?: number;
+  processed?: number;
+  total?: number | null;
   phase: 'database' | 'local_index' | 'search_starting' | 'search_sync' | 'ready' | 'failed';
   ready: boolean;
   error: string | null;

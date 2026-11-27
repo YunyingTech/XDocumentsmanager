@@ -1,5 +1,5 @@
 export const APP_NAME = 'XDocuments Manager';
-export const APP_VERSION = '0.1.13';
+export const APP_VERSION = '0.1.14';
 
 export const DEFAULT_PAGE_SIZE = 50;
 export const DEBOUNCE_MS = 300;

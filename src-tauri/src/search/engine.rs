@@ -1,8 +1,12 @@
+use std::collections::BTreeSet;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex,
+};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 use tantivy::collector::{Count, TopDocs};
 use tantivy::directory::MmapDirectory;
@@ -43,6 +47,13 @@ pub struct SearchPage {
 
 const ELASTIC_SYNC_MARKER_VERSION: &str = "2";
 
+#[derive(Default)]
+struct PendingElasticSync {
+    active: bool,
+    files: BTreeSet<i64>,
+    folders: BTreeSet<i64>,
+}
+
 pub struct SearchEngine {
     index: Index,
     reader: IndexReader,
@@ -51,6 +62,8 @@ pub struct SearchEngine {
     elastic: ElasticRuntime,
     elastic_sync_marker: PathBuf,
     elastic_sync_generation: Mutex<u64>,
+    pending_elastic: Mutex<PendingElasticSync>,
+    elastic_search_enabled: AtomicBool,
 }
 
 impl SearchEngine {
@@ -88,6 +101,8 @@ impl SearchEngine {
             elastic: ElasticRuntime::new()?,
             elastic_sync_marker: path.join("elasticsearch-sync-v2"),
             elastic_sync_generation: Mutex::new(0),
+            pending_elastic: Mutex::new(PendingElasticSync::default()),
+            elastic_search_enabled: AtomicBool::new(true),
         })
     }
 
@@ -105,7 +120,27 @@ impl SearchEngine {
     }
 
     pub fn backend_status(&self) -> SearchBackendStatus {
-        self.elastic.status()
+        let mut status = self.elastic.status();
+        if !self.elastic_search_enabled.load(Ordering::Acquire) {
+            status.connected = false;
+            status.backend = "tantivy-fallback".into();
+        }
+        status
+    }
+
+    pub fn prepare_background_sync(&self) {
+        let mut pending = self.pending_elastic.lock().unwrap();
+        pending.active = true;
+        self.elastic_search_enabled.store(false, Ordering::Release);
+    }
+
+    pub fn finish_background_sync_failed(&self) {
+        let mut pending = self.pending_elastic.lock().unwrap();
+        pending.active = false;
+        pending.files.clear();
+        pending.folders.clear();
+        self.elastic_search_enabled.store(false, Ordering::Release);
+        self.elastic.deactivate();
     }
 
     pub fn is_empty(&self) -> bool {
@@ -125,6 +160,7 @@ impl SearchEngine {
         if documents.is_empty() && deleted_file_ids.is_empty() {
             return Ok(());
         }
+        let mut pending = self.pending_elastic.lock().map_err(|e| e.to_string())?;
         let sync_generation = self.mark_elasticsearch_dirty();
         {
             let mut writer = self.writer.lock().map_err(|e| e.to_string())?;
@@ -140,6 +176,12 @@ impl SearchEngine {
             writer.commit().map_err(|e| e.to_string())?;
             self.reader.reload().map_err(|e| e.to_string())?;
         }
+        if pending.active {
+            pending.files.extend(documents.iter().map(|d| d.file_id));
+            pending.files.extend(deleted_file_ids.iter().copied());
+            return Ok(());
+        }
+        drop(pending);
         match self.elastic.apply_changes(documents, deleted_file_ids) {
             Ok(true) => self.mark_elasticsearch_synced(sync_generation),
             Ok(false) => {
@@ -158,11 +200,18 @@ impl SearchEngine {
     }
 
     pub fn delete_folder(&self, folder_id: i64) -> Result<(), String> {
+        let mut pending = self.pending_elastic.lock().map_err(|e| e.to_string())?;
         let sync_generation = self.mark_elasticsearch_dirty();
         let mut writer = self.writer.lock().map_err(|e| e.to_string())?;
         writer.delete_term(Term::from_field_i64(self.fields.folder_id, folder_id));
         writer.commit().map_err(|e| e.to_string())?;
         self.reader.reload().map_err(|e| e.to_string())?;
+        drop(writer);
+        if pending.active {
+            pending.folders.insert(folder_id);
+            return Ok(());
+        }
+        drop(pending);
         if self.elastic.delete_folder(folder_id)? {
             self.mark_elasticsearch_synced(sync_generation)?;
         }
@@ -170,11 +219,36 @@ impl SearchEngine {
     }
 
     pub fn rebuild(&self, conn: &Connection) -> Result<(), String> {
+        self.rebuild_with_progress(conn, |_, _| {})
+    }
+
+    pub fn rebuild_with_progress(
+        &self,
+        conn: &Connection,
+        mut progress: impl FnMut(u64, u64),
+    ) -> Result<(), String> {
+        let total: u64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE index_status = 'indexed'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let mut pending = self.pending_elastic.lock().map_err(|e| e.to_string())?;
+        let mut processed = 0;
+        progress(0, total);
         let sync_generation = self.mark_elasticsearch_dirty();
         {
             let mut writer = self.writer.lock().map_err(|e| e.to_string())?;
             writer.delete_all_documents().map_err(|e| e.to_string())?;
             for_each_document(conn, |document| {
+                if pending.active {
+                    pending.files.insert(document.file_id);
+                }
+                processed += 1;
+                if processed % 500 == 0 {
+                    progress(processed, total);
+                }
                 writer
                     .add_document(self.to_document(document))
                     .map(|_| ())
@@ -183,32 +257,93 @@ impl SearchEngine {
             writer.commit().map_err(|e| e.to_string())?;
             self.reader.reload().map_err(|e| e.to_string())?;
         }
+        progress(processed, total);
+        if pending.active {
+            return Ok(());
+        }
+        drop(pending);
         if self.elastic.rebuild(conn)? {
             self.mark_elasticsearch_synced(sync_generation)?;
         }
         Ok(())
     }
 
-    pub fn synchronize_elasticsearch(&self, conn: &Connection) -> Result<bool, String> {
-        let expected = conn
+    pub fn synchronize_elasticsearch_with_progress(
+        &self,
+        conn: &Connection,
+        mut progress: impl FnMut(u64, u64),
+    ) -> Result<bool, String> {
+        // Keep one SQLite snapshot for the bulk copy, then replay IDs changed while copying.
+        // The app's primary connection and local search remain available throughout.
+        let snapshot = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        let expected: u64 = snapshot
             .query_row(
                 "SELECT COUNT(*) FROM files WHERE index_status = 'indexed'",
                 [],
-                |row| row.get::<_, u64>(0),
+                |row| row.get(0),
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(|e| e.to_string())?;
         let actual = self.elastic.document_count()?;
         let marker_current = std::fs::read_to_string(&self.elastic_sync_marker)
             .is_ok_and(|value| value.trim() == ELASTIC_SYNC_MARKER_VERSION);
-        if !elasticsearch_sync_required(expected, actual, marker_current) {
-            return Ok(false);
+        let required = elasticsearch_sync_required(expected, actual, marker_current);
+        if required {
+            self.mark_elasticsearch_dirty();
+            if !self
+                .elastic
+                .rebuild_with_progress(&snapshot, &mut progress)?
+            {
+                return Err("Search service disconnected during synchronization".into());
+            }
+        } else {
+            progress(expected, expected);
         }
-        let sync_generation = self.mark_elasticsearch_dirty();
-        if self.elastic.rebuild(conn)? {
-            self.mark_elasticsearch_synced(sync_generation)?;
-            return Ok(true);
+        snapshot.commit().map_err(|e| e.to_string())?;
+        loop {
+            let mut pending = self.pending_elastic.lock().map_err(|e| e.to_string())?;
+            if pending.files.is_empty() && pending.folders.is_empty() {
+                let generation = *self
+                    .elastic_sync_generation
+                    .lock()
+                    .map_err(|e| e.to_string())?;
+                self.mark_elasticsearch_synced(generation)?;
+                pending.active = false;
+                self.elastic_search_enabled.store(true, Ordering::Release);
+                break;
+            }
+            let files = std::mem::take(&mut pending.files);
+            let folders = std::mem::take(&mut pending.folders);
+            drop(pending);
+            for folder in folders {
+                if !self.elastic.delete_folder(folder)? {
+                    return Err("Search service disconnected during folder catch-up".into());
+                }
+            }
+            let mut documents = Vec::new();
+            let mut deletes = Vec::new();
+            for id in files {
+                let document = conn.query_row(
+                    "SELECT id, folder_id, file_name, COALESCE(text_preview, ''), COALESCE(pdf_title, ''), COALESCE(pdf_author, ''), COALESCE(pdf_keywords, ''), file_extension, file_modified_at, file_size_bytes FROM files WHERE id = ?1 AND index_status = 'indexed'",
+                    [id], row_to_document,
+                ).optional().map_err(|e| e.to_string())?;
+                if let Some(document) = document {
+                    documents.push(document);
+                } else {
+                    deletes.push(id);
+                }
+                if documents.len() + deletes.len() >= 100 {
+                    if !self.elastic.apply_changes(&documents, &deletes)? {
+                        return Err("Search service disconnected during catch-up".into());
+                    }
+                    documents.clear();
+                    deletes.clear();
+                }
+            }
+            if !self.elastic.apply_changes(&documents, &deletes)? {
+                return Err("Search service disconnected during catch-up".into());
+            }
         }
-        Ok(false)
+        Ok(required)
     }
 
     pub fn search(
@@ -218,6 +353,9 @@ impl SearchEngine {
         offset: usize,
         limit: usize,
     ) -> Result<SearchPage, String> {
+        if !self.elastic_search_enabled.load(Ordering::Acquire) {
+            return self.search_embedded(query_text, filters, offset, limit);
+        }
         match self.elastic.search(query_text, filters, offset, limit) {
             Ok(Some(hits)) => return Ok(hits),
             Ok(None) => {}
@@ -751,6 +889,152 @@ mod tests {
             "## Page 1\n\n中国科学院 OCR 2026"
         );
         assert_eq!(normalize_cjk_ocr_spacing("云 上  i 西 安"), "云上  i 西安");
+    }
+
+    #[test]
+    fn local_search_remains_available_and_changes_are_queued_during_service_startup() {
+        let path =
+            std::env::temp_dir().join(format!("xdocuments-local-first-{}", uuid::Uuid::new_v4()));
+        let engine = SearchEngine::open(&path).unwrap();
+        engine.prepare_background_sync();
+        let document = SearchDocument {
+            file_id: 7,
+            folder_id: 1,
+            file_name: "available.pdf".into(),
+            content: "localavailable".into(),
+            title: String::new(),
+            author: String::new(),
+            keywords: String::new(),
+            extension: "pdf".into(),
+            modified_at: "2026-11-27".into(),
+            size_bytes: 100,
+        };
+        engine.upsert(document).unwrap();
+        assert_eq!(
+            engine.search("localavailable", None, 0, 10).unwrap().total,
+            1
+        );
+        assert!(!engine.backend_status().connected);
+        assert!(engine.pending_elastic.lock().unwrap().files.contains(&7));
+        engine.delete_folder(1).unwrap();
+        assert_eq!(
+            engine.search("localavailable", None, 0, 10).unwrap().total,
+            0
+        );
+        assert!(engine.pending_elastic.lock().unwrap().folders.contains(&1));
+        engine.finish_background_sync_failed();
+        assert!(!engine.pending_elastic.lock().unwrap().active);
+        assert!(engine.pending_elastic.lock().unwrap().files.is_empty());
+        assert!(engine.search("anything", None, 0, 10).is_ok());
+        drop(engine);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    #[ignore = "requires XDOCUMENTS_ELASTICSEARCH_HOME; starts and restarts real Elasticsearch"]
+    fn background_sync_replays_changes_and_reuses_persisted_indexes() {
+        let path = std::env::temp_dir().join(format!(
+            "xdocuments-background-sync-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        let conn = Connection::open(path.join("library.db")).unwrap();
+        crate::db::schema::run_migrations(&conn).unwrap();
+        conn.execute_batch("INSERT INTO watched_folders(id,path) VALUES(1,'first'),(2,'second');
+            INSERT INTO files(id,folder_id,relative_path,file_name,file_size_bytes,content_hash,file_modified_at,index_status,text_preview) VALUES
+            (1,1,'delete.pdf','delete.pdf',100,'a','2026-11-27','indexed','olddelete'),
+            (2,1,'update.pdf','update.pdf',100,'b','2026-11-27','indexed','oldcontent'),
+            (3,2,'folder.pdf','folder.pdf',100,'c','2026-11-27','indexed','foldergone');").unwrap();
+        let engine = SearchEngine::open(&path.join("tantivy")).unwrap();
+        engine.rebuild(&conn).unwrap();
+        let meta = std::fs::read(path.join("tantivy/meta.json")).unwrap();
+        engine.configure_elasticsearch(
+            PathBuf::from(std::env::var("XDOCUMENTS_ELASTICSEARCH_HOME").unwrap()),
+            path.join("es-data"),
+            path.join("logs"),
+        );
+        engine.prepare_background_sync();
+        let started = std::time::Instant::now();
+        assert_eq!(engine.search("oldcontent", None, 0, 10).unwrap().total, 1);
+        println!(
+            "LOCAL_SEARCH_DURING_STARTUP elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
+        engine.start_elasticsearch().unwrap();
+        println!(
+            "BACKGROUND_SERVICE_READY elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
+        assert!(!engine.backend_status().connected);
+        let reader = Connection::open_with_flags(
+            path.join("library.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let mut changed = false;
+        let mut progress = Vec::new();
+        let rebuilt = engine.synchronize_elasticsearch_with_progress(&reader, |done,total| {
+            progress.push((done,total));
+            if !changed {
+                changed = true;
+                // This write would fail if bulk synchronization held the app's DB connection or a rollback journal reader.
+                conn.execute_batch("UPDATE files SET text_preview='updatedunique' WHERE id=2;
+                    DELETE FROM files WHERE id=1;
+                    DELETE FROM watched_folders WHERE id=2;
+                    INSERT INTO files(id,folder_id,relative_path,file_name,file_size_bytes,content_hash,file_modified_at,index_status,text_preview) VALUES(4,1,'new.pdf','new.pdf',100,'d','2026-11-27','indexed','newunique');").unwrap();
+                engine.apply_changes(&[document_for_file(&conn,2).unwrap(), document_for_file(&conn,4).unwrap()], &[1]).unwrap();
+                engine.delete_folder(2).unwrap();
+                assert_eq!(engine.search("updatedunique",None,0,10).unwrap().total,1);
+                assert_eq!(engine.search("newunique",None,0,10).unwrap().total,1);
+            }
+        }).unwrap();
+        assert!(rebuilt);
+        assert_eq!(progress.first(), Some(&(0, 3)));
+        assert_eq!(progress.last(), Some(&(3, 3)));
+        assert!(engine.backend_status().connected);
+        for (query, count) in [
+            ("updatedunique", 1),
+            ("newunique", 1),
+            ("oldcontent", 0),
+            ("olddelete", 0),
+            ("foldergone", 0),
+        ] {
+            assert_eq!(
+                engine.search(query, None, 0, 10).unwrap().total,
+                count,
+                "{query}"
+            );
+        }
+        // Local mutations changed this index; capture the final version before a normal restart.
+        assert_ne!(meta, std::fs::read(path.join("tantivy/meta.json")).unwrap());
+        let final_meta = std::fs::read(path.join("tantivy/meta.json")).unwrap();
+        drop(engine);
+        let engine = SearchEngine::open(&path.join("tantivy")).unwrap();
+        engine.configure_elasticsearch(
+            PathBuf::from(std::env::var("XDOCUMENTS_ELASTICSEARCH_HOME").unwrap()),
+            path.join("es-data"),
+            path.join("logs"),
+        );
+        engine.prepare_background_sync();
+        engine.start_elasticsearch().unwrap();
+        let mut progress = Vec::new();
+        assert!(!engine
+            .synchronize_elasticsearch_with_progress(&reader, |done, total| progress
+                .push((done, total)))
+            .unwrap());
+        assert_eq!(progress, vec![(2, 2)]);
+        assert_eq!(
+            final_meta,
+            std::fs::read(path.join("tantivy/meta.json")).unwrap()
+        );
+        assert_eq!(engine.search("newunique", None, 0, 10).unwrap().total, 1);
+        println!(
+            "WARM_RESTART synchronized_without_rebuild=true documents=2 local_index_unchanged=true"
+        );
+        drop(engine);
+        drop(reader);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(path);
     }
 
     #[test]

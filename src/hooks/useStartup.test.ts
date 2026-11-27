@@ -41,3 +41,26 @@ it('does not overlap slow status requests and stops on unmount', async () => {
   await act(() => vi.advanceTimersByTimeAsync(5000));
   expect(read).toHaveBeenCalledTimes(1);
 });
+
+
+it('keeps polling background search after the library opens', async () => {
+  read.mockResolvedValueOnce({ phase: 'search_starting', ready: true, error: null, completed_steps: 2 })
+    .mockResolvedValueOnce({ phase: 'search_sync', ready: true, error: null, completed_steps: 3, processed: 500, total: 1000 })
+    .mockResolvedValue({ phase: 'ready', ready: true, error: null, completed_steps: 4 });
+  const { result } = renderHook(useStartup);
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  expect(result.current.ready).toBe(true);
+  expect(result.current.phase).toBe('search_starting');
+  await act(() => vi.advanceTimersByTimeAsync(500));
+  expect(result.current.processed).toBe(500);
+  await act(() => vi.advanceTimersByTimeAsync(5000));
+  expect(result.current.phase).toBe('ready');
+  expect(read).toHaveBeenCalledTimes(3);
+});
+
+it('preserves the open library if background status polling fails', async () => {
+  read.mockResolvedValueOnce({ phase: 'search_starting', ready: true, error: null }).mockRejectedValue('connection lost');
+  const { result } = renderHook(useStartup);
+  await act(() => vi.advanceTimersByTimeAsync(500));
+  expect(result.current).toEqual({ phase: 'ready', ready: true, error: 'connection lost' });
+});

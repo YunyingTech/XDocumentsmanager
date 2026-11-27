@@ -162,7 +162,12 @@ impl ElasticRuntime {
                     status
                 ));
             }
-            if let Ok(response) = self.client.get(&endpoint).send() {
+            if let Ok(response) = self
+                .client
+                .get(&endpoint)
+                .timeout(Duration::from_secs(3))
+                .send()
+            {
                 if response.status().is_success() {
                     let body: Value = response.json().map_err(|e| e.to_string())?;
                     let version = body
@@ -171,6 +176,22 @@ impl ElasticRuntime {
                         .unwrap_or("unknown")
                         .to_string();
                     self.ensure_index(&endpoint)?;
+                    if !self
+                        .primary_shards_ready(&endpoint)
+                        .unwrap_or_else(|error| {
+                            log::debug!("Waiting for Elasticsearch shard recovery: {error}");
+                            false
+                        })
+                    {
+                        if Instant::now() >= deadline {
+                            return self.fail(
+                                "Elasticsearch primary shards did not recover within 180 seconds"
+                                    .into(),
+                            );
+                        }
+                        std::thread::sleep(Duration::from_millis(500));
+                        continue;
+                    }
                     let endpoint_for_log = endpoint.clone();
                     *self.endpoint.write().map_err(|e| e.to_string())? = Some(endpoint);
                     *self.version.write().map_err(|e| e.to_string())? = Some(version);
@@ -193,6 +214,21 @@ impl ElasticRuntime {
             }
             std::thread::sleep(Duration::from_millis(500));
         }
+    }
+
+    fn primary_shards_ready(&self, endpoint: &str) -> Result<bool, String> {
+        let response = self
+            .client
+            .get(format!("{endpoint}/_cluster/health/{INDEX_NAME}"))
+            .query(&[("wait_for_status", "yellow"), ("timeout", "1s")])
+            .timeout(Duration::from_secs(3))
+            .send()
+            .map_err(|e| e.to_string())?;
+        if !response.status().is_success() {
+            return Ok(false);
+        }
+        let value: Value = response.json().map_err(|e| e.to_string())?;
+        Ok(primary_health_ready(&value))
     }
 
     pub fn apply_changes(
@@ -263,11 +299,25 @@ impl ElasticRuntime {
         Ok(())
     }
 
+    pub fn deactivate(&self) {
+        if let Ok(mut endpoint) = self.endpoint.write() {
+            *endpoint = None;
+        }
+    }
+
     pub fn rebuild(&self, conn: &rusqlite::Connection) -> Result<bool, String> {
+        self.rebuild_with_progress(conn, |_, _| {})
+    }
+
+    pub fn rebuild_with_progress(
+        &self,
+        conn: &rusqlite::Connection,
+        progress: impl FnMut(u64, u64),
+    ) -> Result<bool, String> {
         let Some(endpoint) = self.endpoint()? else {
             return Ok(false);
         };
-        if let Err(error) = self.rebuild_inner(conn, &endpoint) {
+        if let Err(error) = self.rebuild_inner(conn, &endpoint, progress) {
             return self.disable(format!(
                 "Elasticsearch rebuild failed; embedded search is active: {error}"
             ));
@@ -293,7 +343,22 @@ impl ElasticRuntime {
             .ok_or_else(|| "Elasticsearch count response has no count".to_string())
     }
 
-    fn rebuild_inner(&self, conn: &rusqlite::Connection, endpoint: &str) -> Result<(), String> {
+    fn rebuild_inner(
+        &self,
+        conn: &rusqlite::Connection,
+        endpoint: &str,
+        mut progress: impl FnMut(u64, u64),
+    ) -> Result<(), String> {
+        let total: u64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE index_status = 'indexed'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let mut processed = 0;
+        let mut batch_count = 0;
+        progress(0, total);
         let delete = self
             .client
             .delete(format!("{}/{}", endpoint, INDEX_NAME))
@@ -313,7 +378,11 @@ impl ElasticRuntime {
             let source = serde_json::to_string(&document).map_err(|e| e.to_string())?;
             if !body.is_empty() && body.len() + action.len() + source.len() + 2 > 8 * 1024 * 1024 {
                 self.send_bulk(endpoint, std::mem::take(&mut body), false)?;
+                processed += batch_count;
+                batch_count = 0;
+                progress(processed, total);
             }
+            batch_count += 1;
             body.push_str(&action);
             body.push('\n');
             body.push_str(&source);
@@ -322,6 +391,7 @@ impl ElasticRuntime {
         })?;
         if !body.is_empty() {
             self.send_bulk(endpoint, body, false)?;
+            processed += batch_count;
         }
         let refresh = self
             .client
@@ -329,6 +399,7 @@ impl ElasticRuntime {
             .send()
             .map_err(|e| e.to_string())?;
         ensure_success(refresh, "refresh Elasticsearch index")?;
+        progress(processed, total);
         Ok(())
     }
 
@@ -530,6 +601,14 @@ impl ElasticRuntime {
     }
 }
 
+fn primary_health_ready(value: &Value) -> bool {
+    value.get("timed_out").and_then(Value::as_bool) == Some(false)
+        && matches!(
+            value.get("status").and_then(Value::as_str),
+            Some("yellow" | "green")
+        )
+}
+
 fn bulk_has_fatal_errors(value: &Value) -> bool {
     if value.get("errors").and_then(Value::as_bool) != Some(true) {
         return false;
@@ -703,7 +782,9 @@ fn copy_directory(source: &Path, destination: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bulk_has_fatal_errors, prepare_runtime_config, ElasticRuntime};
+    use super::{
+        bulk_has_fatal_errors, prepare_runtime_config, primary_health_ready, ElasticRuntime,
+    };
     use crate::models::{SearchFilters, SearchScope};
     use serde_json::{json, Value};
 
@@ -736,6 +817,25 @@ mod tests {
         )));
         assert!(destination.join("elasticsearch.yml").is_file());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn root_response_does_not_imply_recovered_primary_shards() {
+        assert!(!primary_health_ready(
+            &json!({"version":{"number":"8.17.0"}})
+        ));
+        assert!(!primary_health_ready(
+            &json!({"status":"red","timed_out":false})
+        ));
+        assert!(!primary_health_ready(
+            &json!({"status":"yellow","timed_out":true})
+        ));
+        assert!(primary_health_ready(
+            &json!({"status":"yellow","timed_out":false})
+        ));
+        assert!(primary_health_ready(
+            &json!({"status":"green","timed_out":false})
+        ));
     }
 
     #[test]

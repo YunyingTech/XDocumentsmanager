@@ -1,6 +1,7 @@
 use crate::{db::Database, search::SearchEngine};
 use serde::Serialize;
 use std::sync::Mutex;
+use std::time::Instant;
 use tauri::{AppHandle, Manager, State};
 
 #[derive(Clone, Debug, Serialize)]
@@ -8,17 +9,28 @@ pub struct StartupStatus {
     pub phase: &'static str,
     pub ready: bool,
     pub error: Option<String>,
+    pub completed_steps: u8,
+    pub elapsed_ms: u64,
+    pub processed: u64,
+    pub total: Option<u64>,
 }
 
-pub struct StartupState(Mutex<StartupStatus>);
+pub struct StartupState(Mutex<StartupStatus>, Instant);
 
 impl Default for StartupState {
     fn default() -> Self {
-        Self(Mutex::new(StartupStatus {
-            phase: "database",
-            ready: false,
-            error: None,
-        }))
+        Self(
+            Mutex::new(StartupStatus {
+                phase: "database",
+                ready: false,
+                error: None,
+                completed_steps: 0,
+                elapsed_ms: 0,
+                processed: 0,
+                total: None,
+            }),
+            Instant::now(),
+        )
     }
 }
 
@@ -31,14 +43,40 @@ impl StartupState {
             phase,
             ready,
             error,
+            completed_steps: match phase {
+                "database" => 0,
+                "local_index" => 1,
+                "search_starting" => 2,
+                "search_sync" => 3,
+                "ready" => 4,
+                _ => 0,
+            },
+            elapsed_ms: self.1.elapsed().as_millis() as u64,
+            processed: 0,
+            total: None,
         };
+        log::info!(
+            "Startup phase={phase} library_ready={ready} elapsed_ms={}",
+            self.1.elapsed().as_millis()
+        );
+    }
+
+    fn progress(&self, processed: u64, total: u64) {
+        let mut status = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        status.processed = processed;
+        status.total = Some(total);
     }
 
     fn snapshot(&self) -> StartupStatus {
-        self.0
+        let mut status = self
+            .0
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+            .clone();
+        if status.phase != "ready" && status.phase != "failed" {
+            status.elapsed_ms = self.1.elapsed().as_millis() as u64;
+        }
+        status
     }
 }
 
@@ -61,14 +99,21 @@ pub fn start(app: AppHandle) -> Result<(), std::io::Error> {
                 }
             };
             log::error!("Application startup failed: {error}");
-            app.state::<StartupState>()
-                .update("failed", false, Some(error));
+            let startup = app.state::<StartupState>();
+            let ready = startup.snapshot().ready;
+            if ready {
+                if let Some(engine) = app.try_state::<SearchEngine>() {
+                    engine.finish_background_sync_failed();
+                }
+            }
+            startup.update(if ready { "ready" } else { "failed" }, ready, Some(error));
         })?;
     Ok(())
 }
 
 fn initialize(app: &AppHandle) -> Result<(), String> {
     let startup = app.state::<StartupState>();
+    startup.update("database", false, None);
     let directory = app
         .path()
         .app_data_dir()
@@ -80,7 +125,9 @@ fn initialize(app: &AppHandle) -> Result<(), String> {
     startup.update("local_index", false, None);
     let engine = SearchEngine::open(&directory.join("search-index-v1"))?;
     if engine.is_empty() {
-        engine.rebuild(&database.get_connection())?;
+        engine.rebuild_with_progress(&database.get_connection(), |done, total| {
+            startup.progress(done, total)
+        })?;
     }
     let distribution = crate::find_elasticsearch_distribution(app);
     if let Some(distribution) = distribution.as_ref() {
@@ -91,19 +138,35 @@ fn initialize(app: &AppHandle) -> Result<(), String> {
             elastic_directory.join("logs"),
         );
     }
+    if distribution.is_some() {
+        engine.prepare_background_sync();
+    }
     // Publish dependencies before the frontend is allowed to issue library commands.
     app.manage(database);
     app.manage(engine);
     let engine = app.state::<SearchEngine>();
     let mut warning = None;
     if distribution.is_some() {
-        startup.update("search_starting", false, None);
+        // The persisted local index is already usable; JVM startup must not gate the library.
+        startup.update("search_starting", true, None);
         match engine.start_elasticsearch() {
             Ok(()) => {
-                startup.update("search_sync", false, None);
+                startup.update("search_sync", true, None);
+                // An independent WAL reader keeps library commands and OCR free during bulk sync.
                 let database = app.state::<Database>();
-                let connection = database.get_connection();
-                if let Err(error) = engine.synchronize_elasticsearch(&connection) {
+                let connection = rusqlite::Connection::open_with_flags(
+                    database.path(),
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+                .map_err(|e| e.to_string())?;
+                connection
+                    .busy_timeout(std::time::Duration::from_secs(10))
+                    .map_err(|e| e.to_string())?;
+                if let Err(error) = engine
+                    .synchronize_elasticsearch_with_progress(&connection, |done, total| {
+                        startup.progress(done, total)
+                    })
+                {
                     warning = Some(error);
                 }
             }
@@ -113,6 +176,7 @@ fn initialize(app: &AppHandle) -> Result<(), String> {
         log::warn!("Bundled Elasticsearch distribution was not found; using embedded search");
     }
     if let Some(error) = warning.as_ref() {
+        engine.finish_background_sync_failed();
         log::error!("Elasticsearch startup: {error}");
     }
     startup.update("ready", true, warning);
@@ -126,6 +190,21 @@ fn initialize(app: &AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn library_opens_before_optional_search_and_tracks_real_counts() {
+        let state = StartupState::default();
+        state.update("local_index", false, None);
+        assert_eq!(state.snapshot().completed_steps, 1);
+        state.update("search_starting", true, None);
+        assert!(state.snapshot().ready);
+        assert_eq!(state.snapshot().completed_steps, 2);
+        state.update("search_sync", true, None);
+        state.progress(500, 1000);
+        assert_eq!(state.snapshot().processed, 500);
+        assert_eq!(state.snapshot().total, Some(1000));
+        assert_eq!(state.snapshot().completed_steps, 3);
+    }
 
     #[test]
     fn reports_progress_and_preserves_startup_failure() {

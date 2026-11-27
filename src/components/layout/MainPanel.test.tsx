@@ -29,3 +29,10 @@ it('shows an actionable failure instead of an endless spinner', () => {
   fireEvent.click(screen.getByRole('button', { name: 'Runtime logs' }));
   expect(screen.getByText('Log reader mounted')).toBeInTheDocument();
 });
+
+
+it('opens the library while search continues preparing in the background', () => {
+  render(<MainPanel startup={{ phase: 'search_starting', ready: true, error: null }} />);
+  expect(screen.getByText('File library mounted')).toBeInTheDocument();
+  expect(screen.queryByText('Opening your library…')).not.toBeInTheDocument();
+});

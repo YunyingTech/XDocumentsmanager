@@ -77,6 +77,8 @@ jobs:
           $env:XDOCUMENTS_ELASTICSEARCH_HOME = (Resolve-Path src-tauri/resources/elasticsearch/runtime).Path
           cargo test --manifest-path src-tauri/Cargo.toml scoped_search_matches_real -- --ignored --nocapture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --manifest-path src-tauri/Cargo.toml background_sync_replays_changes_and_reuses_persisted_indexes -- --ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Stage release assets
         shell: pwsh

@@ -1,3 +1,5 @@
+import type { StartupStatus } from '../../types';
+import { StartupProgress } from './StartupProgress';
 import { AlertCircle, Database, Download, HardDrive, Loader2, RotateCcw } from 'lucide-react';
 import { useFolderStore } from '../../stores/folderStore';
 import { formatFileSize } from '../../lib/format';
@@ -33,7 +35,7 @@ function UpdateStatusControl() {
   </span>;
 }
 
-export function StatusBar() {
+export function StatusBar({ startup }: { startup?: StartupStatus }) {
   const { locale, t } = useI18n();
   const folders = useFolderStore((s) => s.folders);
   const totalFiles = folders.reduce((sum, folder) => sum + folder.total_files, 0);
@@ -45,7 +47,7 @@ export function StatusBar() {
         <span className="flex items-center gap-1.5 whitespace-nowrap"><Database size={13} />{t('status.documents', { count: totalFiles.toLocaleString(locale) })}</span>
         {totalSize > 0 && <span className="hidden items-center gap-1.5 whitespace-nowrap sm:flex"><HardDrive size={13} /><span className="tabular-nums">{formatFileSize(totalSize)}</span></span>}
       </div>
-      <div className="ml-auto flex h-full items-center"><UpdateStatusControl /><TaskCenter /></div>
+      <div className="ml-auto flex h-full items-center">{startup && startup.ready && (startup.phase !== 'ready' || startup.error) && <StartupProgress status={startup} compact />}<UpdateStatusControl /><TaskCenter /></div>
     </footer>
   );
 }
